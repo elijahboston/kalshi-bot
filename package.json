@@ -1,0 +1,22 @@
+{
+  "name": "kalshi-climate-bot",
+  "private": true,
+  "workspaces": [
+    "app/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "bot": "bun run app/cli/src/index.tsx",
+    "db:generate": "bun run --filter @kcb/db generate",
+    "db:migrate": "bun run --filter @kcb/db migrate",
+    "db:studio": "bunx drizzle-kit studio --config packages/db/drizzle.config.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "clean": "rm -rf node_modules app/*/node_modules packages/*/node_modules"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.7.0"
+  },
+  "module": "index.ts",
+  "type": "module"
+}

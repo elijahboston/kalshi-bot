@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "paths": {
+      "@kcb/db": ["./packages/db/src/index.ts"],
+      "@kcb/db/*": ["./packages/db/src/*"],
+      "@kcb/config": ["./packages/config/src/index.ts"],
+      "@kcb/config/*": ["./packages/config/src/*"],
+      "@kcb/kalshi-client": ["./packages/kalshi-client/src/index.ts"],
+      "@kcb/kalshi-client/*": ["./packages/kalshi-client/src/*"],
+      "@kcb/engine": ["./app/engine/index.ts"],
+      "@kcb/engine/*": ["./app/engine/*"],
+      "@kcb/shared": ["./shared/index.ts"],
+      "@kcb/shared/*": ["./shared/*"]
+    },
+    "baseUrl": "."
+  },
+  "include": [
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "packages/**/*.ts",
+    "shared/**/*.ts"
+  ],
+  "exclude": ["node_modules", "data", "logs"]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@kcb/kalshi-client",
+  "private": true,
+  "version": "0.0.1",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@kcb/config": "workspace:*"
+  }
+}

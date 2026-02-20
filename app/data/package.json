@@ -1,0 +1,11 @@
+{
+  "name": "@kcb/data",
+  "private": true,
+  "version": "0.0.1",
+  "main": "index.ts",
+  "types": "index.ts",
+  "dependencies": {
+    "@kcb/db": "workspace:*",
+    "@kcb/config": "workspace:*"
+  }
+}
