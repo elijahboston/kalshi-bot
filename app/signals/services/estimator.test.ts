@@ -39,21 +39,27 @@ describe("std", () => {
   });
 });
 
+/** Create a mock DB that returns given rows for both .limit() and non-.limit() queries */
+function mockDb(rows: any[] = []) {
+  return {
+    select: () => ({
+      from: () => ({
+        where: (..._args: any[]) => {
+          const result = Promise.resolve(rows);
+          // Support both .where().limit() and .where() without limit
+          (result as any).limit = () => Promise.resolve(rows);
+          return result;
+        },
+      }),
+    }),
+  };
+}
+
 describe("ProbabilityEstimator", () => {
   test("estimate computes bracket probability from ensemble", async () => {
-    // Mock getDb to return no bias correction
-    const { getDb } = await import("@kcb/db");
     mock.module("@kcb/db", () => ({
       ...require("@kcb/db"),
-      getDb: () => ({
-        select: () => ({
-          from: () => ({
-            where: () => ({
-              limit: () => Promise.resolve([]),
-            }),
-          }),
-        }),
-      }),
+      getDb: () => mockDb([]),
     }));
 
     const estimator = new ProbabilityEstimator();
@@ -63,6 +69,7 @@ describe("ProbabilityEstimator", () => {
     const market = {
       ticker: "KXHIGHNY-25FEB19-B30",
       stationId: "KNYC",
+      category: "high_temp",
       bracketLow: 30,
       bracketHigh: 31,
       targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
@@ -76,20 +83,14 @@ describe("ProbabilityEstimator", () => {
     expect(result.confidence).toBeGreaterThan(0);
     expect(result.confidence).toBeLessThanOrEqual(1);
     expect(result.reasoning.membersInBracket).toBe(5);
+    // No calibration data → null
+    expect(result.reasoning.historicalHitRate).toBeNull();
   });
 
   test("estimate with no members in bracket returns 0", async () => {
     mock.module("@kcb/db", () => ({
       ...require("@kcb/db"),
-      getDb: () => ({
-        select: () => ({
-          from: () => ({
-            where: () => ({
-              limit: () => Promise.resolve([]),
-            }),
-          }),
-        }),
-      }),
+      getDb: () => mockDb([]),
     }));
 
     const estimator = new ProbabilityEstimator();
@@ -97,6 +98,7 @@ describe("ProbabilityEstimator", () => {
     const market = {
       ticker: "KXHIGHNY-25FEB19-B30",
       stationId: "KNYC",
+      category: "high_temp",
       bracketLow: 30,
       bracketHigh: 31,
       targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
@@ -113,5 +115,132 @@ describe("ProbabilityEstimator", () => {
     expect(estimator.estimate(market, [1, 2, 3])).rejects.toThrow(
       "missing station/bracket data"
     );
+  });
+});
+
+describe("getHistoricalHitRate", () => {
+  test("returns null when fewer than 5 calibration rows", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([
+        { actualOutcome: 1 },
+        { actualOutcome: 0 },
+        { actualOutcome: 1 },
+      ]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBeNull();
+  });
+
+  test("returns hit rate when sufficient data", async () => {
+    // 3 hits out of 5 records → 0.6
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+        { actualOutcome: 0 },
+        { actualOutcome: 0 },
+      ]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(0.6);
+  });
+
+  test("returns 1.0 when all outcomes are YES", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+        { actualOutcome: 1 },
+      ]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(1.0);
+  });
+
+  test("returns 0.0 when all outcomes are NO", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([
+        { actualOutcome: 0 },
+        { actualOutcome: 0 },
+        { actualOutcome: 0 },
+        { actualOutcome: 0 },
+        { actualOutcome: 0 },
+      ]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(0.0);
+  });
+
+  test("returns null when no calibration data", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBeNull();
+  });
+
+  test("estimate includes historicalHitRate when data available", async () => {
+    // Return calibration rows for hit rate, empty for bias
+    let callCount = 0;
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => ({
+        select: () => ({
+          from: () => ({
+            where: (..._args: any[]) => {
+              callCount++;
+              // First call is getBiasCorrection (returns .limit()), second is getHistoricalHitRate (returns array)
+              if (callCount === 1) {
+                // Bias query: .where().limit()
+                return { limit: () => Promise.resolve([]) };
+              }
+              // Hit rate query: .where() returns rows directly
+              const rows = [
+                { actualOutcome: 1 },
+                { actualOutcome: 1 },
+                { actualOutcome: 0 },
+                { actualOutcome: 0 },
+                { actualOutcome: 0 },
+              ];
+              const result = Promise.resolve(rows);
+              (result as any).limit = () => Promise.resolve(rows);
+              return result;
+            },
+          }),
+        }),
+      }),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [28, 29, 30, 30, 30, 30, 30, 31, 32, 33];
+    const market = {
+      ticker: "KXHIGHNY-25FEB19-B30",
+      stationId: "KNYC",
+      category: "high_temp",
+      bracketLow: 30,
+      bracketHigh: 31,
+      targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    } as any;
+
+    const result = await estimator.estimate(market, ensemble);
+    expect(result.reasoning.historicalHitRate).toBe(0.4);
   });
 });

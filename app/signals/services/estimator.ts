@@ -1,4 +1,5 @@
-import { getDb, stationBias, eq, and } from "@kcb/db";
+import { getDb, stationBias, calibration, eq, and, gte } from "@kcb/db";
+import { getConfig } from "@kcb/config";
 import { createLogger } from "@kcb/engine";
 import type { Market } from "@kcb/db";
 
@@ -99,7 +100,12 @@ export class ProbabilityEstimator {
         : null,
       correctedEnsembleStats: { mean: corrMean, std: corrStd },
       membersInBracket,
-      historicalHitRate: null, // TODO: compute from calibration table
+      historicalHitRate: await this.getHistoricalHitRate(
+        market.stationId,
+        market.category,
+        market.bracketLow,
+        market.bracketHigh
+      ),
     };
 
     log.debug(
@@ -124,6 +130,42 @@ export class ProbabilityEstimator {
       .limit(1);
 
     return bias || null;
+  }
+
+  /**
+   * Compute historical hit rate from resolved calibration records
+   * for the same station, category, and bracket range.
+   * Returns null if fewer than 5 data points are available.
+   */
+  async getHistoricalHitRate(
+    stationId: string,
+    category: string,
+    bracketLow: number,
+    bracketHigh: number
+  ): Promise<number | null> {
+    const config = getConfig();
+    const db = getDb();
+    const cutoff = new Date(
+      Date.now() - config.calibration.calibrationWindowDays * 86400_000
+    ).toISOString();
+
+    const rows = await db
+      .select({
+        actualOutcome: calibration.actualOutcome,
+      })
+      .from(calibration)
+      .where(
+        and(
+          eq(calibration.stationId, stationId),
+          eq(calibration.category, category),
+          gte(calibration.resolvedAt, cutoff)
+        )
+      );
+
+    if (rows.length < 5) return null;
+
+    const hits = rows.filter((r) => r.actualOutcome === 1).length;
+    return hits / rows.length;
   }
 }
 
