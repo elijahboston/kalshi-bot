@@ -84,7 +84,7 @@ export class ProbabilityEstimator {
     const biasFactor = biasCorrection
       ? Math.min(1, biasCorrection.sampleSize / 30) // More data → more confident
       : 0.5;
-    const ensembleFactor = Math.min(1, ensembleValues.length / 50);
+    const ensembleFactor = Math.min(1, ensembleValues.length / 120);
 
     const confidence = (spreadFactor * 0.4 + biasFactor * 0.4 + ensembleFactor * 0.2);
 

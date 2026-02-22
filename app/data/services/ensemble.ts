@@ -55,7 +55,7 @@ export class EnsembleService {
       const values = await this.fetchOpenMeteo(stationId, targetDate, category);
       await this.cacheValues(stationId, targetDate, forecastType, values);
       log.info(
-        `Fetched ${values.length} GFS members for ${stationId} ${targetDate}`
+        `Fetched ${values.length} ensemble members for ${stationId} ${targetDate}`
       );
       return values;
     } catch (err) {
@@ -81,7 +81,7 @@ export class EnsembleService {
         and(
           eq(weatherForecasts.stationId, stationId),
           eq(weatherForecasts.targetDate, targetDate),
-          eq(weatherForecasts.source, "gfs_ensemble"),
+          eq(weatherForecasts.source, "multi_ensemble"),
           eq(weatherForecasts.forecastType, forecastType)
         )
       )
@@ -113,7 +113,7 @@ export class EnsembleService {
       `https://ensemble-api.open-meteo.com/v1/ensemble` +
       `?latitude=${coords.lat}&longitude=${coords.lon}` +
       `&daily=${variable}` +
-      `&models=gfs_seamless` +
+      `&models=gfs_seamless,icon_seamless,ecmwf_ifs025` +
       `&forecast_days=7` +
       `&temperature_unit=celsius` +
       `&precipitation_unit=mm`;
@@ -137,7 +137,7 @@ export class EnsembleService {
     }
 
     // Collect ensemble member values: keys like temperature_2m_max_member01, ...member30
-    const memberPattern = new RegExp(`^${variable}_member\\d+$`);
+    const memberPattern = new RegExp(`^${variable}_member\\d+`);
     const values: number[] = [];
 
     for (const [key, arr] of Object.entries(data.daily)) {
@@ -194,7 +194,7 @@ export class EnsembleService {
         and(
           eq(weatherForecasts.stationId, stationId),
           eq(weatherForecasts.targetDate, targetDate),
-          eq(weatherForecasts.source, "gfs_ensemble"),
+          eq(weatherForecasts.source, "multi_ensemble"),
           eq(weatherForecasts.forecastType, forecastType)
         )
       );
@@ -203,7 +203,7 @@ export class EnsembleService {
       id,
       stationId,
       targetDate,
-      source: "gfs_ensemble",
+      source: "multi_ensemble",
       forecastType,
       forecastHorizon: Math.max(1, horizon),
       pointForecast: mean,
