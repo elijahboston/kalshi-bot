@@ -30,6 +30,10 @@ export interface ReasoningTrace {
   correctedEnsembleStats: { mean: number; std: number };
   /** How many members fall in the bracket */
   membersInBracket: number;
+  /** CDF-fitted probability for the bracket */
+  cdfProbability: number;
+  /** Raw counting probability (kept for comparison) */
+  countingProbability: number;
   /** Historical verification rate for this bracket */
   historicalHitRate: number | null;
 }
@@ -71,14 +75,30 @@ export class ProbabilityEstimator {
       (v) => v >= market.bracketLow! && v < market.bracketHigh!
     ).length;
 
-    const probability = membersInBracket / correctedValues.length;
-
-    // Step 4: Compute confidence
-    // Higher confidence when: more ensemble members, smaller spread, more bias data
     const rawMean = mean(ensembleValues);
     const rawStd = std(ensembleValues);
     const corrMean = mean(correctedValues);
     const corrStd = std(correctedValues);
+
+    const countingProb = membersInBracket / correctedValues.length;
+
+    // CDF-fitted probability: integrate normal distribution over bracket
+    let cdfProb: number;
+    if (corrStd === 0) {
+      // Zero spread — CDF is undefined, fall back to counting
+      cdfProb = countingProb;
+    } else {
+      cdfProb =
+        normalCdf(market.bracketHigh!, corrMean, corrStd) -
+        normalCdf(market.bracketLow!, corrMean, corrStd);
+    }
+
+    // Blend counting and CDF based on ensemble size
+    const countingWeight = Math.min(1, correctedValues.length / 200);
+    const probability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+
+    // Step 4: Compute confidence
+    // Higher confidence when: more ensemble members, smaller spread, more bias data
 
     const spreadFactor = Math.max(0, 1 - corrStd / 10); // Tighter spread → more confident
     const biasFactor = biasCorrection
@@ -100,6 +120,8 @@ export class ProbabilityEstimator {
         : null,
       correctedEnsembleStats: { mean: corrMean, std: corrStd },
       membersInBracket,
+      cdfProbability: cdfProb,
+      countingProbability: countingProb,
       historicalHitRate: await this.getHistoricalHitRate(
         market.stationId,
         market.category,
@@ -109,8 +131,8 @@ export class ProbabilityEstimator {
     };
 
     log.debug(
-      `${market.ticker}: P=${probability.toFixed(3)}, conf=${confidence.toFixed(2)}, ` +
-      `${membersInBracket}/${correctedValues.length} members in bracket`
+      `${market.ticker}: P=${probability.toFixed(3)} (counting=${countingProb.toFixed(3)}, cdf=${cdfProb.toFixed(3)}), ` +
+      `conf=${confidence.toFixed(2)}, ${membersInBracket}/${correctedValues.length} members in bracket`
     );
 
     return { probability, confidence, ensembleSize: ensembleValues.length, reasoning };
@@ -179,4 +201,25 @@ export function std(values: number[]): number {
   const m = mean(values);
   const variance = values.reduce((sum, v) => sum + (v - m) ** 2, 0) / values.length;
   return Math.sqrt(variance);
+}
+
+/** Abramowitz & Stegun approximation of the error function (max error ~1.5e-7) */
+export function erf(x: number): number {
+  const sign = x >= 0 ? 1 : -1;
+  const a = Math.abs(x);
+
+  const t = 1 / (1 + 0.3275911 * a);
+  const poly =
+    t * (0.254829592 +
+    t * (-0.284496736 +
+    t * (1.421413741 +
+    t * (-1.453152027 +
+    t * 1.061405429))));
+
+  return sign * (1 - poly * Math.exp(-a * a));
+}
+
+/** CDF of the normal distribution */
+export function normalCdf(x: number, mu: number, sigma: number): number {
+  return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
 }

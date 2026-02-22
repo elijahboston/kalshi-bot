@@ -146,6 +146,16 @@ async function explainTicker(ticker: string): Promise<string> {
     lines.push(
       `  Members in bracket: ${reasoning.membersInBracket} / ${reasoning.rawEnsembleStats.count}`
     );
+    if (reasoning.cdfProbability != null) {
+      lines.push(
+        `  CDF probability:    ${(reasoning.cdfProbability * 100).toFixed(1)}%`
+      );
+    }
+    if (reasoning.countingProbability != null) {
+      lines.push(
+        `  Counting prob:      ${(reasoning.countingProbability * 100).toFixed(1)}%`
+      );
+    }
     if (reasoning.historicalHitRate != null) {
       lines.push(
         `  Historical hit rate: ${(reasoning.historicalHitRate * 100).toFixed(1)}%`

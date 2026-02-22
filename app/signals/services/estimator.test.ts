@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { mean, std, ProbabilityEstimator } from "./estimator";
+import { mean, std, erf, normalCdf, ProbabilityEstimator } from "./estimator";
 
 describe("mean", () => {
   test("computes average of values", () => {
@@ -36,6 +36,44 @@ describe("std", () => {
   test("symmetric distribution", () => {
     // [-1, 1] → mean=0, variance=1, std=1
     expect(std([-1, 1])).toBe(1);
+  });
+});
+
+describe("erf", () => {
+  test("erf(0) ≈ 0", () => {
+    expect(erf(0)).toBeCloseTo(0, 8);
+  });
+
+  test("erf(1) ≈ 0.8427", () => {
+    expect(erf(1)).toBeCloseTo(0.8427, 4);
+  });
+
+  test("odd function: erf(-x) === -erf(x)", () => {
+    expect(erf(-1)).toBeCloseTo(-erf(1), 10);
+    expect(erf(-0.5)).toBeCloseTo(-erf(0.5), 10);
+  });
+
+  test("large positive → ≈ 1.0", () => {
+    expect(erf(4)).toBeCloseTo(1.0, 6);
+  });
+});
+
+describe("normalCdf", () => {
+  test("midpoint: normalCdf(mean, mean, std) ≈ 0.5", () => {
+    expect(normalCdf(30, 30, 2)).toBeCloseTo(0.5, 6);
+  });
+
+  test("mean + 1 std ≈ 0.8413", () => {
+    expect(normalCdf(32, 30, 2)).toBeCloseTo(0.8413, 4);
+  });
+
+  test("mean - 1 std ≈ 0.1587", () => {
+    expect(normalCdf(28, 30, 2)).toBeCloseTo(0.1587, 4);
+  });
+
+  test("bracket integral: normalCdf(31,30,2) - normalCdf(29,30,2) ≈ 0.3829", () => {
+    const integral = normalCdf(31, 30, 2) - normalCdf(29, 30, 2);
+    expect(integral).toBeCloseTo(0.3829, 4);
   });
 });
 
@@ -77,8 +115,13 @@ describe("ProbabilityEstimator", () => {
 
     const result = await estimator.estimate(market, ensemble);
 
-    // 5 out of 10 members are in [30, 31)
-    expect(result.probability).toBe(0.5);
+    // 5 out of 10 members are in [30, 31) → counting = 0.5
+    expect(result.reasoning.countingProbability).toBe(0.5);
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0);
+    expect(result.reasoning.cdfProbability).toBeLessThan(1);
+    // Blended probability: 10/200 = 5% counting weight, 95% CDF
+    expect(result.probability).toBeGreaterThan(0);
+    expect(result.probability).toBeLessThan(1);
     expect(result.ensembleSize).toBe(10);
     expect(result.confidence).toBeGreaterThan(0);
     expect(result.confidence).toBeLessThanOrEqual(1);
@@ -87,7 +130,7 @@ describe("ProbabilityEstimator", () => {
     expect(result.reasoning.historicalHitRate).toBeNull();
   });
 
-  test("estimate with no members in bracket returns 0", async () => {
+  test("ensemble far below bracket → probability near 0", async () => {
     mock.module("@kcb/db", () => ({
       ...require("@kcb/db"),
       getDb: () => mockDb([]),
@@ -105,7 +148,10 @@ describe("ProbabilityEstimator", () => {
     } as any;
 
     const result = await estimator.estimate(market, ensemble);
-    expect(result.probability).toBe(0);
+    // Counting = 0, CDF ≈ 0 (mean ~12, bracket 30-31 is many std devs away)
+    expect(result.reasoning.countingProbability).toBe(0);
+    expect(result.reasoning.cdfProbability).toBeCloseTo(0, 4);
+    expect(result.probability).toBeCloseTo(0, 4);
   });
 
   test("estimate throws for missing station/bracket data", async () => {
@@ -115,6 +161,59 @@ describe("ProbabilityEstimator", () => {
     expect(estimator.estimate(market, [1, 2, 3])).rejects.toThrow(
       "missing station/bracket data"
     );
+  });
+
+  test("ensemble centered on bracket → blended between counting and CDF", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    // Mean ≈ 30.5, bracket [30, 31) — well centered
+    const ensemble = Array.from({ length: 50 }, (_, i) => 28 + i * 0.1);
+    const market = {
+      ticker: "KXHIGHNY-25FEB19-B30",
+      stationId: "KNYC",
+      category: "high_temp",
+      bracketLow: 30,
+      bracketHigh: 31,
+      targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    } as any;
+
+    const result = await estimator.estimate(market, ensemble);
+    expect(result.reasoning.countingProbability).toBeGreaterThan(0);
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0);
+    // Blended should be between the two (or equal if they're close)
+    const lo = Math.min(result.reasoning.countingProbability, result.reasoning.cdfProbability);
+    const hi = Math.max(result.reasoning.countingProbability, result.reasoning.cdfProbability);
+    expect(result.probability).toBeGreaterThanOrEqual(lo - 1e-9);
+    expect(result.probability).toBeLessThanOrEqual(hi + 1e-9);
+  });
+
+  test("zero-spread ensemble → falls back to counting", async () => {
+    mock.module("@kcb/db", () => ({
+      ...require("@kcb/db"),
+      getDb: () => mockDb([]),
+    }));
+
+    const estimator = new ProbabilityEstimator();
+    // All values identical and inside bracket
+    const ensemble = [30.5, 30.5, 30.5, 30.5, 30.5];
+    const market = {
+      ticker: "KXHIGHNY-25FEB19-B30",
+      stationId: "KNYC",
+      category: "high_temp",
+      bracketLow: 30,
+      bracketHigh: 31,
+      targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    } as any;
+
+    const result = await estimator.estimate(market, ensemble);
+    // std=0 → cdfProbability falls back to counting
+    expect(result.reasoning.countingProbability).toBe(1);
+    expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
+    expect(result.probability).toBe(1);
   });
 });
 

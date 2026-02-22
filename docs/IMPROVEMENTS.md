@@ -7,38 +7,18 @@ Ordered by expected edge gain. Items 1-3 are signal quality improvements that co
 ## 1. Multi-Model Ensemble Blending
 
 **Impact:** High — biggest single win
-**Status:** Complete
+**Status:** Complete (4947133)
 
-Currently the bot only fetches `gfs_seamless` (31 members) from Open-Meteo. The API also supports `icon_seamless` (~40 members) and `ecmwf_ifs025` (51 members) for free. Blending all three gives ~122 ensemble members instead of 31, improving probability resolution from 1/31 (3.2%) to ~1/122 (0.8%). This matters most for thin-edge trades where distinguishing 62% from 65% is the difference between trading and skipping.
-
-**Files:**
-- `app/data/services/ensemble.ts` — fetch from all three models, merge member arrays
-- May need deduplication or weighting if models have different biases
-
-**Approach:**
-- Change `&models=gfs_seamless` to `&models=gfs_seamless,icon_seamless,ecmwf_ifs025`
-- Open-Meteo returns members keyed like `temperature_2m_max_member01` per model — collect all
-- Consider equal weighting initially, per-model bias correction later
+Fetches GFS (31), ICON (~40), and ECMWF IFS 0.25 (~51) ensembles in a single Open-Meteo call, yielding ~120 members and <1% probability resolution. Relaxed member regex to match model-suffixed keys. Cache source tag changed to `"multi_ensemble"`; confidence scaling denominator bumped to 120.
 
 ---
 
 ## 2. Distribution Fitting Instead of Raw Counting
 
 **Impact:** High
-**Status:** Not started
+**Status:** Complete
 
-The estimator (`estimator.ts:70-74`) counts how many ensemble members land in the bracket: `membersInBracket / correctedValues.length`. With 31 members this is extremely coarse — a bracket gets 0%, 3.2%, 6.4%, etc. Fitting a normal distribution (mean + std are already computed) and using the CDF integral over `[bracketLow, bracketHigh]` gives smooth, continuous probabilities.
-
-This matters most for tail brackets (0-10%, 90-100%) where Kalshi mispricing is richest but raw member counts are 0 or 1.
-
-**Files:**
-- `app/signals/services/estimator.ts` — replace raw counting with `normalCDF(bracketHigh) - normalCDF(bracketLow)`
-
-**Approach:**
-- Implement `normalCDF` using the error function approximation (no dependencies needed)
-- Use bias-corrected ensemble mean and std as distribution parameters
-- Keep raw member count in reasoning for comparison/debugging
-- Blend: use distribution-fitted probability as primary, but if ensemble size > 80 (after multi-model), give more weight to raw counting since the resolution is fine enough
+Fits a normal distribution to the bias-corrected ensemble and integrates the CDF over the bracket range. Blends CDF and raw counting based on ensemble size (`countingWeight = min(1, ensembleSize / 200)`): with ~120 members this is 60/40 counting/CDF, with 31 members it's 15/85. Falls back to pure counting when ensemble std is zero. Both `cdfProbability` and `countingProbability` are tracked in `ReasoningTrace` and displayed in the `explain` command.
 
 ---
 
