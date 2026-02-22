@@ -12,6 +12,9 @@ import type {
   PaginatedResponse,
 } from "./types";
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
 export class KalshiClient {
   private baseUrl: string;
   private apiKey: string;
@@ -45,23 +48,43 @@ export class KalshiClient {
 
     // Auth headers sign against the path portion (no query string)
     const fullPath = new URL(this.baseUrl).pathname + path;
-    const authHeaders = this.buildAuthHeaders(method, fullPath);
 
-    const res = await fetch(url.toString(), {
-      method,
-      headers: {
-        ...authHeaders,
-        "Content-Type": "application/json",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const authHeaders = this.buildAuthHeaders(method, fullPath);
 
-    if (!res.ok) {
+      const res = await fetch(url.toString(), {
+        method,
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      if (res.ok) {
+        return res.json() as T;
+      }
+
+      if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+        const retryAfter = res.headers.get("Retry-After");
+        const delay = retryAfter
+          ? Number(retryAfter) * 1000
+          : BASE_DELAY_MS * 2 ** attempt;
+        await Bun.sleep(delay);
+        continue;
+      }
+
       const text = await res.text();
+      if (res.status === 429 || res.status === 503) {
+        throw new Error(
+          `Kalshi ${method} ${path}: ${res.status} after ${MAX_RETRIES} retries: ${text}`
+        );
+      }
       throw new Error(`Kalshi ${method} ${path}: ${res.status} ${text}`);
     }
 
-    return res.json() as T;
+    // Unreachable, but TypeScript needs it
+    throw new Error(`Kalshi ${method} ${path}: unexpected retry loop exit`);
   }
 
   // ── Markets ───────────────────────────────────────────────
