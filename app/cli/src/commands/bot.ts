@@ -51,7 +51,7 @@ export const botCommands: CommandDef[] = [
     description: "Restart the bot loop",
     handler: async () => {
       orchestrator.stop();
-      await new Promise((r) => setTimeout(r, 500));
+      await Bun.sleep(500);
       orchestrator.start();
       return "Bot restarted";
     },

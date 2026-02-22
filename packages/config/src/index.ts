@@ -60,8 +60,8 @@ export interface BotConfig {
   };
 }
 
-import { readFileSync, existsSync } from "fs";
-import { resolve } from "path";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 function env(key: string, fallback = ""): string {
@@ -160,20 +160,16 @@ function applyRuntimeOverrides(config: BotConfig): void {
     const dbPath = resolve(config.db.path);
     if (!existsSync(dbPath)) return;
 
-    const sqlite = new Database(dbPath, { readonly: true });
-    try {
-      const rows = sqlite
-        .query("SELECT key, value FROM runtime_config")
-        .all() as Array<{ key: string; value: string }>;
+    using sqlite = new Database(dbPath, { readonly: true });
+    const rows = sqlite
+      .query("SELECT key, value FROM runtime_config")
+      .all() as Array<{ key: string; value: string }>;
 
-      for (const row of rows) {
-        const applier = RUNTIME_CONFIG_MAP[row.key];
-        if (applier) {
-          applier(config, row.value);
-        }
+    for (const row of rows) {
+      const applier = RUNTIME_CONFIG_MAP[row.key];
+      if (applier) {
+        applier(config, row.value);
       }
-    } finally {
-      sqlite.close();
     }
   } catch {
     // DB doesn't exist or table doesn't exist yet — silently skip

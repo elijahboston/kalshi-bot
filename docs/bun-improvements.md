@@ -17,6 +17,6 @@ Improvements identified from the Bun API docs. Checked items are complete.
 
 ## Low Impact (Cleanup)
 
-- [ ] **`Bun.sleep()`** — Replace `new Promise(r => setTimeout(r, 500))` with `Bun.sleep(500)` in `app/cli/src/commands/bot.ts`.
-- [ ] **`using` statement** — Replace try/finally in `packages/config/src/index.ts` with `using sqlite = new Database(...)` for automatic cleanup.
-- [ ] **`"node:fs"` imports** — Convention fix: `from "fs"` → `from "node:fs"` in `packages/db/src/client.ts` and `packages/config/src/index.ts`.
+- [x] **`Bun.sleep()`** — Replace `new Promise(r => setTimeout(r, 500))` with `Bun.sleep(500)` in `app/cli/src/commands/bot.ts`.
+- [x] **`using` statement** — Replace try/finally in `packages/config/src/index.ts` with `using sqlite = new Database(...)` for automatic cleanup.
+- [x] **`"node:fs"` imports** — Convention fix: `from "fs"` → `from "node:fs"` in `packages/db/src/client.ts` and `packages/config/src/index.ts`.
