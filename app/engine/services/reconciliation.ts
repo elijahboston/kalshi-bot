@@ -544,7 +544,7 @@ export class ReconciliationService {
           actualOutcome,
           marketPrice,
           edge,
-          realizedPnl: s.realized_pnl ?? 0,
+          realizedPnl: s.realized_pnl ?? (s.revenue - yesCost - noCost),
           traded: true,
           forecastHorizon: null,
           resolvedAt: s.settled_time || now(),
