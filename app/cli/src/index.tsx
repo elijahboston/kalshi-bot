@@ -5,6 +5,8 @@ import { getConfig } from "@kcb/config";
 import { getDb, runMigrations } from "@kcb/db";
 import { orchestrator } from "@kcb/engine";
 import { App } from "./app";
+// Import early to start capturing logs before anything else emits
+import "./log-buffer";
 
 async function main() {
   const config = getConfig();
@@ -15,13 +17,21 @@ async function main() {
   // Initialize the engine (registers tick function, doesn't start yet)
   await orchestrator.initOrchestrator();
 
+  // Auto-start the bot loop
+  orchestrator.start();
+
+  // Enter alternate screen buffer for a clean fullscreen TUI
+  process.stdout.write("\x1b[?1049h");
+
   // Render the terminal UI
-  const { waitUntilExit } = render(React.createElement(App));
+  const { waitUntilExit, cleanup } = render(React.createElement(App));
 
   // Block until the user exits (Ctrl+C or `quit` command)
   await waitUntilExit();
 
-  // Cleanup
+  // Cleanup — leave alternate screen buffer and stop engine
+  cleanup();
+  process.stdout.write("\x1b[?1049l");
   orchestrator.stop();
   process.exit(0);
 }

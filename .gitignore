@@ -8,6 +8,7 @@ data/cache/
 logs/*.log
 .env
 .env.local
+.key
 dist/
 *.tsbuildinfo
 drizzle/meta/

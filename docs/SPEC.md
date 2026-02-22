@@ -13,33 +13,42 @@ The bot discovers Kalshi climate markets, fetches weather ensemble forecasts, es
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  CLI (@kcb/cli) — Ink / React terminal UI                      │
-│  ┌─────────────┐ ┌──────┐ ┌─────────┐ ┌──────┐ ┌────────────┐ │
-│  │  Dashboard   │ │ REPL │ │ Markets │ │ Logs │ │ Calibration│ │
-│  └──────┬──────┘ └──┬───┘ └────┬────┘ └──┬───┘ └─────┬──────┘ │
-│         │           │          │          │            │        │
-│         └───────────┴──────────┴──────────┴────────────┘        │
-│                              ▲ bus.on(...)                       │
-├──────────────────────────────┼──────────────────────────────────┤
-│                       TypedEmitter (bus)                         │
-│                              │ bus.emit(...)                     │
-├──────────────────────────────┼──────────────────────────────────┤
-│  Engine (@kcb/engine) — Headless bot logic                      │
-│  ┌──────────────────────────────────────────────────────┐       │
-│  │  Orchestrator (tick loop)                             │       │
-│  │  Phase 1: Discovery    → @kcb/kalshi-client           │       │
-│  │  Phase 2: Estimation   → @kcb/data + @kcb/signals     │       │
-│  │  Phase 3: Evaluation   → @kcb/signals                 │       │
-│  │  Phase 4: Execution    → @kcb/execution               │       │
-│  │  Phase 5: Reconcile    → calibration + positions       │       │
-│  └──────────────────────────────────────────────────────┘       │
-├─────────────────────────────────────────────────────────────────┤
-│  SQLite (@kcb/db — Drizzle ORM)                                 │
-│  markets │ orders │ trades │ positions │ signals │ calibration   │
-│  station_bias │ adaptive_thresholds │ weather_forecasts          │
-│  balance_history │ runtime_config                                │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  CLI (@kcb/cli) — Ink / React terminal UI                            │
+│  Tabs (1-5 + Tab cycle):                                             │
+│  ┌───────────┐ ┌─────────┐ ┌──────┐ ┌──────────┐ ┌─────────────┐   │
+│  │ Dashboard  │ │ Markets │ │ Logs │ │ Activity │ │ Performance │   │
+│  └─────┬─────┘ └────┬────┘ └──┬───┘ └─────┬────┘ └──────┬──────┘   │
+│        └─────────────┴─────────┴───────────┴─────────────┘           │
+│  Ctrl+R toggle:  ┌──────┐                                            │
+│                  │ REPL │  (not in tab cycle — captures input)       │
+│                  └──────┘                                            │
+│  Bottom:  ┌──────────────────────────────────────────────────┐       │
+│           │ StatusBar: state │ balance │ ticks │ countdown │ │       │
+│           └──────────────────────────────────────────────────┘       │
+│                              ▲ bus.on(...)                            │
+├──────────────────────────────┼───────────────────────────────────────┤
+│                       TypedEmitter (bus)                              │
+│                              │ bus.emit(...)                          │
+├──────────────────────────────┼───────────────────────────────────────┤
+│  Engine (@kcb/engine) — Headless bot logic                           │
+│  ┌───────────────────────────────────────────────────────────┐       │
+│  │  Orchestrator (tick loop)                                  │       │
+│  │  Startup: syncHistoricalOrders → syncSettlements           │       │
+│  │           → syncPositionsFromKalshi                        │       │
+│  │  Phase 1: Discovery    → @kcb/kalshi-client                │       │
+│  │  Phase 2: Estimation   → @kcb/data + @kcb/signals          │       │
+│  │  Phase 3: Evaluation   → @kcb/signals                      │       │
+│  │  Phase 4: Execution    → @kcb/execution                    │       │
+│  │  Phase 5: Reconcile    → sync orders/positions/settlements  │       │
+│  │                        → calibration + balance snapshot     │       │
+│  └───────────────────────────────────────────────────────────┘       │
+├──────────────────────────────────────────────────────────────────────┤
+│  SQLite (@kcb/db — Drizzle ORM)                                      │
+│  markets │ orders │ trades │ positions │ signals │ calibration        │
+│  station_bias │ adaptive_thresholds │ weather_forecasts               │
+│  balance_history │ runtime_config                                     │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Design Decisions
@@ -66,14 +75,17 @@ kalshi-climate-bot/
 │   ├── cli/                  # @kcb/cli — Terminal UI (Ink)
 │   │   ├── src/
 │   │   │   ├── index.tsx     # Entry point: migrate DB, init engine, render Ink
-│   │   │   ├── app.tsx       # Top-level layout, view mode switching (1-4, Tab, Esc)
+│   │   │   ├── app.tsx       # Top-level layout, tabs 1-5, Ctrl+R REPL, Tab cycle
+│   │   │   ├── log-buffer.ts # Circular buffer capturing log events for LogsView
 │   │   │   ├── views/
-│   │   │   │   ├── dashboard.tsx    # Live: positions, signals, orders, errors
-│   │   │   │   ├── repl.tsx         # Interactive command input with history
+│   │   │   │   ├── dashboard.tsx    # Live: positions (seeded from DB), signals, orders, errors
+│   │   │   │   ├── repl.tsx         # Interactive command input with history (Ctrl+R toggle)
 │   │   │   │   ├── markets.tsx      # Table: ticker, price, estimate, edge, confidence
-│   │   │   │   └── logs.tsx         # Filtered log stream from bus
+│   │   │   │   ├── logs.tsx         # Filtered log stream from bus
+│   │   │   │   ├── activity.tsx     # Pipeline phase indicator, tick summary, live event feed
+│   │   │   │   └── performance.tsx  # Stats bar, order table, equity sparkline, resolutions
 │   │   │   ├── components/
-│   │   │   │   └── status-bar.tsx   # Bottom bar: running/stopped, balance, equity, ticks
+│   │   │   │   └── status-bar.tsx   # Bottom bar: state, balance, equity, ticks, countdown
 │   │   │   ├── commands/
 │   │   │   │   ├── index.ts         # Command registry, parser, dispatcher, help
 │   │   │   │   ├── bot.ts           # start, stop, status, restart
@@ -87,13 +99,17 @@ kalshi-climate-bot/
 │   ├── engine/               # @kcb/engine — Bot loop + event bus
 │   │   ├── events.ts         # TypedEmitter, BotEvents type map, createLogger
 │   │   ├── services/
-│   │   │   ├── loop.ts       # Start/stop interval loop, registerTick, LoopState
-│   │   │   └── orchestrator.ts  # 5-phase tick pipeline (STUB — needs implementation)
+│   │   │   ├── loop.ts           # Start/stop interval loop, registerTick, LoopState
+│   │   │   ├── orchestrator.ts   # 5-phase tick pipeline (fully implemented)
+│   │   │   ├── discovery.ts      # Market discovery: fetch + parse climate tickers
+│   │   │   ├── feed.ts           # WebSocket feed: live price + lifecycle updates
+│   │   │   └── reconciliation.ts # Order/position/settlement sync, calibration, bias
 │   │   ├── index.ts
 │   │   └── package.json
 │   ├── data/                 # @kcb/data — Weather data ingestion
 │   │   ├── services/
-│   │   │   └── nws.ts        # NWS API: forecasts, grid data, observations (implemented)
+│   │   │   ├── nws.ts        # NWS API: forecasts, grid data, observations
+│   │   │   └── ensemble.ts   # GFS/GEFS ensemble fetching via Open-Meteo
 │   │   ├── index.ts
 │   │   └── package.json
 │   ├── signals/              # @kcb/signals — Probability estimation
@@ -121,10 +137,12 @@ kalshi-climate-bot/
 │   │           ├── signals.ts      # signals table
 │   │           ├── calibration.ts  # calibration, station_bias, adaptive_thresholds tables
 │   │           └── weather.ts      # weather_forecasts, balance_history, runtime_config tables
-│   ├── kalshi-client/        # @kcb/kalshi-client — REST API wrapper
+│   ├── kalshi-client/        # @kcb/kalshi-client — REST + WebSocket wrapper
 │   │   └── src/
-│   │       ├── client.ts     # KalshiClient: auth, markets, orders, portfolio (implemented)
-│   │       ├── types.ts      # Kalshi API response types
+│   │       ├── client.ts     # KalshiClient: markets, orders, positions, settlements
+│   │       ├── auth.ts       # HMAC-based request signing
+│   │       ├── feed.ts       # KalshiFeed: WebSocket ticker + lifecycle streams
+│   │       ├── types.ts      # Kalshi API response types + WS message types
 │   │       └── index.ts
 │   └── config/               # @kcb/config — Typed configuration
 │       └── src/
@@ -138,209 +156,69 @@ kalshi-climate-bot/
 
 ---
 
-## Current State: What's Implemented vs Stubbed
+## Current Implementation Status
 
 ### ✅ Fully Implemented
 
-| Component | File | Status |
-|-----------|------|--------|
-| Bun workspace monorepo | `package.json`, `tsconfig.json` | Complete |
-| Drizzle schema (11 tables) | `packages/db/src/schema/*` | Complete |
-| DB client (WAL mode, singleton) | `packages/db/src/client.ts` | Complete |
-| Migration runner | `packages/db/src/migrate.ts` | Complete |
-| Typed config (env + defaults) | `packages/config/src/index.ts` | Complete |
-| Kalshi API client (auth, CRUD) | `packages/kalshi-client/src/*` | Complete |
-| Typed event bus | `app/engine/events.ts` | Complete |
-| Main loop (start/stop/interval) | `app/engine/services/loop.ts` | Complete |
-| NWS weather service | `app/data/services/nws.ts` | Complete |
-| Probability estimator | `app/signals/services/estimator.ts` | Complete |
-| Adaptive thresholds | `app/signals/services/adaptive-threshold.ts` | Complete |
-| Execution service (Kelly + orders) | `app/execution/services/execution.ts` | Complete |
-| Ink app shell + mode switching | `app/cli/src/app.tsx` | Complete |
-| Dashboard view | `app/cli/src/views/dashboard.tsx` | Complete |
-| REPL view + input history | `app/cli/src/views/repl.tsx` | Complete |
-| Markets view | `app/cli/src/views/markets.tsx` | Complete |
-| Logs view | `app/cli/src/views/logs.tsx` | Complete |
-| Status bar | `app/cli/src/components/status-bar.tsx` | Complete |
-| Command registry + parser | `app/cli/src/commands/index.ts` | Complete |
-| Bot commands (start/stop/status) | `app/cli/src/commands/bot.ts` | Complete |
-| Markets commands (list/inspect) | `app/cli/src/commands/markets.ts` | Complete |
-| Positions commands (pos/pnl/orders) | `app/cli/src/commands/positions.ts` | Complete |
-| Config commands (list/get/set) | `app/cli/src/commands/config.ts` | Complete |
-| Calibration commands (summary/detail/bias) | `app/cli/src/commands/calibration.ts` | Complete |
-| React hooks for event subscriptions | `app/cli/src/hooks/use-bot-events.ts` | Complete |
+| Component | File | Notes |
+|-----------|------|-------|
+| Bun workspace monorepo | `package.json`, `tsconfig.json` | `bun bot:watch` for hot-reload dev |
+| Drizzle schema (11 tables) | `packages/db/src/schema/*` | |
+| DB client (WAL mode, singleton) | `packages/db/src/client.ts` | |
+| Migration runner | `packages/db/src/migrate.ts` | |
+| Typed config (env + DB overrides) | `packages/config/src/index.ts` | Runtime config loaded from DB on startup |
+| Kalshi REST client | `packages/kalshi-client/src/client.ts` | Markets, orders, positions, settlements, balance |
+| Kalshi WebSocket feed | `packages/kalshi-client/src/feed.ts` | Ticker + lifecycle streams |
+| Typed event bus | `app/engine/events.ts` | 11 event types |
+| Main loop (start/stop/interval) | `app/engine/services/loop.ts` | |
+| Orchestrator (5-phase tick) | `app/engine/services/orchestrator.ts` | Discovery → Estimation → Evaluation → Execution → Reconciliation |
+| Market discovery | `app/engine/services/discovery.ts` | Parses climate tickers, upserts markets |
+| WebSocket feed manager | `app/engine/services/feed.ts` | Live price + lifecycle updates |
+| Reconciliation service | `app/engine/services/reconciliation.ts` | Full pipeline (see below) |
+| NWS weather service | `app/data/services/nws.ts` | |
+| Ensemble data (Open-Meteo) | `app/data/services/ensemble.ts` | GFS/GEFS ensemble members |
+| Probability estimator | `app/signals/services/estimator.ts` | |
+| Adaptive thresholds | `app/signals/services/adaptive-threshold.ts` | |
+| Execution service (Kelly + orders) | `app/execution/services/execution.ts` | |
+| Ink app shell (6 views) | `app/cli/src/app.tsx` | Tabs 1-5, Ctrl+R for REPL |
+| Dashboard view | `app/cli/src/views/dashboard.tsx` | Positions seeded from DB on mount |
+| REPL view | `app/cli/src/views/repl.tsx` | Ctrl+R toggle, Esc to exit |
+| Markets view | `app/cli/src/views/markets.tsx` | |
+| Logs view | `app/cli/src/views/logs.tsx` | |
+| Activity view | `app/cli/src/views/activity.tsx` | Pipeline phases, tick summary, live event feed |
+| Performance view | `app/cli/src/views/performance.tsx` | Stats, order table, equity sparkline, resolutions |
+| Status bar + countdown | `app/cli/src/components/status-bar.tsx` | Live countdown to next tick |
+| Command registry + all commands | `app/cli/src/commands/*` | bot, markets, positions, config, calibration, explain |
 
-### 🔲 Stubbed / Needs Implementation
+### Reconciliation Pipeline (each tick)
+
+The reconciliation service (`app/engine/services/reconciliation.ts`) runs these steps in order:
+
+1. **syncOrders** — Poll Kalshi for open order status, create trade records for fills (live mode only)
+2. **syncHistoricalOrders** — Import all orders from Kalshi into local DB (catches web-UI orders)
+3. **ensureTradeRecords** — Create trade records for filled orders missing them
+4. **updatePositions** — Recompute positions from local trades
+5. **syncPositionsFromKalshi** — Overwrite/add positions from Kalshi API (runs even in dry-run if API key set)
+6. **syncSettlements** — Import settlement history from Kalshi into calibration table (realized PnL, outcomes)
+7. **checkResolutions** — Detect newly settled markets, create calibration records, recompute station bias
+8. **snapshotBalance** — Record balance + equity to balance_history
+
+On startup (`initOrchestrator`), steps 2, 5, 6 run once immediately so the TUI shows portfolio data before the first tick.
+
+### 🔲 Remaining Work
 
 | Component | Location | Description |
 |-----------|----------|-------------|
-| **Orchestrator tick pipeline** | `app/engine/services/orchestrator.ts` | The 5-phase tick body is all TODO comments. This is the **highest priority** item. |
-| **Market discovery service** | `app/engine/services/discovery.ts` (create) | Fetch climate markets from Kalshi, parse tickers to extract station/bracket/date, upsert to DB |
-| **Ensemble data fetching** | `app/data/services/ensemble.ts` (create) | Fetch GFS/GEFS ensemble data from Open-Meteo or similar. The NWS service only gets point forecasts — we need ensemble members for probability estimation |
-| **Observation recording** | `app/data/services/observations.ts` (create) | After a market's target date passes, fetch actual observed temperature/precip from NWS and record in `weather_forecasts.actualValue` |
-| **Reconciliation service** | `app/engine/services/reconciliation.ts` (create) | Sync positions with Kalshi, detect settled markets, compute realized PnL, write calibration records, update station bias |
-| **Station bias recomputation** | Part of reconciliation | After each market resolution: recompute `station_bias` table using rolling window of `weather_forecasts` (predicted vs actual) |
-| **Calibration retrain** | `app/cli/src/commands/calibration.ts` | The `retrain` subcommand is stubbed. Should recompute all station biases and adaptive thresholds from full history |
-| **`explain` command** | `app/cli/src/commands/explain.ts` (create) | Given a ticker, show the signal reasoning: ensemble stats, bias correction, bracket probability, Kelly fraction, why it traded or skipped |
-| **`backtest` command** | `app/cli/src/commands/backtest.ts` (create) | Run the estimator against archived `weather_forecasts` + actual outcomes to simulate P&L over a historical window |
-| **Balance tracking** | Part of reconciliation | Periodically snapshot balance and equity to `balance_history` table. Fetch balance from Kalshi API (or track locally in dry run) |
-| **Position cache maintenance** | Part of reconciliation | Update `positions` table from filled trades. Remove positions for settled markets. Compute unrealized PnL from current market prices |
-| **Order status polling** | Part of reconciliation | Poll Kalshi for order fill status, update `orders.filledQuantity` and `orders.status`, create `trades` records for fills |
-| **Log file writer** | `app/engine/services/log-writer.ts` (create) | Subscribe to `bus.on("log", ...)` and append to `logs/bot.log` with rotation |
-| **Runtime config loading from DB** | `packages/config/src/index.ts` | On startup, load any overrides from `runtime_config` table and apply to in-memory config. Currently `config set` persists to DB but the values aren't loaded back on restart |
+| **`backtest` command** | `app/cli/src/commands/backtest.ts` | Run estimator against archived data to simulate P&L |
+| **`calibration retrain`** | `app/cli/src/commands/calibration.ts` | Recompute all station biases + adaptive thresholds from history |
+| **Log file writer** | `app/engine/services/log-writer.ts` | Append to `logs/bot.log` with rotation |
+| **Rate limit backoff** | `packages/kalshi-client/src/client.ts` | Exponential backoff on 429 responses |
 
 ---
 
-## Implementation Tasks (Priority Order)
+## Remaining Implementation Tasks
 
-### Phase 1: Wire the Orchestrator (Critical Path)
-
-The orchestrator at `app/engine/services/orchestrator.ts` has the 5-phase tick pipeline stubbed with TODO comments. Each phase needs a concrete implementation.
-
-#### Task 1.1: Market Discovery Service
-
-Create `app/engine/services/discovery.ts`:
-
-1. Call `KalshiClient.getAllMarkets()` filtered to climate series
-2. Parse each market ticker to extract: `seriesTicker`, `stationId`, `targetDate`, `bracketLow`, `bracketHigh`, `category`
-3. Upsert to `markets` table
-4. Emit `bus.emit("market:discovered", ...)` for new markets
-5. Update `lastYesPrice`, `lastNoPrice`, `status` for existing markets
-
-**Ticker parsing rules** (Kalshi climate market convention):
-- Ticker format: `KXHIGHNY-25FEB19-B37` → series=`KXHIGHNY`, target=`2025-02-19`, bracket floor=37
-- Series prefixes: `KXHIGH` (daily high temp), `KXLOW` (daily low temp), `KXRAIN` (precip), `KXSNOW` (snowfall)
-- Station suffix: `NY`→KNYC, `ORD`→KORD, `LAX`→KLAX, `DFW`→KDFW, `IAH`→KIAH, `DEN`→KDEN, `PHL`→KPHL, `ATL`→KATL, `SFO`→KSFO, `MIA`→KMIA
-- Bracket encoding: `B37` = floor of 37°F. The bracket width varies by market but is typically 1-2°F. Look at the market `title` field or adjacent markets in the event to determine `bracketHigh`.
-- Use the shared helpers in `shared/types/index.ts`: `seriesCategory()`, `extractStationFromSeries()`
-
-**Filtering:** Only discover markets where:
-- Series ticker starts with one of `CLIMATE_SERIES_PREFIXES`
-- Station is in `config.bot.enabledStations`
-- If `config.bot.enabledSeries` is non-empty, only those series
-- Market status is "open"
-- Target date is within the next 7 days
-
-#### Task 1.2: Weather Data Fetching
-
-Create `app/data/services/ensemble.ts`:
-
-The `ProbabilityEstimator` requires an array of ensemble member forecast values. We need a service that:
-
-1. For each market, determines the station + target date + forecast type (high_temp, etc.)
-2. Fetches ensemble forecast data (GFS/GEFS ensemble has ~30 members)
-3. Caches the raw data in `weather_forecasts` table
-4. Returns the ensemble values array to the estimator
-
-**Data source options (implement at least one):**
-
-**Option A: Open-Meteo (free, recommended first):**
-- Endpoint: `https://ensemble-api.open-meteo.com/v1/ensemble`
-- Params: `latitude`, `longitude`, `daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum`, `models=gfs_seamless`
-- Returns up to 31 ensemble members
-- No API key required, generous rate limits
-- **Note:** Returns temperatures in Celsius — convert to Fahrenheit using `cToF()` from shared utils
-- **Note:** The specific ensemble members for each variable are returned as `temperature_2m_max_member01`, `temperature_2m_max_member02`, etc.
-
-**Option B: NWS Grid Data (free, already partially implemented):**
-- The `NwsService.getGridData()` method returns gridded forecasts
-- This gives point forecasts, not ensembles
-- Can be used as a fallback when ensemble data isn't available
-- To simulate an ensemble, use the point forecast ± historical std dev to generate a normal distribution
-
-**Caching strategy:**
-- Cache each fetch in `weather_forecasts` with `source`, `forecastType`, `forecastHorizon`, `ensembleValues` (JSON array)
-- Before fetching, check if we have a recent cache hit (same station + targetDate + source, fetched within last 6 hours)
-- After market resolution, update `weather_forecasts.actualValue` with the observed value
-
-#### Task 1.3: Signal Generation (Evaluate Phase)
-
-Wire the existing `ProbabilityEstimator` and `getEffectiveThreshold` into the orchestrator:
-
-1. For each open market with fresh weather data:
-   - Call `estimator.estimate(market, ensembleValues)` → get `EstimateResult`
-   - Call `getEffectiveThreshold(estimatedProb, seriesTicker)` → get threshold
-   - Compute edge: `estimatedProb - marketYesPrice/100` (for YES side), or `(1 - estimatedProb) - marketNoPrice/100` (for NO side)
-   - Determine recommendation: if `|edge| > threshold && confidence > config.bot.minConfidence` → buy the side with positive edge; else skip
-   - Compute Kelly fraction via `computeKelly()`
-2. Insert signal into `signals` table with full reasoning JSON
-3. Emit `bus.emit("signal:new", ...)`
-
-#### Task 1.4: Execution (already implemented, just wire in)
-
-The `ExecutionService.executeSignal()` is fully implemented. In the orchestrator:
-
-1. Get current balance (from Kalshi API in live mode, or from last known balance in dry run)
-2. For each signal with recommendation != "skip": call `executionService.executeSignal(signal, balance)`
-3. Update `signals.acted`, `signals.orderId` or `signals.skipReason`
-
-#### Task 1.5: Reconciliation Service
-
-Create `app/engine/services/reconciliation.ts`:
-
-This runs at the end of every tick and handles:
-
-**A. Order Status Sync** (live mode only):
-1. Query `orders` table for status = "open"
-2. For each, poll `kalshiClient.getOrders({ ticker })` for current status
-3. Update `orders.filledQuantity`, `orders.status`
-4. For newly filled orders, insert into `trades` table
-
-**B. Position Maintenance:**
-1. Recompute `positions` table from `trades` (group by ticker, compute avg entry, quantity)
-2. For each position, get latest market price from `markets` table
-3. Update `positions.marketValue` and `positions.unrealizedPnl`
-4. Emit `bus.emit("position:update", ...)` for each position
-5. Remove positions for settled markets (quantity = 0 after settlement)
-
-**C. Market Resolution Detection:**
-1. Query `markets` where `status = "open"` and check Kalshi for updates
-2. When a market settles:
-   - Update `markets.status` = "settled", `markets.result`
-   - Compute realized PnL for any position in this market
-   - Create a `calibration` record: predicted prob (from signals), actual outcome, realized PnL
-   - Emit `bus.emit("market:resolved", ...)`
-
-**D. Station Bias Update:**
-1. After a market resolves, look up the corresponding `weather_forecasts` records
-2. Fetch actual observed value from NWS observations if not already recorded
-3. Compare predicted ensemble mean to actual observation
-4. Recompute the rolling `station_bias` for this station + horizon:
-   - Query all `weather_forecasts` for this station within `config.calibration.biasWindowDays`
-   - Compute `meanBias = mean(predicted - actual)`, `stdBias = std(predicted - actual)`
-   - Upsert `station_bias` table
-
-**E. Balance Snapshot:**
-1. Get current balance from Kalshi (live) or compute from last balance + dry run PnL
-2. Compute total equity = balance + sum of position market values
-3. Insert into `balance_history`
-4. Emit `bus.emit("balance:update", ...)`
-
-### Phase 2: Missing Commands
-
-#### Task 2.1: `explain` Command
-
-Create `app/cli/src/commands/explain.ts`:
-
-```
-> explain KXHIGHNY-25FEB19-B37
-```
-
-1. Look up the most recent `signal` for this ticker
-2. Parse the `reasoning` JSON blob (it's a `ReasoningTrace` object stored by the estimator)
-3. Format a human-readable explanation:
-   - Market details (title, bracket, current price)
-   - Our estimate and confidence
-   - Edge calculation
-   - Ensemble breakdown: N members total, M in bracket
-   - Bias correction applied (station, horizon, mean bias, sample size)
-   - Historical verification rate for this bracket (from calibration table)
-   - Action taken (buy/skip) with reasoning
-   - If traded: Kelly fraction, contracts, order status
-
-Register this in the command registry at `app/cli/src/commands/index.ts`.
-
-#### Task 2.2: `backtest` Command
+### `backtest` Command
 
 Create `app/cli/src/commands/backtest.ts`:
 
@@ -351,30 +229,18 @@ Create `app/cli/src/commands/backtest.ts`:
 1. Query `weather_forecasts` for this series + station, last N days, where `actualValue` is not null
 2. For each day's forecasts, re-run the `ProbabilityEstimator` using the archived ensemble data
 3. Compare estimated probability to actual outcome
-4. Simulate trades using the execution logic (Kelly sizing at historical market prices from `signals` or `markets` table)
-5. Report: total markets evaluated, signals generated, win rate, simulated P&L, Brier score, Sharpe ratio
+4. Simulate trades using the execution logic (Kelly sizing at historical market prices)
+5. Report: total markets evaluated, signals generated, win rate, simulated P&L, Brier score
 
-Register this in the command registry.
+### `calibration retrain` Subcommand
 
-#### Task 2.3: `calibration retrain` Subcommand
-
-In `app/cli/src/commands/calibration.ts`, implement the `retrainCalibration()` function:
+In `app/cli/src/commands/calibration.ts`, implement `retrainCalibration()`:
 
 1. Recompute all `station_bias` entries from full `weather_forecasts` history
 2. Recompute all `adaptive_thresholds` entries from full `calibration` history
 3. Report what changed
 
-### Phase 3: Robustness
-
-#### Task 3.1: Runtime Config Persistence
-
-In `packages/config/src/index.ts`, add logic to `loadConfig()` that:
-
-1. After loading from env, query `runtime_config` table for any overrides
-2. Apply overrides on top of env-based config
-3. This ensures `config set` values survive restarts
-
-#### Task 3.2: Log File Writer
+### Log File Writer
 
 Create `app/engine/services/log-writer.ts`:
 
@@ -382,22 +248,12 @@ Create `app/engine/services/log-writer.ts`:
 2. Append JSON lines to `logs/bot.log`
 3. Implement basic rotation: when file exceeds 10MB, rename to `bot.log.1` and start fresh
 
-#### Task 3.3: Graceful Shutdown
+### Rate Limit Backoff
 
-In `app/cli/src/index.tsx`, ensure:
+In `KalshiClient.request()`:
 
-1. `orchestrator.stop()` is called on Ctrl+C
-2. Any pending DB writes complete
-3. Open Kalshi orders are NOT auto-canceled (user should decide)
-
-#### Task 3.4: Error Recovery
-
-In the orchestrator tick:
-
-1. If any phase throws, catch the error, log it, emit `bot:error`, and continue to the next tick
-2. If Kalshi API returns 429 (rate limit), back off exponentially
-3. If NWS API fails, use cached data and log a warning
-4. If ensemble API fails, fall back to NWS point forecast with synthetic distribution
+1. On 429 response, retry with exponential backoff
+2. If NWS or Open-Meteo fails, fall back to cached data and log a warning
 
 ---
 
@@ -614,17 +470,20 @@ All engine modules should use `createLogger("module-name")` instead of `console.
 
 **Base URL:** `https://api.elections.kalshi.com/trade-api/v2`
 
-**Auth:** POST `/login` with email (API key) + password (API secret) → receives bearer token. Token lasts ~24h.
+**Auth:** HMAC request signing via `packages/kalshi-client/src/auth.ts`. Each request is signed with the API key + secret pair (no login/token flow).
 
 **Key endpoints used:**
-- `GET /markets?series_ticker=KXHIGHNY&status=open` — list markets
+- `GET /markets?series_ticker=KXHIGHNY&status=open` — list markets (paginated via `cursor`)
 - `GET /markets/{ticker}` — single market detail
 - `GET /events/{event_ticker}` — event with all its markets
 - `POST /portfolio/orders` — place order
 - `DELETE /portfolio/orders/{order_id}` — cancel order
-- `GET /portfolio/orders` — list orders
+- `GET /portfolio/orders` — list orders (paginated via `cursor`)
 - `GET /portfolio/balance` — cash balance
-- `GET /portfolio/positions` — open positions
+- `GET /portfolio/positions` — open positions (includes `market_exposure`, `position`)
+- `GET /portfolio/settlements` — settlement history (paginated via `cursor`)
+
+**Pagination:** Endpoints returning lists use cursor-based pagination. Pass `cursor` from the previous response; an empty/falsy cursor means no more pages. `KalshiClient` provides `getAll*()` helpers that auto-paginate.
 
 **Rate limits:** Refer to Kalshi API docs. Implement exponential backoff on 429.
 
@@ -727,6 +586,7 @@ To add a new command: create the `CommandDef[]` array, import it in `commands/in
 | `orders` | — | `[status]` | Recent orders, optional status filter |
 | `config` | `cfg` | `list\|get <key>\|set <key> <val>` | View/modify runtime config |
 | `calibration` | `cal` | `summary\|detail [series]\|bias [station]\|retrain` | Calibration reports |
+| `explain` | — | `<ticker>` | Show signal reasoning for a market |
 | `help` | — | — | List all commands |
 | `exit` / `quit` | — | — | Return to dashboard |
 
@@ -734,7 +594,6 @@ To add a new command: create the `CommandDef[]` array, import it in `commands/in
 
 | Command | Args | Description |
 |---------|------|-------------|
-| `explain` | `<ticker>` | Show signal reasoning for a market |
 | `backtest` | `<series> --days <N>` | Run estimator against historical data |
 
 ---
@@ -790,7 +649,7 @@ As the bot runs longer, bias data quality improves, which increases confidence s
 
 5. **The event bus is fire-and-forget.** Don't await event handlers. If a handler throws, it shouldn't crash the emitter.
 
-6. **Kalshi API auth tokens expire.** The `KalshiClient` handles refresh automatically via `ensureAuth()`, but if you see 401 errors, the token refresh logic may need attention.
+6. **Kalshi API uses HMAC signing.** Each request is signed per-call in `auth.ts` — no token refresh needed. If you see 401 errors, check the API key/secret in `.env`.
 
 7. **NWS API requires a User-Agent header.** Requests without it get 403. This is already set in `NwsService`.
 

@@ -1,5 +1,6 @@
-import { getDb, calibration, stationBias, adaptiveThresholds, desc, gte, and } from "@kcb/db";
+import { getDb, calibration, stationBias, adaptiveThresholds, weatherForecasts, desc, gte, and, eq, sql } from "@kcb/db";
 import { getConfig } from "@kcb/config";
+import { now } from "@kcb/shared";
 import type { CommandDef } from "./index";
 
 /** Probability buckets for calibration analysis */
@@ -102,24 +103,16 @@ async function calibrationDetail(seriesTicker?: string): Promise<string> {
   const db = getDb();
   const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
 
-  let query = db
+  const whereClause = seriesTicker
+    ? and(gte(calibration.resolvedAt, cutoff), eq(calibration.seriesTicker, seriesTicker))
+    : gte(calibration.resolvedAt, cutoff);
+
+  const records = await db
     .select()
     .from(calibration)
-    .where(gte(calibration.resolvedAt, cutoff))
+    .where(whereClause)
     .orderBy(desc(calibration.resolvedAt))
     .limit(30);
-
-  if (seriesTicker) {
-    query = query.where(
-      and(
-        gte(calibration.resolvedAt, cutoff),
-        // @ts-expect-error — drizzle typing for dynamic where
-        calibration.seriesTicker.eq(seriesTicker)
-      )
-    ) as typeof query;
-  }
-
-  const records = await query;
 
   if (records.length === 0) {
     return seriesTicker
@@ -180,9 +173,148 @@ async function showBias(stationId?: string): Promise<string> {
 }
 
 async function retrainCalibration(): Promise<string> {
-  // TODO: Implement full recalibration
-  // 1. Recompute all station biases from full history
-  // 2. Recompute adaptive thresholds per bucket per series
-  // 3. Update confidence model weights
-  return "Retrain initiated... (not yet implemented — stub for now)";
+  const config = getConfig();
+  const db = getDb();
+  const timestamp = now();
+  const lines: string[] = ["Retraining calibration...", ""];
+
+  // 1. Recompute all station biases from weather_forecasts where actualValue is set
+  const forecasts = await db
+    .select()
+    .from(weatherForecasts)
+    .where(sql`${weatherForecasts.actualValue} IS NOT NULL`);
+
+  // Group by stationId + horizon
+  const biasGroups = new Map<string, { errors: number[]; stationId: string; horizon: number }>();
+
+  for (const f of forecasts) {
+    if (f.pointForecast == null || f.actualValue == null) continue;
+    const horizon = Math.min(f.forecastHorizon, 7);
+    const key = `${f.stationId}_${horizon}`;
+    let group = biasGroups.get(key);
+    if (!group) {
+      group = { errors: [], stationId: f.stationId, horizon };
+      biasGroups.set(key, group);
+    }
+    group.errors.push(f.pointForecast - f.actualValue);
+  }
+
+  let biasCount = 0;
+  for (const [key, group] of biasGroups) {
+    const n = group.errors.length;
+    if (n === 0) continue;
+
+    const meanBias = group.errors.reduce((a, b) => a + b, 0) / n;
+    const variance = group.errors.reduce((s, e) => s + (e - meanBias) ** 2, 0) / n;
+    const stdBias = Math.sqrt(variance);
+
+    const existing = await db
+      .select()
+      .from(stationBias)
+      .where(eq(stationBias.id, key))
+      .limit(1);
+
+    if (existing.length > 0) {
+      await db
+        .update(stationBias)
+        .set({
+          meanBias,
+          stdBias,
+          sampleSize: n,
+          windowDays: config.calibration.biasWindowDays,
+          updatedAt: timestamp,
+        })
+        .where(eq(stationBias.id, key));
+    } else {
+      await db.insert(stationBias).values({
+        id: key,
+        stationId: group.stationId,
+        forecastHorizonDays: group.horizon,
+        meanBias,
+        stdBias,
+        sampleSize: n,
+        windowDays: config.calibration.biasWindowDays,
+        updatedAt: timestamp,
+      });
+    }
+    biasCount++;
+  }
+
+  lines.push(`Station biases: updated ${biasCount} entries from ${forecasts.length} forecasts`);
+
+  // 2. Recompute adaptive thresholds per bucket per series from calibration history
+  const calRecords = await db.select().from(calibration);
+
+  // Group by seriesTicker
+  const seriesMap = new Map<string, typeof calRecords>();
+  for (const r of calRecords) {
+    const existing = seriesMap.get(r.seriesTicker) || [];
+    existing.push(r);
+    seriesMap.set(r.seriesTicker, existing);
+  }
+
+  // Also compute global
+  seriesMap.set("__global__", calRecords);
+
+  const baseThreshold = config.bot.edgeThreshold;
+  let thresholdCount = 0;
+
+  for (const [seriesTicker, records] of seriesMap) {
+    if (records.length < 5) continue;
+
+    for (const bucket of BUCKETS) {
+      const inBucket = records.filter(
+        (r) => r.predictedProb >= bucket.low && r.predictedProb < bucket.high
+      );
+      if (inBucket.length < 3) continue;
+
+      const hitRate = inBucket.filter((r) => r.actualOutcome === 1).length / inBucket.length;
+      const expectedRate = bucket.midpoint;
+      const calibrationError = Math.abs(hitRate - expectedRate);
+
+      let effectiveThreshold: number;
+      if (calibrationError > config.calibration.maxCalibrationError) {
+        effectiveThreshold = baseThreshold * (1 + calibrationError);
+      } else {
+        effectiveThreshold = baseThreshold * 0.9;
+      }
+
+      const thresholdId = `${seriesTicker}_${bucket.label}`;
+
+      const existing = await db
+        .select()
+        .from(adaptiveThresholds)
+        .where(eq(adaptiveThresholds.id, thresholdId))
+        .limit(1);
+
+      if (existing.length > 0) {
+        await db
+          .update(adaptiveThresholds)
+          .set({
+            edgeThreshold: effectiveThreshold,
+            calibrationError,
+            sampleSize: inBucket.length,
+            updatedAt: timestamp,
+          })
+          .where(eq(adaptiveThresholds.id, thresholdId));
+      } else {
+        await db.insert(adaptiveThresholds).values({
+          id: thresholdId,
+          seriesTicker,
+          bucketLabel: bucket.label,
+          edgeThreshold: effectiveThreshold,
+          calibrationError,
+          sampleSize: inBucket.length,
+          updatedAt: timestamp,
+        });
+      }
+      thresholdCount++;
+    }
+  }
+
+  lines.push(`Adaptive thresholds: updated ${thresholdCount} entries from ${calRecords.length} calibration records`);
+  lines.push("");
+  lines.push("Retrain complete.");
+
+  return lines.join("\n");
 }

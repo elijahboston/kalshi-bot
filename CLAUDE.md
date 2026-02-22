@@ -109,3 +109,9 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
+
+## Workflow Rules
+
+- **Always write tests for changes.** Any new feature, bug fix, or significant refactor must include corresponding tests. Place test files alongside source files using the `*.test.ts` naming convention.
+- **Run tests before committing.** Run `bun test` and ensure all tests pass before creating a commit. Do not commit with failing tests.
+- **Push after a green commit.** Once tests pass and the commit is created, push to the remote.

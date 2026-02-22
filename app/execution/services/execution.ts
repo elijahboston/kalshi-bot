@@ -40,10 +40,11 @@ export class ExecutionService {
     }
 
     // Kelly criterion sizing
+    const side = signal.side as "yes" | "no";
     const kellyFraction = computeKelly(
       signal.estimatedProb,
       signal.marketPrice,
-      signal.side
+      side
     );
 
     const cappedKelly = Math.min(kellyFraction, config.bot.maxKellyFraction);
@@ -54,7 +55,7 @@ export class ExecutionService {
 
     // Compute contracts
     const betAmount = Math.floor(balance * cappedKelly);
-    const price = signal.side === "yes"
+    const price = side === "yes"
       ? Math.round(signal.marketPrice * 100) // price in cents
       : Math.round((1 - signal.marketPrice) * 100);
     const contracts = Math.min(
@@ -68,7 +69,7 @@ export class ExecutionService {
     }
 
     log.info(
-      `Executing: ${signal.side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
+      `Executing: ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
       `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢)`
     );
 
@@ -81,7 +82,7 @@ export class ExecutionService {
         orderId,
         ticker: signal.ticker,
         action: "buy",
-        side: signal.side,
+        side,
         limitPrice: price,
         quantity: contracts,
         filledQuantity: contracts,
@@ -97,7 +98,7 @@ export class ExecutionService {
         orderId,
         ticker: signal.ticker,
         action: "buy",
-        side: signal.side,
+        side,
         price,
         quantity: contracts,
         dryRun: true,
@@ -110,10 +111,10 @@ export class ExecutionService {
     const result = await this.kalshi.createOrder({
       ticker: signal.ticker,
       action: "buy",
-      side: signal.side,
+      side,
       type: "limit",
       count: contracts,
-      ...(signal.side === "yes"
+      ...(side === "yes"
         ? { yes_price: price }
         : { no_price: price }),
     });
@@ -123,7 +124,7 @@ export class ExecutionService {
       orderId: result.order.order_id,
       ticker: signal.ticker,
       action: "buy",
-      side: signal.side,
+      side,
       limitPrice: price,
       quantity: contracts,
       filledQuantity: 0,
@@ -139,7 +140,7 @@ export class ExecutionService {
       orderId: result.order.order_id,
       ticker: signal.ticker,
       action: "buy",
-      side: signal.side,
+      side,
       price,
       quantity: contracts,
       dryRun: false,

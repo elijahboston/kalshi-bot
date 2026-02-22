@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
 import { bus, type BotEvents } from "@kcb/engine";
+import { getDb, positions as positionsTable } from "@kcb/db";
 
 export function Dashboard() {
   const [signals, setSignals] = useState<BotEvents["signal:new"][]>([]);
@@ -9,6 +10,22 @@ export function Dashboard() {
   const [lastError, setLastError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Seed positions from DB so we show existing contracts on launch
+    const loadPositions = async () => {
+      const db = getDb();
+      const dbPositions = await db.select().from(positionsTable);
+      setPositions(
+        dbPositions.map((p) => ({
+          ticker: p.ticker,
+          side: p.side,
+          quantity: p.quantity,
+          unrealizedPnl: p.unrealizedPnl ?? 0,
+          avgEntryPrice: p.avgEntryPrice,
+        })),
+      );
+    };
+    loadPositions();
+
     const unsubs = [
       bus.on("signal:new", (s) =>
         setSignals((prev) => [s, ...prev].slice(0, 10))

@@ -1,33 +1,39 @@
 import React, { useState, useCallback } from "react";
-import { Box, Text, useInput, useApp } from "ink";
+import { Box, Text, useInput, useApp, useStdout } from "ink";
 import { StatusBar } from "./components/status-bar";
 import { Dashboard } from "./views/dashboard";
 import { Repl } from "./views/repl";
 import { MarketsView } from "./views/markets";
 import { LogsView } from "./views/logs";
+import { ActivityView } from "./views/activity";
+import { PerformanceView } from "./views/performance";
 
-type ViewMode = "dashboard" | "repl" | "markets" | "logs";
+type ViewMode = "dashboard" | "repl" | "markets" | "logs" | "activity" | "performance";
 
-const VIEW_LABELS: Record<ViewMode, string> = {
-  dashboard: "Dashboard",
-  repl: "REPL",
-  markets: "Markets",
-  logs: "Logs",
-};
+/** Tabs shown in the tab bar — REPL is excluded (opened via Ctrl+R) */
+const TAB_VIEWS: { mode: ViewMode; label: string }[] = [
+  { mode: "dashboard", label: "Dashboard" },
+  { mode: "markets", label: "Markets" },
+  { mode: "logs", label: "Logs" },
+  { mode: "activity", label: "Activity" },
+  { mode: "performance", label: "Performance" },
+];
 
 const VIEW_KEYS: Record<string, ViewMode> = {
   "1": "dashboard",
-  "2": "repl",
-  "3": "markets",
-  "4": "logs",
+  "2": "markets",
+  "3": "logs",
+  "4": "activity",
+  "5": "performance",
 };
 
 export function App() {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const [mode, setMode] = useState<ViewMode>("dashboard");
 
   useInput((input, key) => {
-    // Number keys switch views
+    // Number keys switch views (disabled while in REPL)
     if (VIEW_KEYS[input] && mode !== "repl") {
       setMode(VIEW_KEYS[input]!);
     }
@@ -37,14 +43,19 @@ export function App() {
       exit();
     }
 
-    // Tab cycles through views
-    if (key.tab && mode !== "repl") {
-      const views: ViewMode[] = ["dashboard", "repl", "markets", "logs"];
-      const idx = views.indexOf(mode);
-      setMode(views[(idx + 1) % views.length]!);
+    // Ctrl+R toggles REPL
+    if (key.ctrl && input === "r") {
+      setMode(mode === "repl" ? "dashboard" : "repl");
     }
 
-    // Escape returns to dashboard from any view
+    // Tab cycles through tab views (skips REPL)
+    if (key.tab && mode !== "repl") {
+      const idx = TAB_VIEWS.findIndex((t) => t.mode === mode);
+      const next = (idx + 1) % TAB_VIEWS.length;
+      setMode(TAB_VIEWS[next]!.mode);
+    }
+
+    // Escape returns to dashboard from any view (including REPL)
     if (key.escape) {
       setMode("dashboard");
     }
@@ -60,25 +71,33 @@ export function App() {
         return <MarketsView />;
       case "logs":
         return <LogsView />;
+      case "activity":
+        return <ActivityView />;
+      case "performance":
+        return <PerformanceView />;
     }
   }, [mode]);
 
   return (
-    <Box flexDirection="column" width="100%">
+    <Box flexDirection="column" width="100%" height={stdout.rows}>
       {/* Tab bar */}
       <Box paddingX={1} gap={2}>
-        {(Object.entries(VIEW_LABELS) as [ViewMode, string][]).map(
-          ([key, label], i) => (
-            <Text
-              key={key}
-              bold={mode === key}
-              color={mode === key ? "cyan" : "gray"}
-            >
-              [{i + 1}] {label}
-            </Text>
-          )
-        )}
-        <Text color="gray"> │ Tab: cycle │ Esc: dashboard │ Ctrl+C: quit</Text>
+        {TAB_VIEWS.map(({ mode: m, label }, i) => (
+          <Text
+            key={m}
+            bold={mode === m}
+            color={mode === m ? "cyan" : "gray"}
+          >
+            [{i + 1}] {label}
+          </Text>
+        ))}
+        <Text
+          bold={mode === "repl"}
+          color={mode === "repl" ? "cyan" : "gray"}
+        >
+          [^R] REPL
+        </Text>
+        <Text color="gray"> │ Tab: cycle │ Esc: back │ Ctrl+C: quit</Text>
       </Box>
 
       {/* Separator */}

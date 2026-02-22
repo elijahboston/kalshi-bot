@@ -1,10 +1,12 @@
 import { getConfig } from "@kcb/config";
+import { getAuthHeaders } from "./auth";
 import type {
   KalshiMarket,
   KalshiEvent,
   KalshiOrder,
   KalshiBalance,
   KalshiPosition,
+  KalshiSettlement,
   CreateOrderParams,
   GetMarketsParams,
   PaginatedResponse,
@@ -14,8 +16,6 @@ export class KalshiClient {
   private baseUrl: string;
   private apiKey: string;
   private apiSecret: string;
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
 
   constructor(opts?: { apiKey?: string; apiSecret?: string; baseUrl?: string }) {
     const config = getConfig();
@@ -26,26 +26,8 @@ export class KalshiClient {
 
   // ── Auth ──────────────────────────────────────────────────
 
-  private async ensureAuth(): Promise<string> {
-    if (this.token && Date.now() < this.tokenExpiresAt - 60_000) {
-      return this.token;
-    }
-    const res = await fetch(`${this.baseUrl}/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: this.apiKey,
-        password: this.apiSecret,
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`Kalshi auth failed: ${res.status} ${await res.text()}`);
-    }
-    const data = (await res.json()) as { token: string; member_id: string };
-    this.token = data.token;
-    // Tokens typically last 24h, refresh well before
-    this.tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
-    return this.token;
+  private buildAuthHeaders(method: string, path: string): Record<string, string> {
+    return getAuthHeaders(this.apiKey, this.apiSecret, method, path);
   }
 
   private async request<T>(
@@ -54,7 +36,6 @@ export class KalshiClient {
     body?: unknown,
     params?: Record<string, string | number | undefined>
   ): Promise<T> {
-    const token = await this.ensureAuth();
     const url = new URL(`${this.baseUrl}${path}`);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
@@ -62,10 +43,14 @@ export class KalshiClient {
       }
     }
 
+    // Auth headers sign against the path portion (no query string)
+    const fullPath = new URL(this.baseUrl).pathname + path;
+    const authHeaders = this.buildAuthHeaders(method, fullPath);
+
     const res = await fetch(url.toString(), {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...authHeaders,
         "Content-Type": "application/json",
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -117,7 +102,7 @@ export class KalshiClient {
     await this.request("DELETE", `/portfolio/orders/${orderId}`);
   }
 
-  async getOrders(params?: { ticker?: string; status?: string }): Promise<PaginatedResponse<KalshiOrder>> {
+  async getOrders(params?: { ticker?: string; status?: string; cursor?: string; limit?: number }): Promise<PaginatedResponse<KalshiOrder>> {
     return this.request("GET", "/portfolio/orders", undefined, params);
   }
 
@@ -129,5 +114,43 @@ export class KalshiClient {
 
   async getPositions(): Promise<{ market_positions: KalshiPosition[] }> {
     return this.request("GET", "/portfolio/positions");
+  }
+
+  // ── Settlements ─────────────────────────────────────────
+
+  async getSettlements(params?: {
+    cursor?: string;
+    limit?: number;
+    ticker?: string;
+  }): Promise<{ cursor: string; settlements: KalshiSettlement[] }> {
+    return this.request("GET", "/portfolio/settlements", undefined, params);
+  }
+
+  /** Fetch all settlement pages */
+  async getAllSettlements(): Promise<KalshiSettlement[]> {
+    const all: KalshiSettlement[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const res = await this.getSettlements({ cursor, limit: 200 });
+      all.push(...(res.settlements || []));
+      cursor = res.cursor || undefined;
+    } while (cursor);
+
+    return all;
+  }
+
+  /** Fetch all order pages */
+  async getAllOrders(params?: { status?: string }): Promise<KalshiOrder[]> {
+    const all: KalshiOrder[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const res = await this.getOrders({ ...params, cursor } as Record<string, string>);
+      all.push(...(res.orders || []));
+      cursor = res.cursor || undefined;
+    } while (cursor);
+
+    return all;
   }
 }

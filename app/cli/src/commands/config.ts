@@ -74,7 +74,7 @@ export const configCommands: CommandDef[] = [
         }
 
         // Update in-memory config
-        const config = getConfig() as Record<string, unknown>;
+        const config = getConfig() as unknown as Record<string, unknown>;
         let target = config;
         for (let i = 0; i < meta.path.length - 1; i++) {
           target = target[meta.path[i]!] as Record<string, unknown>;

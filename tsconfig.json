@@ -25,7 +25,13 @@
       "@kcb/engine": ["./app/engine/index.ts"],
       "@kcb/engine/*": ["./app/engine/*"],
       "@kcb/shared": ["./shared/index.ts"],
-      "@kcb/shared/*": ["./shared/*"]
+      "@kcb/shared/*": ["./shared/*"],
+      "@kcb/data": ["./app/data/index.ts"],
+      "@kcb/data/*": ["./app/data/*"],
+      "@kcb/signals": ["./app/signals/index.ts"],
+      "@kcb/signals/*": ["./app/signals/*"],
+      "@kcb/execution": ["./app/execution/index.ts"],
+      "@kcb/execution/*": ["./app/execution/*"]
     },
     "baseUrl": "."
   },

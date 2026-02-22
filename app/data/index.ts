@@ -20,7 +20,4 @@
  */
 
 export { NwsService } from "./services/nws";
-
-// TODO: Implement these
-// export { EnsembleService } from "./services/ensemble";
-// export { ObservationService } from "./services/observations";
+export { EnsembleService } from "./services/ensemble";

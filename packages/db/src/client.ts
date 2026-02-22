@@ -1,11 +1,14 @@
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
 import * as schema from "./schema";
 
 let _db: ReturnType<typeof createDb> | null = null;
 
 function createDb(dbPath?: string) {
   const path = dbPath || process.env.DB_PATH || "./data/kalshi-bot.db";
+  mkdirSync(dirname(path), { recursive: true });
   const sqlite = new Database(path, { create: true });
 
   // Performance pragmas for a single-user bot

@@ -7,13 +7,30 @@ export function StatusBar() {
   const config = getConfig();
   const [status, setStatus] = useState<BotEvents["bot:status"] | null>(null);
   const [balance, setBalance] = useState<BotEvents["balance:update"] | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const lastTickRef = React.useRef<number>(0);
 
   useEffect(() => {
     const unsubs = [
-      bus.on("bot:status", setStatus),
+      bus.on("bot:status", (s) => {
+        setStatus(s);
+        lastTickRef.current = Date.now();
+      }),
       bus.on("balance:update", setBalance),
     ];
-    return () => unsubs.forEach((u) => u());
+
+    // Update countdown every second
+    const timer = setInterval(() => {
+      if (!lastTickRef.current) return;
+      const elapsed = (Date.now() - lastTickRef.current) / 1000;
+      const remaining = Math.max(0, config.bot.tickIntervalSec - elapsed);
+      setCountdown(Math.ceil(remaining));
+    }, 1000);
+
+    return () => {
+      unsubs.forEach((u) => u());
+      clearInterval(timer);
+    };
   }, []);
 
   const running = status?.running ?? false;
@@ -26,6 +43,12 @@ export function StatusBar() {
     minute: "2-digit",
     timeZoneName: "short",
   });
+  const countdownStr =
+    countdown != null && running
+      ? countdown >= 60
+        ? `${Math.floor(countdown / 60)}m${String(countdown % 60).padStart(2, "0")}s`
+        : `${countdown}s`
+      : "—";
 
   return (
     <Box paddingX={1} gap={1}>
@@ -53,6 +76,10 @@ export function StatusBar() {
         <Text color="gray">│</Text>
         <Text>
           Ticks: <Text bold>{ticks}</Text>
+        </Text>
+        <Text color="gray">│</Text>
+        <Text>
+          Next: <Text bold color={countdown != null && countdown <= 5 ? "yellow" : "white"}>{countdownStr}</Text>
         </Text>
         <Text color="gray">│</Text>
         <Text color="gray">{now}</Text>

@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "bot": "bun run app/cli/src/index.tsx",
+    "bot:watch": "bun --watch app/cli/src/index.tsx",
     "db:generate": "bun run --filter @kcb/db generate",
     "db:migrate": "bun run --filter @kcb/db migrate",
     "db:studio": "bunx drizzle-kit studio --config packages/db/drizzle.config.ts",

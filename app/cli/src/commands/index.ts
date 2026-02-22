@@ -3,6 +3,7 @@ import { marketsCommands } from "./markets";
 import { positionsCommands } from "./positions";
 import { configCommands } from "./config";
 import { calibrationCommands } from "./calibration";
+import { explainCommands } from "./explain";
 
 export interface CommandDef {
   name: string;
@@ -18,6 +19,7 @@ const commandGroups: Record<string, CommandDef[]> = {
   positions: positionsCommands,
   config: configCommands,
   calibration: calibrationCommands,
+  explain: explainCommands,
 };
 
 /** Flat lookup of all commands by name and alias */

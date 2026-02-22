@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
-import { bus, type BotEvents } from "@kcb/engine";
+import { bus } from "@kcb/engine";
+import { logBuffer } from "../log-buffer";
 
 const LEVEL_COLORS: Record<string, string> = {
   debug: "gray",
@@ -10,24 +11,25 @@ const LEVEL_COLORS: Record<string, string> = {
 };
 
 export function LogsView() {
-  const [logs, setLogs] = useState<BotEvents["log"][]>([]);
+  const [, forceUpdate] = useState(0);
   const [filter, setFilter] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsub = bus.on("log", (entry) => {
-      setLogs((prev) => [...prev, entry].slice(-50));
+    // Re-render when new logs arrive
+    const unsub = bus.on("log", () => {
+      forceUpdate((n) => n + 1);
     });
     return unsub;
   }, []);
 
   const filtered = filter
-    ? logs.filter(
+    ? logBuffer.filter(
         (l) =>
           l.module.includes(filter) ||
           l.message.includes(filter) ||
           l.level === filter
       )
-    : logs;
+    : logBuffer;
 
   return (
     <Box flexDirection="column">
@@ -38,7 +40,7 @@ export function LogsView() {
         <Text color="gray">
           {filter ? `(filtered: "${filter}")` : "(showing all)"}
         </Text>
-        <Text color="gray">Tail last 50 entries</Text>
+        <Text color="gray">{logBuffer.length} entries</Text>
       </Box>
 
       <Text color="gray">{"─".repeat(80)}</Text>
@@ -55,7 +57,7 @@ export function LogsView() {
                 {entry.level.toUpperCase().padEnd(5)}
               </Text>
               <Text color="blue">[{entry.module}]</Text>
-              <Text>{entry.message}</Text>
+              <Text wrap="truncate">{entry.message}</Text>
             </Box>
           );
         })

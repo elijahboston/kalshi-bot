@@ -60,8 +60,21 @@ export interface BotConfig {
   };
 }
 
+import { readFileSync, existsSync } from "fs";
+import { resolve } from "path";
+import { Database } from "bun:sqlite";
+
 function env(key: string, fallback = ""): string {
   return process.env[key] || fallback;
+}
+
+/** Read a secret from a file path specified by an env var */
+function envFile(key: string, fallback = ""): string {
+  const filePath = process.env[key];
+  if (!filePath) return fallback;
+  const resolved = resolve(filePath);
+  if (!existsSync(resolved)) return fallback;
+  return readFileSync(resolved, "utf-8").trim();
 }
 
 function envBool(key: string, fallback = false): boolean {
@@ -77,12 +90,27 @@ function envNum(key: string, fallback: number): number {
   return Number.isNaN(n) ? fallback : n;
 }
 
+/** Map runtime_config DB keys to config paths */
+const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => void> = {
+  dry_run: (c, v) => { c.bot.dryRun = v === "true" || v === "1"; },
+  edge_threshold: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.edgeThreshold = n; },
+  min_confidence: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minConfidence = n; },
+  max_kelly_fraction: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxKellyFraction = n; },
+  max_open_positions: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxOpenPositions = n; },
+  max_contracts_per_order: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxContractsPerOrder = n; },
+  tick_interval_sec: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.tickIntervalSec = n; },
+  bias_window_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.calibration.biasWindowDays = n; },
+  calibration_window_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.calibration.calibrationWindowDays = n; },
+  max_calibration_error: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.calibration.maxCalibrationError = n; },
+  log_level: (c, v) => { if (["debug","info","warn","error"].includes(v)) c.log.level = v as BotConfig["log"]["level"]; },
+};
+
 /** Load config from environment variables with sensible defaults */
 export function loadConfig(): BotConfig {
-  return {
+  const config: BotConfig = {
     kalshi: {
       apiKey: env("KALSHI_API_KEY"),
-      apiSecret: env("KALSHI_API_SECRET"),
+      apiSecret: envFile("KALSHI_API_SECRET_FILE"),
       baseUrl: env("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2"),
     },
     weather: {
@@ -119,6 +147,37 @@ export function loadConfig(): BotConfig {
       anthropicApiKey: env("ANTHROPIC_API_KEY") || undefined,
     },
   };
+
+  // Apply runtime_config overrides from DB (if DB exists)
+  applyRuntimeOverrides(config);
+
+  return config;
+}
+
+/** Load persisted overrides from the runtime_config table */
+function applyRuntimeOverrides(config: BotConfig): void {
+  try {
+    const dbPath = resolve(config.db.path);
+    if (!existsSync(dbPath)) return;
+
+    const sqlite = new Database(dbPath, { readonly: true });
+    try {
+      const rows = sqlite
+        .query("SELECT key, value FROM runtime_config")
+        .all() as Array<{ key: string; value: string }>;
+
+      for (const row of rows) {
+        const applier = RUNTIME_CONFIG_MAP[row.key];
+        if (applier) {
+          applier(config, row.value);
+        }
+      }
+    } finally {
+      sqlite.close();
+    }
+  } catch {
+    // DB doesn't exist or table doesn't exist yet — silently skip
+  }
 }
 
 /** Singleton config instance */

@@ -59,6 +59,14 @@ export type BotEvents = {
     title: string;
     category: string;
   };
+  "market:priceUpdate": {
+    ticker: string;
+    yesPrice: number;
+    noPrice: number;
+    volume: number;
+    openInterest: number;
+    ts: number;
+  };
   "market:resolved": {
     ticker: string;
     result: "yes" | "no";
