@@ -220,7 +220,7 @@ export function PerformanceView() {
         </Text>
         <Text>
           <Text bold color="cyan">Win</Text>{" "}
-          <Text>{(stats.winRate * 100).toFixed(0)}%</Text>
+          <Text>{(stats.winRate * 100).toFixed(1)}%</Text>
         </Text>
         <Text>
           <Text bold color="cyan">Brier</Text>{" "}
