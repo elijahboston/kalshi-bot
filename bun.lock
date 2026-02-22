@@ -18,6 +18,7 @@
         "ink": "^5.1.0",
         "ink-text-input": "^6.0.0",
         "react": "^18.3.0",
+        "simple-ascii-chart": "^5.3.1",
       },
       "devDependencies": {
         "@types/react": "^18.3.0",
@@ -254,6 +255,8 @@
     "shell-quote": ["shell-quote@1.8.3", "", {}, "sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw=="],
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
+
+    "simple-ascii-chart": ["simple-ascii-chart@5.3.1", "", {}, "sha512-b4YBuQ70PkCE+nG8NxSJezGgguz7Er34U5oZ+wWgeHoNq2TnIqsszqdcPh/XLsTXUzeG0fYrtmfDOXaK863oMQ=="],
 
     "slice-ansi": ["slice-ansi@7.1.2", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-iOBWFgUX7caIZiuutICxVgX1SdxwAVFFKwt1EvMYYec/NWO5meOJ6K5uQxhrYBdQJne4KxiqZc+KptFOWFSI9w=="],
 

@@ -14,6 +14,13 @@ import {
   avg,
   sum,
 } from "@kcb/db";
+import {
+  renderEquityChart,
+  renderBucketChart,
+  renderDailyPnl,
+  type BucketData,
+  type DailyPnlEntry,
+} from "./charts";
 
 interface Stats {
   balance: number;
@@ -45,20 +52,14 @@ interface Resolution {
   realizedPnl: number | null;
 }
 
-const SPARKLINE_CHARS = "▁▂▃▄▅▆▇█";
-
-function sparkline(values: number[]): string {
-  if (values.length === 0) return "";
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  return values
-    .map((v) => {
-      const idx = Math.round(((v - min) / range) * (SPARKLINE_CHARS.length - 1));
-      return SPARKLINE_CHARS[idx];
-    })
-    .join("");
-}
+const BUCKETS = [
+  { label: "0.0-0.1", low: 0.0, high: 0.1 },
+  { label: "0.1-0.2", low: 0.1, high: 0.2 },
+  { label: "0.2-0.3", low: 0.2, high: 0.3 },
+  { label: "0.3-0.5", low: 0.3, high: 0.5 },
+  { label: "0.5-0.7", low: 0.5, high: 0.7 },
+  { label: "0.7-1.0", low: 0.7, high: 1.0 },
+] as const;
 
 export function PerformanceView() {
   const [stats, setStats] = useState<Stats>({
@@ -73,10 +74,9 @@ export function PerformanceView() {
   });
   const [orderRows, setOrderRows] = useState<OrderRow[]>([]);
   const [equityHistory, setEquityHistory] = useState<number[]>([]);
-  const [equityMin, setEquityMin] = useState(0);
-  const [equityMax, setEquityMax] = useState(0);
-  const [equityCurrent, setEquityCurrent] = useState(0);
   const [resolutions, setResolutions] = useState<Resolution[]>([]);
+  const [bucketStats, setBucketStats] = useState<BucketData[]>([]);
+  const [dailyPnl, setDailyPnl] = useState<DailyPnlEntry[]>([]);
 
   const loadData = async () => {
     const db = getDb();
@@ -146,7 +146,7 @@ export function PerformanceView() {
 
     setOrderRows(recentOrders);
 
-    // Load equity history for sparkline
+    // Load equity history for chart
     const eqHistory = await db
       .select({
         totalEquity: balanceHistory.totalEquity,
@@ -157,11 +157,6 @@ export function PerformanceView() {
 
     const values = eqHistory.map((r) => r.totalEquity).reverse();
     setEquityHistory(values);
-    if (values.length > 0) {
-      setEquityMin(Math.min(...values));
-      setEquityMax(Math.max(...values));
-      setEquityCurrent(values[values.length - 1]!);
-    }
 
     // Load recent resolutions
     const recentRes = await db
@@ -178,6 +173,44 @@ export function PerformanceView() {
       .limit(10);
 
     setResolutions(recentRes);
+
+    // Load calibration bucket stats
+    const calRecords = await db
+      .select({
+        predictedProb: calibration.predictedProb,
+        actualOutcome: calibration.actualOutcome,
+      })
+      .from(calibration);
+
+    const bucketData: BucketData[] = BUCKETS.map((bucket) => {
+      const inBucket = calRecords.filter(
+        (r) => r.predictedProb >= bucket.low && r.predictedProb < bucket.high,
+      );
+      return {
+        label: bucket.label,
+        hits: inBucket.filter((r) => r.actualOutcome === 1).length,
+        total: inBucket.length,
+      };
+    });
+    setBucketStats(bucketData);
+
+    // Load daily P&L (last 7 days)
+    const dailyRows = await db
+      .select({
+        day: sql<string>`date(${calibration.resolvedAt})`.as("day"),
+        pnl: sql<number>`COALESCE(SUM(${calibration.realizedPnl}), 0)`.as("pnl"),
+      })
+      .from(calibration)
+      .where(sql`${calibration.traded} = 1`)
+      .groupBy(sql`date(${calibration.resolvedAt})`)
+      .orderBy(sql`date(${calibration.resolvedAt}) DESC`)
+      .limit(7);
+
+    setDailyPnl(
+      dailyRows
+        .map((r) => ({ date: r.day, pnl: Number(r.pnl) }))
+        .reverse(),
+    );
   };
 
   useEffect(() => {
@@ -196,8 +229,8 @@ export function PerformanceView() {
 
   return (
     <Box flexDirection="column">
-      {/* Stats Bar */}
-      <Box gap={2} marginBottom={1}>
+      {/* Stats Bar — Row 1 */}
+      <Box gap={2}>
         <Text>
           <Text bold color="cyan">Bal</Text>{" "}
           <Text>${(stats.balance / 100).toFixed(2)}</Text>
@@ -218,6 +251,9 @@ export function PerformanceView() {
             {stats.realizedPnl >= 0 ? "+" : ""}${(stats.realizedPnl / 100).toFixed(2)}
           </Text>
         </Text>
+      </Box>
+      {/* Stats Bar — Row 2 */}
+      <Box gap={2} marginBottom={1}>
         <Text>
           <Text bold color="cyan">Win</Text>{" "}
           <Text>{(stats.winRate * 100).toFixed(1)}%</Text>
@@ -236,10 +272,68 @@ export function PerformanceView() {
         </Text>
       </Box>
 
-      <Text color="gray">{"─".repeat(80)}</Text>
+      {/* Equity Curve */}
+      <Text bold color="cyan">{"─── Equity Curve (" + equityHistory.length + " snapshots) " + "─".repeat(40)}</Text>
+      <Box marginBottom={1}>
+        <Text color="green">{renderEquityChart(equityHistory, 60, 8)}</Text>
+      </Box>
 
-      {/* Order History */}
-      <Text bold color="cyan">Order History ({orderRows.length})</Text>
+      {/* Calibration Buckets */}
+      <Text bold color="cyan">{"─── Calibration Buckets " + "─".repeat(56)}</Text>
+      <Box marginBottom={1}>
+        <Text>{renderBucketChart(bucketStats)}</Text>
+      </Box>
+
+      {/* P&L by Day */}
+      <Text bold color="cyan">{"─── P&L by Day " + "─".repeat(65)}</Text>
+      <Box marginBottom={1}>
+        <Text>{renderDailyPnl(dailyPnl)}</Text>
+      </Box>
+
+      {/* Recent Resolutions */}
+      <Text bold color="cyan">{"─── Recent Resolutions " + "─".repeat(57)}</Text>
+      <Box gap={1}>
+        <Box width={28}><Text bold color="gray">TICKER</Text></Box>
+        <Box width={10}><Text bold color="gray">PREDICTED</Text></Box>
+        <Box width={8}><Text bold color="gray">ACTUAL</Text></Box>
+        <Box width={8}><Text bold color="gray">EDGE</Text></Box>
+        <Box width={10}><Text bold color="gray">PnL</Text></Box>
+      </Box>
+      {resolutions.length === 0 ? (
+        <Text color="gray">No resolved trades yet.</Text>
+      ) : (
+        resolutions.map((r, i) => {
+          const pnlColor = r.realizedPnl != null && r.realizedPnl > 0 ? "green" : r.realizedPnl != null && r.realizedPnl < 0 ? "red" : "gray";
+          return (
+            <Box key={`${r.ticker}-${i}`} gap={1}>
+              <Box width={28}><Text>{r.ticker}</Text></Box>
+              <Box width={10}>
+                <Text>{(r.predictedProb * 100).toFixed(0)}%</Text>
+              </Box>
+              <Box width={8}>
+                <Text>{r.actualOutcome === 1 ? "YES" : "NO"}</Text>
+              </Box>
+              <Box width={8}>
+                <Text color={r.edge > 0 ? "green" : "red"}>
+                  {r.edge > 0 ? "+" : ""}{(r.edge * 100).toFixed(1)}
+                </Text>
+              </Box>
+              <Box width={10}>
+                <Text color={pnlColor}>
+                  {r.realizedPnl != null
+                    ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
+                    : "—"}
+                </Text>
+              </Box>
+            </Box>
+          );
+        })
+      )}
+
+      <Box marginTop={1} />
+
+      {/* Order History (compact) */}
+      <Text bold color="cyan">{"─── Order History (" + orderRows.length + ") " + "─".repeat(57)}</Text>
       <Box gap={1}>
         <Box width={10}><Text bold color="gray">TIME</Text></Box>
         <Box width={28}><Text bold color="gray">TICKER</Text></Box>
@@ -283,65 +377,6 @@ export function PerformanceView() {
               </Box>
               <Box width={5}>
                 {o.dryRun ? <Text color="yellow">DRY</Text> : <Text color="gray">—</Text>}
-              </Box>
-            </Box>
-          );
-        })
-      )}
-
-      <Text color="gray">{"─".repeat(80)}</Text>
-
-      {/* Equity Curve */}
-      <Box gap={2}>
-        <Text bold color="cyan">Equity</Text>
-        {equityHistory.length > 0 ? (
-          <>
-            <Text color="green">{sparkline(equityHistory)}</Text>
-            <Text color="gray">
-              min ${(equityMin / 100).toFixed(2)} │ max ${(equityMax / 100).toFixed(2)} │ now ${(equityCurrent / 100).toFixed(2)}
-            </Text>
-          </>
-        ) : (
-          <Text color="gray">No equity data yet.</Text>
-        )}
-      </Box>
-
-      <Text color="gray">{"─".repeat(80)}</Text>
-
-      {/* Recent Resolutions */}
-      <Text bold color="cyan">Recent Resolutions</Text>
-      <Box gap={1}>
-        <Box width={28}><Text bold color="gray">TICKER</Text></Box>
-        <Box width={10}><Text bold color="gray">PREDICTED</Text></Box>
-        <Box width={8}><Text bold color="gray">ACTUAL</Text></Box>
-        <Box width={8}><Text bold color="gray">EDGE</Text></Box>
-        <Box width={10}><Text bold color="gray">PnL</Text></Box>
-      </Box>
-      {resolutions.length === 0 ? (
-        <Text color="gray">No resolved trades yet.</Text>
-      ) : (
-        resolutions.map((r, i) => {
-          const pnlColor = r.realizedPnl != null && r.realizedPnl > 0 ? "green" : r.realizedPnl != null && r.realizedPnl < 0 ? "red" : "gray";
-          return (
-            <Box key={`${r.ticker}-${i}`} gap={1}>
-              <Box width={28}><Text>{r.ticker}</Text></Box>
-              <Box width={10}>
-                <Text>{(r.predictedProb * 100).toFixed(0)}%</Text>
-              </Box>
-              <Box width={8}>
-                <Text>{r.actualOutcome === 1 ? "YES" : "NO"}</Text>
-              </Box>
-              <Box width={8}>
-                <Text color={r.edge > 0 ? "green" : "red"}>
-                  {r.edge > 0 ? "+" : ""}{(r.edge * 100).toFixed(1)}
-                </Text>
-              </Box>
-              <Box width={10}>
-                <Text color={pnlColor}>
-                  {r.realizedPnl != null
-                    ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
-                    : "—"}
-                </Text>
               </Box>
             </Box>
           );

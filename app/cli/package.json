@@ -7,12 +7,13 @@
     "start": "bun run src/index.tsx"
   },
   "dependencies": {
+    "@kcb/config": "workspace:*",
+    "@kcb/db": "workspace:*",
+    "@kcb/engine": "workspace:*",
     "ink": "^5.1.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.0",
-    "@kcb/db": "workspace:*",
-    "@kcb/config": "workspace:*",
-    "@kcb/engine": "workspace:*"
+    "simple-ascii-chart": "^5.3.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.0"
