@@ -86,9 +86,9 @@ export function fToC(fahrenheit: number): number {
   return (fahrenheit - 32) * 5 / 9;
 }
 
-/** Generate a UUID (uses crypto.randomUUID in Bun) */
+/** Generate a sortable UUID v7 (monotonic, ideal for DB primary keys) */
 export function uuid(): string {
-  return crypto.randomUUID();
+  return Bun.randomUUIDv7();
 }
 
 /** ISO timestamp for now */

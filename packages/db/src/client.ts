@@ -9,7 +9,7 @@ let _db: ReturnType<typeof createDb> | null = null;
 function createDb(dbPath?: string) {
   const path = dbPath || process.env.DB_PATH || "./data/kalshi-bot.db";
   mkdirSync(dirname(path), { recursive: true });
-  const sqlite = new Database(path, { create: true });
+  const sqlite = new Database(path, { create: true, strict: true });
 
   // Performance pragmas for a single-user bot
   sqlite.exec("PRAGMA journal_mode = WAL");
