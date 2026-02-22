@@ -129,11 +129,11 @@ export class ProbabilityEstimator {
 
 // ── Helpers ────────────────────────────────────────────────
 
-function mean(values: number[]): number {
+export function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-function std(values: number[]): number {
+export function std(values: number[]): number {
   const m = mean(values);
   const variance = values.reduce((sum, v) => sum + (v - m) ** 2, 0) / values.length;
   return Math.sqrt(variance);

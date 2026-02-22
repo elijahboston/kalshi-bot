@@ -13,7 +13,7 @@ import {
 const log = createLogger("discovery");
 
 /** Parse a Kalshi climate ticker into its components */
-function parseTicker(ticker: string) {
+export function parseTicker(ticker: string) {
   // e.g. KXHIGHNY-25FEB19-B37
   const parts = ticker.split("-");
   if (parts.length < 3) return null;

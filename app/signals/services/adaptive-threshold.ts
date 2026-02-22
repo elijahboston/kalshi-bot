@@ -4,7 +4,7 @@ import { createLogger } from "@kcb/engine";
 
 const log = createLogger("adaptive-threshold");
 
-const BUCKETS = [
+export const BUCKETS = [
   { label: "0.0-0.1", low: 0.0, high: 0.1 },
   { label: "0.1-0.2", low: 0.1, high: 0.2 },
   { label: "0.2-0.3", low: 0.2, high: 0.3 },
@@ -13,7 +13,7 @@ const BUCKETS = [
   { label: "0.7-1.0", low: 0.7, high: 1.0 },
 ] as const;
 
-function getBucket(prob: number) {
+export function getBucket(prob: number) {
   return BUCKETS.find((b) => prob >= b.low && prob < b.high) || BUCKETS[BUCKETS.length - 1]!;
 }
 
