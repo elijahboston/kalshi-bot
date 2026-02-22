@@ -9,9 +9,9 @@ describe("BUCKETS", () => {
   test("buckets cover 0.0 to 1.0 without gaps", () => {
     expect(BUCKETS[0]!.low).toBe(0.0);
     for (let i = 1; i < BUCKETS.length; i++) {
-      expect(BUCKETS[i]!.low).toBe(BUCKETS[i - 1]!.high);
+      expect(BUCKETS[i]!.low as number).toBe(BUCKETS[i - 1]!.high as number);
     }
-    expect(BUCKETS[BUCKETS.length - 1]!.high).toBe(1.0);
+    expect(BUCKETS[5]!.high).toBe(1.0);
   });
 });
 

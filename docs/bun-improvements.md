@@ -10,10 +10,10 @@ Improvements identified from the Bun API docs. Checked items are complete.
 
 ## Medium Impact
 
-- [ ] **`Bun.nanoseconds()`** — Replace `Date.now()` in `app/engine/services/loop.ts` for tick timing. Sub-microsecond precision.
-- [ ] **`BUN_CONFIG_VERBOSE_FETCH=curl`** — Add a `debug:fetch` script to `package.json`. Zero code changes, logs all fetch requests curl-style.
-- [ ] **`Bun.CryptoHasher`** — Replace `node:crypto` HMAC in `packages/kalshi-client/src/auth.ts` with Bun's native implementation.
-- [ ] **`Bun.env` type augmentation** — Declare env var types for autocomplete and stricter typing across the config module.
+- [x] **`Bun.nanoseconds()`** — Replace `Date.now()` in `app/engine/services/loop.ts` for tick timing. Sub-microsecond precision.
+- [x] **`BUN_CONFIG_VERBOSE_FETCH=curl`** — Add `bot:debug-fetch` script to `package.json`. Zero code changes, logs all fetch requests curl-style.
+- [x] ~~**`Bun.CryptoHasher`**~~ — N/A. Auth uses RSA-PSS signing (`node:crypto` `sign()`), not HMAC. `Bun.CryptoHasher` doesn't cover asymmetric signing.
+- [x] **`Bun.env` type augmentation** — Added `env.d.ts` with typed env vars for autocomplete and stricter typing.
 
 ## Low Impact (Cleanup)
 

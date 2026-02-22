@@ -30,7 +30,7 @@ export function registerTick(fn: TickFn): void {
 async function runTick(): Promise<void> {
   if (!state.running || !tickFn) return;
 
-  const tickStart = Date.now();
+  const tickStart = Bun.nanoseconds();
   state.tickCount++;
   state.lastTickAt = new Date().toISOString();
 
@@ -53,8 +53,8 @@ async function runTick(): Promise<void> {
     });
   }
 
-  const elapsed = Date.now() - tickStart;
-  log.debug(`Tick #${state.tickCount} completed in ${elapsed}ms`);
+  const elapsedMs = (Bun.nanoseconds() - tickStart) / 1_000_000;
+  log.debug(`Tick #${state.tickCount} completed in ${elapsedMs.toFixed(2)}ms`);
 }
 
 export function startLoop(): void {
