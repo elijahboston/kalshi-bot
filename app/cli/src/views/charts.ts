@@ -1,23 +1,39 @@
 import plot from "simple-ascii-chart";
 
+/** A portfolio snapshot with timestamp */
+export interface PortfolioPoint {
+  portfolio: number;
+  recordedAt: string;
+}
+
 /**
- * Render an equity curve line chart using simple-ascii-chart.
+ * Render a portfolio value line chart using simple-ascii-chart.
+ * Accepts timestamped snapshots covering the full bot lifetime,
+ * downsamples to fit the chart width, and labels the x-axis in hours.
  * Returns a multi-line string ready to embed in <Text>.
  */
-export function renderEquityChart(
-  values: number[],
+export function renderPortfolioChart(
+  points: PortfolioPoint[],
   width = 60,
   height = 8,
 ): string {
-  if (values.length === 0) return "  No equity data yet.";
-  if (values.length === 1) {
-    return `  $${(values[0]! / 100).toFixed(2)} (single point)`;
+  if (points.length === 0) return "  No portfolio data yet.";
+  if (points.length === 1) {
+    return `  $${(points[0]!.portfolio / 100).toFixed(2)} (single point)`;
   }
 
-  // Convert cents to dollars for display, indexed by position
-  const points: [number, number][] = values.map((v, i) => [i, v / 100]);
+  // Downsample to ~width points if needed (keep first and last)
+  const sampled = downsample(points, width);
 
-  return plot(points, {
+  const t0 = new Date(sampled[0]!.recordedAt).getTime();
+
+  // Plot with x = hours since first snapshot
+  const chartPoints: [number, number][] = sampled.map((p) => {
+    const hoursElapsed = (new Date(p.recordedAt).getTime() - t0) / 3_600_000;
+    return [hoursElapsed, p.portfolio / 100];
+  });
+
+  return plot(chartPoints, {
     width,
     height,
     color: "ansiGreen",
@@ -27,6 +43,33 @@ export function renderEquityChart(
       return value;
     },
   });
+}
+
+/** Format a duration in ms to a human-readable label like "3d 4h" or "2h 15m" */
+export function formatDuration(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60_000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+/** Evenly sample points from an array, always keeping first and last */
+function downsample(points: PortfolioPoint[], maxPoints: number): PortfolioPoint[] {
+  if (points.length <= maxPoints) return points;
+
+  const result: PortfolioPoint[] = [points[0]!];
+  const step = (points.length - 1) / (maxPoints - 1);
+
+  for (let i = 1; i < maxPoints - 1; i++) {
+    result.push(points[Math.round(i * step)]!);
+  }
+
+  result.push(points[points.length - 1]!);
+  return result;
 }
 
 /**

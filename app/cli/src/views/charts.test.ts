@@ -1,41 +1,76 @@
 import { test, expect, describe } from "bun:test";
 import {
-  renderEquityChart,
+  renderPortfolioChart,
   renderHorizontalBar,
   renderBucketChart,
   renderDailyPnl,
+  formatDuration,
+  type PortfolioPoint,
 } from "./charts";
 
-describe("renderEquityChart", () => {
+/** Helper to build PortfolioPoint[] from values with hourly spacing */
+function makePoints(values: number[], startIso = "2026-02-20T00:00:00Z"): PortfolioPoint[] {
+  const t0 = new Date(startIso).getTime();
+  return values.map((v, i) => ({
+    portfolio: v,
+    recordedAt: new Date(t0 + i * 3_600_000).toISOString(),
+  }));
+}
+
+describe("renderPortfolioChart", () => {
   test("returns multi-line string with correct approximate height", () => {
-    const values = [4000, 4200, 4100, 4400, 4300, 4500, 4600, 4550, 4700, 4800];
-    const result = renderEquityChart(values, 40, 6);
+    const points = makePoints([4000, 4200, 4100, 4400, 4300, 4500, 4600, 4550, 4700, 4800]);
+    const result = renderPortfolioChart(points, 40, 6);
     const lines = result.split("\n");
     // simple-ascii-chart adds axis lines, so height >= requested
     expect(lines.length).toBeGreaterThanOrEqual(6);
   });
 
   test("returns placeholder for empty data", () => {
-    const result = renderEquityChart([]);
-    expect(result).toContain("No equity data");
+    const result = renderPortfolioChart([]);
+    expect(result).toContain("No portfolio data");
   });
 
   test("returns single point message for one value", () => {
-    const result = renderEquityChart([5000]);
+    const result = renderPortfolioChart(makePoints([5000]));
     expect(result).toContain("$50.00");
     expect(result).toContain("single point");
   });
 
   test("handles two points", () => {
-    const result = renderEquityChart([4000, 4200], 30, 4);
+    const result = renderPortfolioChart(makePoints([4000, 4200]), 30, 4);
     expect(result.split("\n").length).toBeGreaterThanOrEqual(2);
   });
 
   test("handles all same values", () => {
-    const result = renderEquityChart([5000, 5000, 5000, 5000], 30, 4);
+    const result = renderPortfolioChart(makePoints([5000, 5000, 5000, 5000]), 30, 4);
     // Should not crash, returns a valid string
     expect(typeof result).toBe("string");
     expect(result.length).toBeGreaterThan(0);
+  });
+
+  test("downsamples large datasets without crashing", () => {
+    const values = Array.from({ length: 500 }, (_, i) => 4000 + i * 2);
+    const result = renderPortfolioChart(makePoints(values), 60, 8);
+    expect(result.split("\n").length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("formatDuration", () => {
+  test("formats days and hours", () => {
+    expect(formatDuration(3 * 86_400_000 + 4 * 3_600_000)).toBe("3d 4h");
+  });
+
+  test("formats hours and minutes", () => {
+    expect(formatDuration(2 * 3_600_000 + 15 * 60_000)).toBe("2h 15m");
+  });
+
+  test("formats minutes only", () => {
+    expect(formatDuration(45 * 60_000)).toBe("45m");
+  });
+
+  test("formats zero", () => {
+    expect(formatDuration(0)).toBe("0m");
   });
 });
 

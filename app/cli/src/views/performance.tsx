@@ -15,16 +15,18 @@ import {
   sum,
 } from "@kcb/db";
 import {
-  renderEquityChart,
+  renderPortfolioChart,
   renderBucketChart,
   renderDailyPnl,
+  formatDuration,
+  type PortfolioPoint,
   type BucketData,
   type DailyPnlEntry,
 } from "./charts";
 
 interface Stats {
-  balance: number;
-  totalEquity: number;
+  cash: number;
+  portfolio: number;
   unrealizedPnl: number;
   realizedPnl: number;
   winRate: number;
@@ -63,8 +65,8 @@ const BUCKETS = [
 
 export function PerformanceView() {
   const [stats, setStats] = useState<Stats>({
-    balance: 0,
-    totalEquity: 0,
+    cash: 0,
+    portfolio: 0,
     unrealizedPnl: 0,
     realizedPnl: 0,
     winRate: 0,
@@ -73,7 +75,7 @@ export function PerformanceView() {
     positionCount: 0,
   });
   const [orderRows, setOrderRows] = useState<OrderRow[]>([]);
-  const [equityHistory, setEquityHistory] = useState<number[]>([]);
+  const [portfolioHistory, setPortfolioHistory] = useState<PortfolioPoint[]>([]);
   const [resolutions, setResolutions] = useState<Resolution[]>([]);
   const [bucketStats, setBucketStats] = useState<BucketData[]>([]);
   const [dailyPnl, setDailyPnl] = useState<DailyPnlEntry[]>([]);
@@ -118,8 +120,8 @@ export function PerformanceView() {
     const wins = Number(calAgg[0]?.wins ?? 0);
 
     setStats({
-      balance: latestBalance[0]?.balance ?? 0,
-      totalEquity: latestBalance[0]?.totalEquity ?? 0,
+      cash: latestBalance[0]?.balance ?? 0,
+      portfolio: latestBalance[0]?.totalEquity ?? 0,
       unrealizedPnl,
       realizedPnl: Number(calAgg[0]?.totalPnl ?? 0),
       winRate: settledCount > 0 ? wins / settledCount : 0,
@@ -146,17 +148,18 @@ export function PerformanceView() {
 
     setOrderRows(recentOrders);
 
-    // Load equity history for chart
+    // Load full equity history for chart (all snapshots since bot init)
     const eqHistory = await db
       .select({
         totalEquity: balanceHistory.totalEquity,
+        recordedAt: balanceHistory.recordedAt,
       })
       .from(balanceHistory)
-      .orderBy(desc(balanceHistory.recordedAt))
-      .limit(20);
+      .orderBy(balanceHistory.recordedAt);
 
-    const values = eqHistory.map((r) => r.totalEquity).reverse();
-    setEquityHistory(values);
+    setPortfolioHistory(
+      eqHistory.map((r) => ({ portfolio: r.totalEquity, recordedAt: r.recordedAt })),
+    );
 
     // Load recent resolutions
     const recentRes = await db
@@ -232,12 +235,12 @@ export function PerformanceView() {
       {/* Stats Bar — Row 1 */}
       <Box gap={2}>
         <Text>
-          <Text bold color="cyan">Bal</Text>{" "}
-          <Text>${(stats.balance / 100).toFixed(2)}</Text>
+          <Text bold color="cyan">Cash</Text>{" "}
+          <Text>${(stats.cash / 100).toFixed(2)}</Text>
         </Text>
         <Text>
-          <Text bold color="cyan">Eq</Text>{" "}
-          <Text>${(stats.totalEquity / 100).toFixed(2)}</Text>
+          <Text bold color="cyan">Portfolio</Text>{" "}
+          <Text>${(stats.portfolio / 100).toFixed(2)}</Text>
         </Text>
         <Text>
           <Text bold color="cyan">Unreal</Text>{" "}
@@ -272,10 +275,15 @@ export function PerformanceView() {
         </Text>
       </Box>
 
-      {/* Equity Curve */}
-      <Text bold color="cyan">{"─── Equity Curve (" + equityHistory.length + " snapshots) " + "─".repeat(40)}</Text>
+      {/* Portfolio Curve */}
+      <Text bold color="cyan">{"─── Portfolio (" + (portfolioHistory.length >= 2
+        ? formatDuration(
+            new Date(portfolioHistory[portfolioHistory.length - 1]!.recordedAt).getTime() -
+            new Date(portfolioHistory[0]!.recordedAt).getTime()
+          )
+        : portfolioHistory.length + " snapshots") + ") " + "─".repeat(40)}</Text>
       <Box marginBottom={1}>
-        <Text color="green">{renderEquityChart(equityHistory, 60, 8)}</Text>
+        <Text color="green">{renderPortfolioChart(portfolioHistory, 60, 8)}</Text>
       </Box>
 
       {/* Calibration Buckets */}
