@@ -35,8 +35,8 @@ export function StatusBar() {
 
   const running = status?.running ?? false;
   const dryRun = config.bot.dryRun;
-  const bal = balance ? `$${(balance.balance / 100).toFixed(2)}` : "—";
-  const equity = balance ? `$${(balance.totalEquity / 100).toFixed(2)}` : "—";
+  const cash = balance ? `$${(balance.cash / 100).toFixed(2)}` : "—";
+  const portfolio = balance ? `$${(balance.portfolio / 100).toFixed(2)}` : "—";
   const ticks = status?.tickCount ?? 0;
   const now = new Date().toLocaleTimeString("en-US", {
     hour: "2-digit",
@@ -68,10 +68,10 @@ export function StatusBar() {
 
         <Text color="gray">│</Text>
         <Text>
-          Balance: <Text bold>{bal}</Text>
+          Cash: <Text bold>{cash}</Text>
         </Text>
         <Text>
-          Equity: <Text bold>{equity}</Text>
+          Portfolio: <Text bold>{portfolio}</Text>
         </Text>
         <Text color="gray">│</Text>
         <Text>

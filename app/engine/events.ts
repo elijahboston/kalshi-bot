@@ -50,8 +50,8 @@ export type BotEvents = {
     avgEntryPrice: number;
   };
   "balance:update": {
-    balance: number;
-    totalEquity: number;
+    cash: number;
+    portfolio: number;
   };
   "market:discovered": {
     ticker: string;

@@ -296,16 +296,16 @@ export class ReconciliationService {
       const response = await this.kalshi.getPositions();
       const kalshiPositions = response.market_positions || [];
 
-      if (kalshiPositions.length === 0) return;
-
-      // Log the shape of the first position so we can see what the API returns
-      log.debug(
-        `Kalshi positions response (${kalshiPositions.length}): ${JSON.stringify(kalshiPositions[0])}`,
-      );
-
       const db = getDb();
       const timestamp = now();
       const kalshiTickers = new Set<string>();
+
+      if (kalshiPositions.length > 0) {
+        // Log the shape of the first position so we can see what the API returns
+        log.debug(
+          `Kalshi positions response (${kalshiPositions.length}): ${JSON.stringify(kalshiPositions[0])}`,
+        );
+      }
 
       for (const kp of kalshiPositions) {
         const ticker = kp.ticker;
@@ -395,8 +395,21 @@ export class ReconciliationService {
         });
       }
 
-      if (kalshiTickers.size > 0) {
-        log.info(`Synced ${kalshiTickers.size} position(s) from Kalshi`);
+      // Remove local positions that Kalshi no longer reports (settled/closed)
+      const localPositions = await db.select().from(positions);
+      let removed = 0;
+      for (const lp of localPositions) {
+        if (!kalshiTickers.has(lp.ticker)) {
+          await db.delete(positions).where(eq(positions.ticker, lp.ticker));
+          removed++;
+        }
+      }
+
+      if (kalshiTickers.size > 0 || removed > 0) {
+        log.info(
+          `Synced ${kalshiTickers.size} position(s) from Kalshi` +
+          (removed > 0 ? `, removed ${removed} stale position(s)` : "")
+        );
       }
     } catch (err) {
       log.warn(
@@ -905,24 +918,24 @@ export class ReconciliationService {
       0
     );
 
-    const totalEquity = balance + positionValue;
+    const portfolio = balance + positionValue;
 
     await db.insert(balanceHistory).values({
       id: uuid(),
       balance,
-      totalEquity: Math.round(totalEquity),
+      totalEquity: Math.round(portfolio),
       openPositions: openPositions.length,
       realizedPnl: Math.round(realizedPnl),
       recordedAt: now(),
     });
 
     bus.emit("balance:update", {
-      balance,
-      totalEquity: Math.round(totalEquity),
+      cash: balance,
+      portfolio: Math.round(portfolio),
     });
 
     log.info(
-      `Balance snapshot: $${(balance / 100).toFixed(2)}, ${openPositions.length} positions, equity $${(totalEquity / 100).toFixed(2)}`
+      `Snapshot: cash $${(balance / 100).toFixed(2)}, ${openPositions.length} positions, portfolio $${(portfolio / 100).toFixed(2)}`
     );
   }
 }

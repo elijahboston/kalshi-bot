@@ -113,7 +113,7 @@ export function ActivityView() {
       }),
 
       bus.on("balance:update", (b) => {
-        pushEvent(`Balance $${(b.balance / 100).toFixed(2)} | Equity $${(b.totalEquity / 100).toFixed(2)}`, "white");
+        pushEvent(`Cash $${(b.cash / 100).toFixed(2)} | Portfolio $${(b.portfolio / 100).toFixed(2)}`, "white");
       }),
 
       bus.on("bot:error", (e) => {
