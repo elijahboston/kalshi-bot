@@ -1,8 +1,8 @@
 import { getConfig } from "@kcb/config";
 import { getDb, orders, positions, eq } from "@kcb/db";
+import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
-import type { Signal } from "@kcb/db";
 
 const log = createLogger("execution");
 
@@ -143,6 +143,100 @@ export class ExecutionService {
       side,
       price,
       quantity: contracts,
+      dryRun: false,
+    });
+
+    return result.order.order_id;
+  }
+
+  /**
+   * Exit a position by placing a sell order for the full quantity.
+   * @param currentYesPrice Current market yes price in cents (1-99)
+   */
+  async executeExit(position: Position, reason: string, currentYesPrice: number): Promise<string | null> {
+    const config = getConfig();
+    const db = getDb();
+    const side = position.side as "yes" | "no";
+
+    // Price the sell at the current bid side to fill quickly.
+    // Sell 1¢ below the current price to cross the spread.
+    const price = side === "yes"
+      ? Math.max(1, currentYesPrice - 1)
+      : Math.max(1, (100 - currentYesPrice) - 1);
+
+    log.info(
+      `Exiting ${side.toUpperCase()} ${position.ticker} × ${position.quantity} @ ${price}¢ — ${reason}`
+    );
+
+    if (config.bot.dryRun) {
+      const orderId = `dry-exit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const nowTs = new Date().toISOString();
+
+      await db.insert(orders).values({
+        orderId,
+        ticker: position.ticker,
+        action: "sell",
+        side,
+        limitPrice: price,
+        quantity: position.quantity,
+        filledQuantity: position.quantity,
+        status: "filled",
+        signalId: null,
+        dryRun: true,
+        kellyFraction: null,
+        createdAt: nowTs,
+        updatedAt: nowTs,
+      });
+
+      bus.emit("order:placed", {
+        orderId,
+        ticker: position.ticker,
+        action: "sell",
+        side,
+        price,
+        quantity: position.quantity,
+        dryRun: true,
+      });
+
+      return orderId;
+    }
+
+    // Live mode
+    const result = await this.kalshi.createOrder({
+      ticker: position.ticker,
+      action: "sell",
+      side,
+      type: "limit",
+      count: position.quantity,
+      ...(side === "yes"
+        ? { yes_price: price }
+        : { no_price: price }),
+    });
+
+    const nowTs = new Date().toISOString();
+    await db.insert(orders).values({
+      orderId: result.order.order_id,
+      ticker: position.ticker,
+      action: "sell",
+      side,
+      limitPrice: price,
+      quantity: position.quantity,
+      filledQuantity: 0,
+      status: "open",
+      signalId: null,
+      dryRun: false,
+      kellyFraction: null,
+      createdAt: nowTs,
+      updatedAt: nowTs,
+    });
+
+    bus.emit("order:placed", {
+      orderId: result.order.order_id,
+      ticker: position.ticker,
+      action: "sell",
+      side,
+      price,
+      quantity: position.quantity,
       dryRun: false,
     });
 

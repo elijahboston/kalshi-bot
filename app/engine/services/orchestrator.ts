@@ -1,4 +1,4 @@
-import { getDb, markets, signals, balanceHistory, eq, and, sql, desc } from "@kcb/db";
+import { getDb, markets, signals, positions, balanceHistory, eq, and, sql, desc } from "@kcb/db";
 import type { Market } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, KalshiFeed } from "@kcb/kalshi-client";
@@ -230,6 +230,70 @@ export async function initOrchestrator(): Promise<void> {
     log.info(
       `Generated ${estimates.length} signals (${actionableSignals.length} actionable)`
     );
+
+    // Phase 3.5: Exit evaluation — Check open positions for exit triggers
+    log.debug("Phase 3.5: Exit evaluation");
+
+    const openPositions = await db.select().from(positions);
+
+    for (const position of openPositions) {
+      try {
+        const side = position.side as "yes" | "no";
+
+        // Look up the market for current price and close time
+        const [market] = await db
+          .select()
+          .from(markets)
+          .where(eq(markets.ticker, position.ticker))
+          .limit(1);
+        if (!market) continue;
+
+        const marketPrice = (market.lastYesPrice ?? 50) / 100;
+
+        // Find the latest estimate for this ticker
+        const est = estimates.find((e) => e.market.ticker === position.ticker);
+        if (!est) continue; // no fresh estimate, skip exit evaluation
+
+        // Compute held-side edge
+        const edge = side === "yes"
+          ? est.estimate.probability - marketPrice
+          : (1 - est.estimate.probability) - (1 - marketPrice);
+
+        // Check exit triggers
+        let exitReason: string | null = null;
+
+        // 1. Edge reversal
+        if (edge < config.bot.exitEdgeThreshold) {
+          exitReason = `edge reversal (${(edge * 100).toFixed(1)}¢ < ${(config.bot.exitEdgeThreshold * 100).toFixed(1)}¢ threshold)`;
+        }
+
+        // 2. Stop-loss
+        if (!exitReason && position.costBasis > 0) {
+          const lossPct = position.unrealizedPnl / position.costBasis;
+          if (lossPct < -config.bot.stopLossPct) {
+            exitReason = `stop-loss (${(lossPct * 100).toFixed(1)}% loss > ${(config.bot.stopLossPct * 100).toFixed(0)}% limit)`;
+          }
+        }
+
+        // 3. Time decay
+        if (!exitReason && market.closeTime) {
+          const closeDate = new Date(market.closeTime);
+          const nowDate = new Date();
+          const daysUntilClose = (closeDate.getTime() - nowDate.getTime()) / (1000 * 60 * 60 * 24);
+          if (daysUntilClose <= config.bot.exitTimeDaysBeforeClose && edge < config.bot.exitTimeMinEdge) {
+            exitReason = `time decay (${(daysUntilClose * 24).toFixed(1)}h to close, edge ${(edge * 100).toFixed(1)}¢ < ${(config.bot.exitTimeMinEdge * 100).toFixed(0)}¢)`;
+          }
+        }
+
+        if (exitReason) {
+          await executionService.executeExit(position, exitReason, market.lastYesPrice ?? 50);
+        }
+      } catch (err) {
+        log.error(
+          `Exit evaluation failed for ${position.ticker}: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
 
     // Phase 4: Execute — Place/cancel orders based on signals
     log.debug("Phase 4: Order execution");

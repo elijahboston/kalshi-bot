@@ -32,6 +32,14 @@ export interface BotConfig {
     enabledSeries: string[];
     /** Stations to track */
     enabledStations: string[];
+    /** Exit when held-side edge drops below this (0-1) */
+    exitEdgeThreshold: number;
+    /** Exit when unrealized loss exceeds this fraction of cost basis */
+    stopLossPct: number;
+    /** Start exit evaluation this many days before market close */
+    exitTimeDaysBeforeClose: number;
+    /** When inside exit time window, only keep positions with edge above this */
+    exitTimeMinEdge: number;
   };
 
   /** Calibration parameters */
@@ -103,6 +111,10 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   calibration_window_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.calibration.calibrationWindowDays = n; },
   max_calibration_error: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.calibration.maxCalibrationError = n; },
   log_level: (c, v) => { if (["debug","info","warn","error"].includes(v)) c.log.level = v as BotConfig["log"]["level"]; },
+  exit_edge_threshold: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitEdgeThreshold = n; },
+  stop_loss_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stopLossPct = n; },
+  exit_time_days_before_close: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeDaysBeforeClose = n; },
+  exit_time_min_edge: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeMinEdge = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -120,17 +132,21 @@ export function loadConfig(): BotConfig {
     bot: {
       dryRun: envBool("DRY_RUN", true),
       tickIntervalSec: envNum("TICK_INTERVAL_SEC", 60),
-      edgeThreshold: envNum("EDGE_THRESHOLD", 0.08),
-      minConfidence: envNum("MIN_CONFIDENCE", 0.5),
-      maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.05),
-      maxOpenPositions: envNum("MAX_OPEN_POSITIONS", 10),
-      maxContractsPerOrder: envNum("MAX_CONTRACTS_PER_ORDER", 25),
+      edgeThreshold: envNum("EDGE_THRESHOLD", 0.12),
+      minConfidence: envNum("MIN_CONFIDENCE", 0.65),
+      maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.025),
+      maxOpenPositions: envNum("MAX_OPEN_POSITIONS", 6),
+      maxContractsPerOrder: envNum("MAX_CONTRACTS_PER_ORDER", 15),
       enabledSeries: env("ENABLED_SERIES")
         ? env("ENABLED_SERIES").split(",")
         : [],
       enabledStations: env("ENABLED_STATIONS")
         ? env("ENABLED_STATIONS").split(",")
         : ["KNYC", "KORD", "KLAX", "KDFW", "KIAH"],
+      exitEdgeThreshold: envNum("EXIT_EDGE_THRESHOLD", 0.03),
+      stopLossPct: envNum("STOP_LOSS_PCT", 0.25),
+      exitTimeDaysBeforeClose: envNum("EXIT_TIME_DAYS_BEFORE_CLOSE", 0.25),
+      exitTimeMinEdge: envNum("EXIT_TIME_MIN_EDGE", 0.08),
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),
