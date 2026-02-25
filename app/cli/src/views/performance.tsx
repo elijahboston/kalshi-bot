@@ -300,96 +300,100 @@ export function PerformanceView() {
 
       {/* Recent Resolutions */}
       <Text bold color="cyan">{"─── Recent Resolutions " + "─".repeat(57)}</Text>
-      <Box gap={1}>
-        <Box width={28}><Text bold color="gray">TICKER</Text></Box>
-        <Box width={10}><Text bold color="gray">PREDICTED</Text></Box>
-        <Box width={8}><Text bold color="gray">ACTUAL</Text></Box>
-        <Box width={8}><Text bold color="gray">EDGE</Text></Box>
-        <Box width={10}><Text bold color="gray">PnL</Text></Box>
+      <Box flexDirection="column">
+        <Box gap={2}>
+          <Box width={30}><Text bold color="gray">TICKER</Text></Box>
+          <Box width={10}><Text bold color="gray">PREDICTED</Text></Box>
+          <Box width={8}><Text bold color="gray">ACTUAL</Text></Box>
+          <Box width={8}><Text bold color="gray">EDGE</Text></Box>
+          <Box width={10}><Text bold color="gray">PnL</Text></Box>
+        </Box>
+        {resolutions.length === 0 ? (
+          <Text color="gray">No resolved trades yet.</Text>
+        ) : (
+          resolutions.map((r, i) => {
+            const pnlColor = r.realizedPnl != null && r.realizedPnl > 0 ? "green" : r.realizedPnl != null && r.realizedPnl < 0 ? "red" : "gray";
+            return (
+              <Box key={`${r.ticker}-${i}`} gap={2}>
+                <Box width={30}><Text>{r.ticker}</Text></Box>
+                <Box width={10}>
+                  <Text>{(r.predictedProb * 100).toFixed(0)}%</Text>
+                </Box>
+                <Box width={8}>
+                  <Text>{r.actualOutcome === 1 ? "YES" : "NO"}</Text>
+                </Box>
+                <Box width={8}>
+                  <Text color={r.edge > 0 ? "green" : "red"}>
+                    {r.edge > 0 ? "+" : ""}{(r.edge * 100).toFixed(1)}
+                  </Text>
+                </Box>
+                <Box width={10}>
+                  <Text color={pnlColor}>
+                    {r.realizedPnl != null
+                      ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
+                      : "—"}
+                  </Text>
+                </Box>
+              </Box>
+            );
+          })
+        )}
       </Box>
-      {resolutions.length === 0 ? (
-        <Text color="gray">No resolved trades yet.</Text>
-      ) : (
-        resolutions.map((r, i) => {
-          const pnlColor = r.realizedPnl != null && r.realizedPnl > 0 ? "green" : r.realizedPnl != null && r.realizedPnl < 0 ? "red" : "gray";
-          return (
-            <Box key={`${r.ticker}-${i}`} gap={1}>
-              <Box width={28}><Text>{r.ticker}</Text></Box>
-              <Box width={10}>
-                <Text>{(r.predictedProb * 100).toFixed(0)}%</Text>
-              </Box>
-              <Box width={8}>
-                <Text>{r.actualOutcome === 1 ? "YES" : "NO"}</Text>
-              </Box>
-              <Box width={8}>
-                <Text color={r.edge > 0 ? "green" : "red"}>
-                  {r.edge > 0 ? "+" : ""}{(r.edge * 100).toFixed(1)}
-                </Text>
-              </Box>
-              <Box width={10}>
-                <Text color={pnlColor}>
-                  {r.realizedPnl != null
-                    ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
-                    : "—"}
-                </Text>
-              </Box>
-            </Box>
-          );
-        })
-      )}
 
       <Box marginTop={1} />
 
       {/* Order History (compact) */}
       <Text bold color="cyan">{"─── Order History (" + orderRows.length + ") " + "─".repeat(57)}</Text>
-      <Box gap={1}>
-        <Box width={10}><Text bold color="gray">TIME</Text></Box>
-        <Box width={28}><Text bold color="gray">TICKER</Text></Box>
-        <Box width={6}><Text bold color="gray">SIDE</Text></Box>
-        <Box width={5}><Text bold color="gray">QTY</Text></Box>
-        <Box width={7}><Text bold color="gray">PRICE</Text></Box>
-        <Box width={9}><Text bold color="gray">STATUS</Text></Box>
-        <Box width={7}><Text bold color="gray">KELLY</Text></Box>
-        <Box width={5}><Text bold color="gray">DRY</Text></Box>
+      <Box flexDirection="column">
+        <Box gap={1}>
+          <Box width={10}><Text bold color="gray">TIME</Text></Box>
+          <Box width={28}><Text bold color="gray">TICKER</Text></Box>
+          <Box width={6}><Text bold color="gray">SIDE</Text></Box>
+          <Box width={5}><Text bold color="gray">QTY</Text></Box>
+          <Box width={7}><Text bold color="gray">PRICE</Text></Box>
+          <Box width={9}><Text bold color="gray">STATUS</Text></Box>
+          <Box width={7}><Text bold color="gray">KELLY</Text></Box>
+          <Box width={5}><Text bold color="gray">DRY</Text></Box>
+        </Box>
+        {orderRows.length === 0 ? (
+          <Text color="gray">No orders yet.</Text>
+        ) : (
+          orderRows.map((o, i) => {
+            const statusColor =
+              o.status === "filled" ? "green" :
+              o.status === "open" ? "yellow" :
+              "gray";
+            return (
+              <Box key={`${o.createdAt}-${i}`} gap={1}>
+                <Box width={10}>
+                  <Text color="gray">{o.createdAt.slice(11, 19)}</Text>
+                </Box>
+                <Box width={28}>
+                  <Text>{o.ticker}</Text>
+                </Box>
+                <Box width={6}>
+                  <Text>{o.side.toUpperCase()}</Text>
+                </Box>
+                <Box width={5}>
+                  <Text>{o.quantity}</Text>
+                </Box>
+                <Box width={7}>
+                  <Text>{o.limitPrice}¢</Text>
+                </Box>
+                <Box width={9}>
+                  <Text color={statusColor}>{o.status}</Text>
+                </Box>
+                <Box width={7}>
+                  <Text>{o.kellyFraction != null ? o.kellyFraction.toFixed(2) : "—"}</Text>
+                </Box>
+                <Box width={5}>
+                  {o.dryRun ? <Text color="yellow">DRY</Text> : <Text color="gray">—</Text>}
+                </Box>
+              </Box>
+            );
+          })
+        )}
       </Box>
-      {orderRows.length === 0 ? (
-        <Text color="gray">No orders yet.</Text>
-      ) : (
-        orderRows.map((o, i) => {
-          const statusColor =
-            o.status === "filled" ? "green" :
-            o.status === "open" ? "yellow" :
-            "gray";
-          return (
-            <Box key={`${o.createdAt}-${i}`} gap={1}>
-              <Box width={10}>
-                <Text color="gray">{o.createdAt.slice(11, 19)}</Text>
-              </Box>
-              <Box width={28}>
-                <Text>{o.ticker}</Text>
-              </Box>
-              <Box width={6}>
-                <Text>{o.side.toUpperCase()}</Text>
-              </Box>
-              <Box width={5}>
-                <Text>{o.quantity}</Text>
-              </Box>
-              <Box width={7}>
-                <Text>{o.limitPrice}¢</Text>
-              </Box>
-              <Box width={9}>
-                <Text color={statusColor}>{o.status}</Text>
-              </Box>
-              <Box width={7}>
-                <Text>{o.kellyFraction != null ? o.kellyFraction.toFixed(2) : "—"}</Text>
-              </Box>
-              <Box width={5}>
-                {o.dryRun ? <Text color="yellow">DRY</Text> : <Text color="gray">—</Text>}
-              </Box>
-            </Box>
-          );
-        })
-      )}
     </Box>
   );
 }

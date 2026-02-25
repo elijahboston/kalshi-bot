@@ -9,6 +9,10 @@ function formatWinRate(wins: number, settledCount: number): string {
   return `${(winRate * 100).toFixed(1)}%`;
 }
 
+function formatPredicted(predictedProb: number): string {
+  return `${(predictedProb * 100).toFixed(0)}%`;
+}
+
 describe("win rate formatting", () => {
   test("0 wins / 0 settled shows 0.0%", () => {
     expect(formatWinRate(0, 0)).toBe("0.0%");
@@ -32,5 +36,15 @@ describe("win rate formatting", () => {
 
   test("3 wins / 7 settled shows 42.9%", () => {
     expect(formatWinRate(3, 7)).toBe("42.9%");
+  });
+});
+
+describe("predicted column formatting", () => {
+  test("formats probability as percentage", () => {
+    expect(formatPredicted(0.5)).toBe("50%");
+    expect(formatPredicted(0.75)).toBe("75%");
+    expect(formatPredicted(0.11)).toBe("11%");
+    expect(formatPredicted(0.0)).toBe("0%");
+    expect(formatPredicted(0.99)).toBe("99%");
   });
 });
