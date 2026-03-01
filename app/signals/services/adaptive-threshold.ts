@@ -4,6 +4,9 @@ import { createLogger } from "@kcb/engine";
 
 const log = createLogger("adaptive-threshold");
 
+/** Cache last-logged threshold per bucket+series to avoid repeat log spam */
+const lastLogged = new Map<string, number>();
+
 export const BUCKETS = [
   { label: "0.0-0.1", low: 0.0, high: 0.1 },
   { label: "0.1-0.2", low: 0.1, high: 0.2 },
@@ -68,10 +71,15 @@ export async function getEffectiveThreshold(
   if (calibrationError > config.calibration.maxCalibrationError) {
     // Miscalibrated — require more edge
     effectiveThreshold = baseThreshold * (1 + calibrationError);
-    log.info(
-      `Bucket ${bucket.label} for ${seriesTicker}: miscalibrated (error=${calibrationError.toFixed(3)}), ` +
-      `threshold: ${baseThreshold} → ${effectiveThreshold.toFixed(3)}`
-    );
+    const cacheKey = `${seriesTicker}:${bucket.label}`;
+    const prev = lastLogged.get(cacheKey);
+    if (prev !== effectiveThreshold) {
+      lastLogged.set(cacheKey, effectiveThreshold);
+      log.info(
+        `Bucket ${bucket.label} for ${seriesTicker}: miscalibrated (error=${calibrationError.toFixed(3)}), ` +
+        `threshold: ${baseThreshold} → ${effectiveThreshold.toFixed(3)}`
+      );
+    }
   } else {
     // Well-calibrated — allow slightly tighter edge
     effectiveThreshold = baseThreshold * 0.9;

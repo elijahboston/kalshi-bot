@@ -131,7 +131,7 @@ export function loadConfig(): BotConfig {
     },
     bot: {
       dryRun: envBool("DRY_RUN", true),
-      tickIntervalSec: envNum("TICK_INTERVAL_SEC", 60),
+      tickIntervalSec: envNum("TICK_INTERVAL_SEC", 300),
       edgeThreshold: envNum("EDGE_THRESHOLD", 0.12),
       minConfidence: envNum("MIN_CONFIDENCE", 0.65),
       maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.025),
