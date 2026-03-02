@@ -84,8 +84,7 @@ export class ReconciliationService {
         if (!kalshiOrder) continue;
 
         const count = kalshiOrder.count ?? 0;
-        const remaining = kalshiOrder.remaining_count ?? (kalshiOrder.status === "executed" ? 0 : count);
-        const filled = Math.max(0, count - remaining) || 0; // || 0 guards NaN
+        const filled = kalshiOrder.status === "executed" ? count : Math.max(0, count - (kalshiOrder.remaining_count ?? count));
 
         const newStatus =
           kalshiOrder.status === "executed"
@@ -444,8 +443,10 @@ export class ReconciliationService {
         if (existing.length > 0) continue;
 
         const count = ko.count ?? 0;
-        const remaining = ko.remaining_count ?? 0;
-        const filled = Math.max(0, count - remaining);
+        const remaining = ko.remaining_count ?? count;
+        // For executed orders, Kalshi returns remaining_count equal to count
+        // instead of 0. Trust the status field over remaining_count arithmetic.
+        const filled = ko.status === "executed" ? count : Math.max(0, count - remaining);
 
         const status =
           ko.status === "executed"
@@ -527,22 +528,79 @@ export class ReconciliationService {
 
         const actualOutcome =
           s.market_result === "yes" || s.market_result === "all_yes" ? 1 : 0;
-        const traded =
-          (s.yes_count ?? 0) > 0 || (s.no_count ?? 0) > 0;
 
-        if (!traded) continue;
+        // Only count settlements where the bot actually placed an order
+        // (has a signal_id). syncHistoricalOrders imports ALL Kalshi orders
+        // including manual trades, so checking orders alone isn't enough.
+        const botOrder = await db
+          .select()
+          .from(orders)
+          .where(
+            and(
+              eq(orders.ticker, s.ticker),
+              sql`${orders.signalId} IS NOT NULL`
+            )
+          )
+          .limit(1);
+        const traded = botOrder.length > 0;
 
-        // Compute market price from costs: if we bought YES, avgPrice = cost/count
-        const yesCount = s.yes_count ?? 0;
-        const noCount = s.no_count ?? 0;
-        const yesCost = s.yes_total_cost ?? 0;
-        const noCost = s.no_total_cost ?? 0;
+        if (!traded) {
+          // Still record for calibration but without PnL
+          if (signal) {
+            await db.insert(calibration).values({
+              id: uuid(),
+              ticker: s.ticker,
+              seriesTicker: market?.seriesTicker ?? "",
+              category: market?.category ?? "",
+              stationId: market?.stationId ?? null,
+              predictedProb: signal.estimatedProb,
+              actualOutcome,
+              marketPrice: signal.marketPrice,
+              edge: signal.edge,
+              realizedPnl: null,
+              traded: false,
+              forecastHorizon: null,
+              resolvedAt: s.settled_time || now(),
+            });
+          }
+          continue;
+        }
 
-        const marketPrice = yesCount > 0
-          ? (yesCost / yesCount) / 100
-          : noCount > 0
-            ? 1 - (noCost / noCount) / 100
-            : 0.5;
+        // Compute PnL from the bot's own filled orders, not Kalshi's
+        // account-level settlement totals (which include manual trades).
+        const botFilledOrders = await db
+          .select()
+          .from(orders)
+          .where(
+            and(
+              eq(orders.ticker, s.ticker),
+              eq(orders.status, "filled"),
+              sql`${orders.signalId} IS NOT NULL`
+            )
+          );
+
+        let realizedPnl = 0;
+        for (const o of botFilledOrders) {
+          if (o.action === "buy") {
+            const won =
+              (o.side === "yes" && actualOutcome === 1) ||
+              (o.side === "no" && actualOutcome === 0);
+            realizedPnl += won
+              ? (100 - o.limitPrice) * o.filledQuantity
+              : -o.limitPrice * o.filledQuantity;
+          } else {
+            // Sell orders: profit = sell price * quantity (already exited)
+            realizedPnl += o.limitPrice * o.filledQuantity;
+          }
+        }
+
+        // Compute market price from the bot's orders
+        const botBuys = botFilledOrders.filter((o) => o.action === "buy");
+        const marketPrice = signal?.marketPrice
+          ?? (botBuys.length > 0
+            ? botBuys.reduce((s, o) => s + o.limitPrice * o.filledQuantity, 0) /
+              botBuys.reduce((s, o) => s + o.filledQuantity, 0) / 100
+            : 0.5);
 
         const predictedProb = signal?.estimatedProb ?? marketPrice;
         const edge = signal?.edge ?? (predictedProb - marketPrice);
@@ -557,7 +615,7 @@ export class ReconciliationService {
           actualOutcome,
           marketPrice,
           edge,
-          realizedPnl: s.realized_pnl ?? (s.revenue - yesCost - noCost),
+          realizedPnl,
           traded: true,
           forecastHorizon: null,
           resolvedAt: s.settled_time || now(),
