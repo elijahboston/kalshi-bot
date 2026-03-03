@@ -96,25 +96,33 @@ describe("settlement PnL computation", () => {
 });
 
 /**
- * Extracted PnL computation from checkResolutions.
- * Computes realized PnL from individual trade records.
+ * Extracted PnL computation from checkResolutions / syncSettlements.
+ * PnL = settlement_payout + sell_proceeds - buy_cost
+ * Handles buy/sell cycles correctly (exit sells reduce remaining position).
  */
 function computeTradesPnl(
   marketTrades: Array<{ action: string; side: string; price: number; quantity: number }>,
   outcome: number, // 1 = YES, 0 = NO
 ): number {
-  let realizedPnl = 0;
+  let totalBuyCost = 0;
+  let totalBuyQty = 0;
+  let totalSellProceeds = 0;
+  let totalSellQty = 0;
   for (const t of marketTrades) {
     if (t.action === "buy") {
-      const won =
-        (t.side === "yes" && outcome === 1) ||
-        (t.side === "no" && outcome === 0);
-      realizedPnl += won
-        ? (100 - t.price) * t.quantity
-        : -t.price * t.quantity;
+      totalBuyCost += t.price * t.quantity;
+      totalBuyQty += t.quantity;
+    } else {
+      totalSellProceeds += t.price * t.quantity;
+      totalSellQty += t.quantity;
     }
   }
-  return realizedPnl;
+  const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
+  const won =
+    (marketTrades[0]?.side === "yes" && outcome === 1) ||
+    (marketTrades[0]?.side === "no" && outcome === 0);
+  const settlementPayout = won ? remainingQty * 100 : 0;
+  return settlementPayout + totalSellProceeds - totalBuyCost;
 }
 
 describe("trade-based PnL computation", () => {
@@ -165,15 +173,49 @@ describe("trade-based PnL computation", () => {
     expect(pnl).toBe(450);
   });
 
-  test("sell actions are ignored", () => {
+  test("sell reduces remaining position and counts proceeds", () => {
+    // Buy YES@40 x5, sell YES@60 x3, outcome YES
+    // buyCost=200, buyQty=5, sellProceeds=180, sellQty=3
+    // remaining=2, won=true, payout=200
+    // PnL = 200 + 180 - 200 = 180
     const pnl = computeTradesPnl(
       [
-        { action: "buy", side: "yes", price: 40, quantity: 5 },  // win: 300
-        { action: "sell", side: "yes", price: 60, quantity: 3 }, // ignored
+        { action: "buy", side: "yes", price: 40, quantity: 5 },
+        { action: "sell", side: "yes", price: 60, quantity: 3 },
       ],
       1,
     );
-    expect(pnl).toBe(300);
+    expect(pnl).toBe(180);
+  });
+
+  test("full exit before resolution uses sell proceeds only", () => {
+    // Buy YES@60 x5, sell YES@40 x5, outcome NO
+    // buyCost=300, sellProceeds=200, remaining=0
+    // PnL = 0 + 200 - 300 = -100
+    const pnl = computeTradesPnl(
+      [
+        { action: "buy", side: "yes", price: 60, quantity: 5 },
+        { action: "sell", side: "yes", price: 40, quantity: 5 },
+      ],
+      0,
+    );
+    expect(pnl).toBe(-100);
+  });
+
+  test("buy-exit-rebuy churn computes correctly", () => {
+    // Buy YES@60 x5, sell YES@40 x5, buy YES@55 x5, outcome YES
+    // buyCost=300+275=575, buyQty=10, sellProceeds=200, sellQty=5
+    // remaining=5, won=true, payout=500
+    // PnL = 500 + 200 - 575 = 125
+    const pnl = computeTradesPnl(
+      [
+        { action: "buy", side: "yes", price: 60, quantity: 5 },
+        { action: "sell", side: "yes", price: 40, quantity: 5 },
+        { action: "buy", side: "yes", price: 55, quantity: 5 },
+      ],
+      1,
+    );
+    expect(pnl).toBe(125);
   });
 
   test("no trades returns 0", () => {

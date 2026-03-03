@@ -18,10 +18,15 @@ mock.module("@kcb/config", () => ({
   }),
 }));
 
+const mockResult: any = {
+  where: () => mockResult,
+  limit: () => mockResult,
+  then: (resolve: any) => resolve([]),
+};
 mock.module("@kcb/db", () => ({
   getDb: () => ({
     select: () => ({
-      from: () => Promise.resolve([]),
+      from: () => mockResult,
     }),
     insert: () => ({
       values: (row: any) => {
@@ -32,6 +37,7 @@ mock.module("@kcb/db", () => ({
   }),
   orders: {},
   positions: {},
+  signals: {},
   eq: () => {},
 }));
 
@@ -128,6 +134,8 @@ describe("ExecutionService.executeExit", () => {
     expect(row.filledQuantity).toBe(5);
     expect(row.status).toBe("filled");
     expect(row.dryRun).toBe(true);
+    // Exit orders are tagged with a signalId for PnL attribution
+    expect(row.signalId).toBe("bot-exit");
     // YES side: price = currentYesPrice - 1 = 54
     expect(row.limitPrice).toBe(54);
   });

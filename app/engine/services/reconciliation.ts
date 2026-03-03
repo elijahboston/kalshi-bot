@@ -566,9 +566,11 @@ export class ReconciliationService {
           continue;
         }
 
-        // Compute PnL from the bot's own filled orders, not Kalshi's
-        // account-level settlement totals (which include manual trades).
-        const botFilledOrders = await db
+        // Compute PnL from bot-attributable orders only (signal_id IS NOT NULL).
+        // This includes bot buys (signal_id = signal UUID) and bot exit sells
+        // (signal_id = signal UUID or "bot-exit"), but excludes manual trades
+        // imported by syncHistoricalOrders.
+        const botOrders = await db
           .select()
           .from(orders)
           .where(
@@ -579,20 +581,28 @@ export class ReconciliationService {
             )
           );
 
-        let realizedPnl = 0;
-        for (const o of botFilledOrders) {
+        // Compute from trades linked to bot orders for accuracy
+        let totalBuyCost = 0;
+        let totalBuyQty = 0;
+        let totalSellProceeds = 0;
+        let totalSellQty = 0;
+        let tradeSide: string | null = null;
+        for (const o of botOrders) {
           if (o.action === "buy") {
-            const won =
-              (o.side === "yes" && actualOutcome === 1) ||
-              (o.side === "no" && actualOutcome === 0);
-            realizedPnl += won
-              ? (100 - o.limitPrice) * o.filledQuantity
-              : -o.limitPrice * o.filledQuantity;
+            totalBuyCost += o.limitPrice * o.filledQuantity;
+            totalBuyQty += o.filledQuantity;
+            if (!tradeSide) tradeSide = o.side;
           } else {
-            // Sell orders: profit = sell price * quantity (already exited)
-            realizedPnl += o.limitPrice * o.filledQuantity;
+            totalSellProceeds += o.limitPrice * o.filledQuantity;
+            totalSellQty += o.filledQuantity;
           }
         }
+        const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
+        const won =
+          (tradeSide === "yes" && actualOutcome === 1) ||
+          (tradeSide === "no" && actualOutcome === 0);
+        const settlementPayout = won ? remainingQty * 100 : 0;
+        const realizedPnl = settlementPayout + totalSellProceeds - totalBuyCost;
 
         // Compute market price from the bot's orders
         const botBuys = botFilledOrders.filter((o) => o.action === "buy");
@@ -675,29 +685,45 @@ export class ReconciliationService {
 
       if (!signal) continue; // No signal means we never evaluated this market
 
-      // Compute realized PnL from position/trades
-      const marketTrades = await db
+      // Compute realized PnL from bot-attributable orders only
+      const botOrders = await db
         .select()
-        .from(trades)
-        .where(eq(trades.ticker, market.ticker));
+        .from(orders)
+        .where(
+          and(
+            eq(orders.ticker, market.ticker),
+            eq(orders.status, "filled"),
+            sql`${orders.signalId} IS NOT NULL`
+          )
+        );
 
       let realizedPnl: number | null = null;
-      const traded = marketTrades.length > 0;
+      const traded = botOrders.length > 0;
 
       if (traded) {
         const outcome = market.result === "yes" ? 1 : 0;
-        // Each contract pays $1 (100 cents) if correct, $0 if wrong
-        realizedPnl = 0;
-        for (const t of marketTrades) {
-          if (t.action === "buy") {
-            const won =
-              (t.side === "yes" && outcome === 1) ||
-              (t.side === "no" && outcome === 0);
-            realizedPnl += won
-              ? (100 - t.price) * t.quantity // profit = payout - cost
-              : -t.price * t.quantity; // loss = cost
+        // PnL = settlement_payout + sell_proceeds - buy_cost
+        let totalBuyCost = 0;
+        let totalBuyQty = 0;
+        let totalSellProceeds = 0;
+        let totalSellQty = 0;
+        let tradeSide: string | null = null;
+        for (const o of botOrders) {
+          if (o.action === "buy") {
+            totalBuyCost += o.limitPrice * o.filledQuantity;
+            totalBuyQty += o.filledQuantity;
+            if (!tradeSide) tradeSide = o.side;
+          } else {
+            totalSellProceeds += o.limitPrice * o.filledQuantity;
+            totalSellQty += o.filledQuantity;
           }
         }
+        const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
+        const won =
+          (tradeSide === "yes" && outcome === 1) ||
+          (tradeSide === "no" && outcome === 0);
+        const settlementPayout = won ? remainingQty * 100 : 0;
+        realizedPnl = settlementPayout + totalSellProceeds - totalBuyCost;
       }
 
       const actualOutcome = market.result === "yes" ? 1 : 0;

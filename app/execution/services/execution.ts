@@ -1,5 +1,5 @@
 import { getConfig } from "@kcb/config";
-import { getDb, orders, positions, eq } from "@kcb/db";
+import { getDb, orders, signals as signalsTable, positions, eq } from "@kcb/db";
 import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
@@ -164,6 +164,14 @@ export class ExecutionService {
       ? Math.max(1, currentYesPrice - 1)
       : Math.max(1, (100 - currentYesPrice) - 1);
 
+    // Look up the original signal for this ticker to link exit to it
+    const [origSignal] = await db
+      .select({ id: signalsTable.id })
+      .from(signalsTable)
+      .where(eq(signalsTable.ticker, position.ticker))
+      .limit(1);
+    const exitSignalId = origSignal?.id ?? "bot-exit";
+
     log.info(
       `Exiting ${side.toUpperCase()} ${position.ticker} × ${position.quantity} @ ${price}¢ — ${reason}`
     );
@@ -181,7 +189,7 @@ export class ExecutionService {
         quantity: position.quantity,
         filledQuantity: position.quantity,
         status: "filled",
-        signalId: null,
+        signalId: exitSignalId,
         dryRun: true,
         kellyFraction: null,
         createdAt: nowTs,
@@ -223,7 +231,7 @@ export class ExecutionService {
       quantity: position.quantity,
       filledQuantity: 0,
       status: "open",
-      signalId: null,
+      signalId: exitSignalId,
       dryRun: false,
       kellyFraction: null,
       createdAt: nowTs,
