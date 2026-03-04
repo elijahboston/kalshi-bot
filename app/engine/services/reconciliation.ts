@@ -581,28 +581,9 @@ export class ReconciliationService {
             )
           );
 
-        // Compute from trades linked to bot orders for accuracy
-        let totalBuyCost = 0;
-        let totalBuyQty = 0;
-        let totalSellProceeds = 0;
-        let totalSellQty = 0;
-        let tradeSide: string | null = null;
-        for (const o of botOrders) {
-          if (o.action === "buy") {
-            totalBuyCost += o.limitPrice * o.filledQuantity;
-            totalBuyQty += o.filledQuantity;
-            if (!tradeSide) tradeSide = o.side;
-          } else {
-            totalSellProceeds += o.limitPrice * o.filledQuantity;
-            totalSellQty += o.filledQuantity;
-          }
-        }
-        const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
-        const won =
-          (tradeSide === "yes" && actualOutcome === 1) ||
-          (tradeSide === "no" && actualOutcome === 0);
-        const settlementPayout = won ? remainingQty * 100 : 0;
-        const realizedPnl = settlementPayout + totalSellProceeds - totalBuyCost;
+        // Compute PnL per side to handle cross-side sells correctly.
+        // Selling NO is economically opening a short, not closing a YES long.
+        const realizedPnl = computePerSidePnl(botOrders, actualOutcome);
 
         // Compute market price from the bot's orders
         const botBuys = botOrders.filter((o) => o.action === "buy");
@@ -702,28 +683,7 @@ export class ReconciliationService {
 
       if (traded) {
         const outcome = market.result === "yes" ? 1 : 0;
-        // PnL = settlement_payout + sell_proceeds - buy_cost
-        let totalBuyCost = 0;
-        let totalBuyQty = 0;
-        let totalSellProceeds = 0;
-        let totalSellQty = 0;
-        let tradeSide: string | null = null;
-        for (const o of botOrders) {
-          if (o.action === "buy") {
-            totalBuyCost += o.limitPrice * o.filledQuantity;
-            totalBuyQty += o.filledQuantity;
-            if (!tradeSide) tradeSide = o.side;
-          } else {
-            totalSellProceeds += o.limitPrice * o.filledQuantity;
-            totalSellQty += o.filledQuantity;
-          }
-        }
-        const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
-        const won =
-          (tradeSide === "yes" && outcome === 1) ||
-          (tradeSide === "no" && outcome === 0);
-        const settlementPayout = won ? remainingQty * 100 : 0;
-        realizedPnl = settlementPayout + totalSellProceeds - totalBuyCost;
+        realizedPnl = computePerSidePnl(botOrders, outcome);
       }
 
       const actualOutcome = market.result === "yes" ? 1 : 0;
@@ -1022,4 +982,45 @@ export class ReconciliationService {
       `Snapshot: cash $${(balance / 100).toFixed(2)}, ${openPositions.length} positions, portfolio $${(portfolio / 100).toFixed(2)}`
     );
   }
+}
+
+/**
+ * Compute realized PnL for a settled market, handling cross-side orders correctly.
+ *
+ * Selling NO is NOT the same as closing a YES long — it opens a short NO position
+ * with its own settlement obligation. This function computes PnL per side and sums.
+ *
+ * For each side:
+ *   netQty = buyQty - sellQty  (positive = long, negative = short)
+ *   settlement = netQty × 100  if that side won, else 0
+ *   sidePnl = settlement + sellProceeds - buyCost
+ */
+export function computePerSidePnl(
+  orderRows: Array<{ action: string; side: string; limitPrice: number; filledQuantity: number }>,
+  actualOutcome: number, // 1 = YES won, 0 = NO won
+): number {
+  let yesBuyCost = 0, yesBuyQty = 0, yesSellProceeds = 0, yesSellQty = 0;
+  let noBuyCost = 0, noBuyQty = 0, noSellProceeds = 0, noSellQty = 0;
+
+  for (const o of orderRows) {
+    const cost = o.limitPrice * o.filledQuantity;
+    if (o.side === "yes") {
+      if (o.action === "buy") { yesBuyCost += cost; yesBuyQty += o.filledQuantity; }
+      else { yesSellProceeds += cost; yesSellQty += o.filledQuantity; }
+    } else {
+      if (o.action === "buy") { noBuyCost += cost; noBuyQty += o.filledQuantity; }
+      else { noSellProceeds += cost; noSellQty += o.filledQuantity; }
+    }
+  }
+
+  const yesNetQty = yesBuyQty - yesSellQty;
+  const noNetQty = noBuyQty - noSellQty;
+  const yesWon = actualOutcome === 1;
+
+  // Settlement: net position × $1 if that side won (negative for shorts)
+  const yesSettlement = yesWon ? yesNetQty * 100 : 0;
+  const noSettlement = !yesWon ? noNetQty * 100 : 0;
+
+  return (yesSettlement + yesSellProceeds - yesBuyCost) +
+         (noSettlement + noSellProceeds - noBuyCost);
 }

@@ -95,34 +95,23 @@ describe("settlement PnL computation", () => {
   });
 });
 
-/**
- * Extracted PnL computation from checkResolutions / syncSettlements.
- * PnL = settlement_payout + sell_proceeds - buy_cost
- * Handles buy/sell cycles correctly (exit sells reduce remaining position).
- */
+// Import the real function used by reconciliation
+import { computePerSidePnl } from "./reconciliation";
+
+// Adapter: convert test format (price/quantity) to DB format (limitPrice/filledQuantity)
 function computeTradesPnl(
   marketTrades: Array<{ action: string; side: string; price: number; quantity: number }>,
-  outcome: number, // 1 = YES, 0 = NO
+  outcome: number,
 ): number {
-  let totalBuyCost = 0;
-  let totalBuyQty = 0;
-  let totalSellProceeds = 0;
-  let totalSellQty = 0;
-  for (const t of marketTrades) {
-    if (t.action === "buy") {
-      totalBuyCost += t.price * t.quantity;
-      totalBuyQty += t.quantity;
-    } else {
-      totalSellProceeds += t.price * t.quantity;
-      totalSellQty += t.quantity;
-    }
-  }
-  const remainingQty = Math.max(0, totalBuyQty - totalSellQty);
-  const won =
-    (marketTrades[0]?.side === "yes" && outcome === 1) ||
-    (marketTrades[0]?.side === "no" && outcome === 0);
-  const settlementPayout = won ? remainingQty * 100 : 0;
-  return settlementPayout + totalSellProceeds - totalBuyCost;
+  return computePerSidePnl(
+    marketTrades.map((t) => ({
+      action: t.action,
+      side: t.side,
+      limitPrice: t.price,
+      filledQuantity: t.quantity,
+    })),
+    outcome,
+  );
 }
 
 describe("trade-based PnL computation", () => {
@@ -165,8 +154,8 @@ describe("trade-based PnL computation", () => {
   test("multiple trades mixed", () => {
     const pnl = computeTradesPnl(
       [
-        { action: "buy", side: "yes", price: 40, quantity: 5 },  // win: (100-40)*5 = 300
-        { action: "buy", side: "yes", price: 50, quantity: 3 },  // win: (100-50)*3 = 150
+        { action: "buy", side: "yes", price: 40, quantity: 5 },
+        { action: "buy", side: "yes", price: 50, quantity: 3 },
       ],
       1,
     );
@@ -175,8 +164,7 @@ describe("trade-based PnL computation", () => {
 
   test("sell reduces remaining position and counts proceeds", () => {
     // Buy YES@40 x5, sell YES@60 x3, outcome YES
-    // buyCost=200, buyQty=5, sellProceeds=180, sellQty=3
-    // remaining=2, won=true, payout=200
+    // yesNetQty=2, yesWon=true, payout=200
     // PnL = 200 + 180 - 200 = 180
     const pnl = computeTradesPnl(
       [
@@ -190,7 +178,6 @@ describe("trade-based PnL computation", () => {
 
   test("full exit before resolution uses sell proceeds only", () => {
     // Buy YES@60 x5, sell YES@40 x5, outcome NO
-    // buyCost=300, sellProceeds=200, remaining=0
     // PnL = 0 + 200 - 300 = -100
     const pnl = computeTradesPnl(
       [
@@ -204,8 +191,6 @@ describe("trade-based PnL computation", () => {
 
   test("buy-exit-rebuy churn computes correctly", () => {
     // Buy YES@60 x5, sell YES@40 x5, buy YES@55 x5, outcome YES
-    // buyCost=300+275=575, buyQty=10, sellProceeds=200, sellQty=5
-    // remaining=5, won=true, payout=500
     // PnL = 500 + 200 - 575 = 125
     const pnl = computeTradesPnl(
       [
@@ -221,5 +206,49 @@ describe("trade-based PnL computation", () => {
   test("no trades returns 0", () => {
     const pnl = computeTradesPnl([], 1);
     expect(pnl).toBe(0);
+  });
+
+  test("cross-side sells: NO sells don't inflate YES PnL", () => {
+    // Buy YES@16 x12, sell NO@94 x10, outcome NO (YES lost)
+    // YES side: buyCost=192, netQty=12, yesWon=false → settlement=0
+    //   yesPnl = 0 + 0 - 192 = -192
+    // NO side: sellProceeds=940, netQty=-10 (short), noWon=true → settlement=-1000
+    //   noPnl = -1000 + 940 - 0 = -60
+    // Total: -192 + (-60) = -252
+    const pnl = computeTradesPnl(
+      [
+        { action: "buy", side: "yes", price: 16, quantity: 12 },
+        { action: "sell", side: "no", price: 94, quantity: 10 },
+      ],
+      0,
+    );
+    expect(pnl).toBe(-252);
+  });
+
+  test("cross-side sells: NO shorts profit when YES wins", () => {
+    // Sell NO@94 x10, outcome YES → NO lost, short keeps premium
+    // NO side: sellProceeds=940, netQty=-10, noWon=false → settlement=0
+    //   noPnl = 0 + 940 - 0 = 940
+    const pnl = computeTradesPnl(
+      [{ action: "sell", side: "no", price: 94, quantity: 10 }],
+      1,
+    );
+    expect(pnl).toBe(940);
+  });
+
+  test("mixed YES buys and NO sells, market resolves NO", () => {
+    // Real-world scenario: bot buys YES cheap, exit sells NO (wrong side)
+    // Buy YES@5 x15, sell NO@94 x15, outcome NO
+    // YES: buyCost=75, netQty=15, yesWon=false → 0+0-75 = -75
+    // NO: sellProceeds=1410, netQty=-15, noWon=true → -1500+1410-0 = -90
+    // Total: -75 + (-90) = -165
+    const pnl = computeTradesPnl(
+      [
+        { action: "buy", side: "yes", price: 5, quantity: 15 },
+        { action: "sell", side: "no", price: 94, quantity: 15 },
+      ],
+      0,
+    );
+    expect(pnl).toBe(-165);
   });
 });
