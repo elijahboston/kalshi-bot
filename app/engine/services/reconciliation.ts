@@ -605,7 +605,7 @@ export class ReconciliationService {
         const realizedPnl = settlementPayout + totalSellProceeds - totalBuyCost;
 
         // Compute market price from the bot's orders
-        const botBuys = botFilledOrders.filter((o) => o.action === "buy");
+        const botBuys = botOrders.filter((o) => o.action === "buy");
         const marketPrice = signal?.marketPrice
           ?? (botBuys.length > 0
             ? botBuys.reduce((s, o) => s + o.limitPrice * o.filledQuantity, 0) /

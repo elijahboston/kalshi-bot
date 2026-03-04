@@ -9,7 +9,7 @@ import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService } from "@kcb/data";
 import { ProbabilityEstimator, getEffectiveThreshold } from "@kcb/signals";
 import type { EstimateResult } from "@kcb/signals";
-import { ExecutionService, computeKelly } from "@kcb/execution";
+import { ExecutionService, computeKelly, recordExit, tickCooldowns } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
 import { uuid, now, seriesCategory } from "@kcb/shared";
 
@@ -47,6 +47,9 @@ export async function initOrchestrator(): Promise<void> {
   startFeed(feed);
 
   registerTick(async () => {
+    // Decrement post-exit cooldowns before evaluating new signals
+    tickCooldowns();
+
     // Phase 1: Discovery (REST for bulk load, WS handles ongoing updates)
     log.debug("Phase 1: Market discovery");
     try {
@@ -286,7 +289,10 @@ export async function initOrchestrator(): Promise<void> {
         }
 
         if (exitReason) {
-          await executionService.executeExit(position, exitReason, market.lastYesPrice ?? 50);
+          const exitOrderId = await executionService.executeExit(position, exitReason, market.lastYesPrice ?? 50);
+          if (exitOrderId) {
+            recordExit(position.ticker);
+          }
         }
       } catch (err) {
         log.error(

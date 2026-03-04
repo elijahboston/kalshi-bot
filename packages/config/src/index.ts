@@ -40,6 +40,12 @@ export interface BotConfig {
     exitTimeDaysBeforeClose: number;
     /** When inside exit time window, only keep positions with edge above this */
     exitTimeMinEdge: number;
+    /** Minimum contract price in cents to avoid buying lottery tickets */
+    minContractPrice: number;
+    /** Number of ticks to wait before re-entering a ticker after exit */
+    exitCooldownTicks: number;
+    /** Maximum total buy cost per ticker in cents (e.g. 500 = $5) */
+    maxExposurePerTicker: number;
   };
 
   /** Calibration parameters */
@@ -115,6 +121,9 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   stop_loss_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stopLossPct = n; },
   exit_time_days_before_close: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeDaysBeforeClose = n; },
   exit_time_min_edge: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeMinEdge = n; },
+  min_contract_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minContractPrice = n; },
+  exit_cooldown_ticks: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitCooldownTicks = n; },
+  max_exposure_per_ticker: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePerTicker = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -132,7 +141,7 @@ export function loadConfig(): BotConfig {
     bot: {
       dryRun: envBool("DRY_RUN", true),
       tickIntervalSec: envNum("TICK_INTERVAL_SEC", 300),
-      edgeThreshold: envNum("EDGE_THRESHOLD", 0.12),
+      edgeThreshold: envNum("EDGE_THRESHOLD", 0.15),
       minConfidence: envNum("MIN_CONFIDENCE", 0.65),
       maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.025),
       maxOpenPositions: envNum("MAX_OPEN_POSITIONS", 6),
@@ -147,6 +156,9 @@ export function loadConfig(): BotConfig {
       stopLossPct: envNum("STOP_LOSS_PCT", 0.25),
       exitTimeDaysBeforeClose: envNum("EXIT_TIME_DAYS_BEFORE_CLOSE", 0.25),
       exitTimeMinEdge: envNum("EXIT_TIME_MIN_EDGE", 0.08),
+      minContractPrice: envNum("MIN_CONTRACT_PRICE", 15),
+      exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 3),
+      maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 500),
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

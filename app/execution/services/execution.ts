@@ -1,10 +1,40 @@
 import { getConfig } from "@kcb/config";
-import { getDb, orders, signals as signalsTable, positions, eq } from "@kcb/db";
+import { getDb, orders, signals as signalsTable, positions, eq, and, sql } from "@kcb/db";
 import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
 
 const log = createLogger("execution");
+
+/** Per-ticker cooldown tracking: ticker → remaining ticks */
+const cooldownMap = new Map<string, number>();
+
+/** Record that a ticker was just exited; starts its cooldown timer. */
+export function recordExit(ticker: string): void {
+  const config = getConfig();
+  cooldownMap.set(ticker, config.bot.exitCooldownTicks);
+}
+
+/** Decrement all cooldown counters by 1 (call at tick start). */
+export function tickCooldowns(): void {
+  for (const [ticker, remaining] of cooldownMap) {
+    if (remaining <= 1) {
+      cooldownMap.delete(ticker);
+    } else {
+      cooldownMap.set(ticker, remaining - 1);
+    }
+  }
+}
+
+/** Get remaining cooldown ticks for a ticker (0 = no cooldown). Exported for testing. */
+export function getCooldown(ticker: string): number {
+  return cooldownMap.get(ticker) ?? 0;
+}
+
+/** Reset all cooldowns (for testing). */
+export function resetCooldowns(): void {
+  cooldownMap.clear();
+}
 
 export class ExecutionService {
   private kalshi: KalshiClient;
@@ -39,6 +69,13 @@ export class ExecutionService {
       return null;
     }
 
+    // Post-exit cooldown: skip if ticker was recently exited
+    const remaining = getCooldown(signal.ticker);
+    if (remaining > 0) {
+      log.info(`Skipping ${signal.ticker}: cooldown (${remaining} tick(s) remaining)`);
+      return null;
+    }
+
     // Kelly criterion sizing
     const side = signal.side as "yes" | "no";
     const kellyFraction = computeKelly(
@@ -65,6 +102,32 @@ export class ExecutionService {
 
     if (contracts <= 0) {
       log.info(`Skipping ${signal.ticker}: 0 contracts at ${price}¢`);
+      return null;
+    }
+
+    // Minimum contract price filter: skip cheap lottery tickets
+    if (price < config.bot.minContractPrice) {
+      log.info(`Skipping ${signal.ticker}: price ${price}¢ < min ${config.bot.minContractPrice}¢`);
+      return null;
+    }
+
+    // Per-ticker accumulated exposure limit
+    const existingExposure = await db
+      .select({ total: sql<number>`COALESCE(SUM(${orders.limitPrice} * ${orders.filledQuantity}), 0)` })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.ticker, signal.ticker),
+          eq(orders.action, "buy"),
+          sql`${orders.signalId} IS NOT NULL`
+        )
+      );
+    const currentExposure = existingExposure[0]?.total ?? 0;
+    const newExposure = contracts * price;
+    if (currentExposure + newExposure > config.bot.maxExposurePerTicker) {
+      log.info(
+        `Skipping ${signal.ticker}: exposure ${currentExposure + newExposure}¢ would exceed max ${config.bot.maxExposurePerTicker}¢`
+      );
       return null;
     }
 

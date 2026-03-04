@@ -60,7 +60,7 @@ function isWithinDays(targetDate: string, days: number): boolean {
   const target = new Date(targetDate);
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() + days);
-  return target >= new Date(new Date().toISOString().slice(0, 10)) && target <= cutoff;
+  return target >= new Date(Date.now() - 3 * 86400_000) && target <= cutoff;
 }
 
 /**
@@ -139,6 +139,7 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
             lastYesPrice: km.last_price,
             lastNoPrice: km.last_price != null ? 100 - km.last_price : null,
             status: km.status,
+            result: km.result ?? undefined,
             updatedAt: timestamp,
           })
           .where(eq(markets.ticker, km.ticker));

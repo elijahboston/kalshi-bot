@@ -12,17 +12,27 @@ beforeEach(() => {
   delete process.env.STOP_LOSS_PCT;
   delete process.env.EXIT_TIME_DAYS_BEFORE_CLOSE;
   delete process.env.EXIT_TIME_MIN_EDGE;
+  delete process.env.MIN_CONTRACT_PRICE;
+  delete process.env.EXIT_COOLDOWN_TICKS;
+  delete process.env.MAX_EXPOSURE_PER_TICKER;
   // Point DB to a non-existent path so runtime overrides are skipped
   process.env.DB_PATH = "/tmp/nonexistent-test.db";
 });
 
 test("loadConfig returns correct trading defaults", () => {
   const config = loadConfig();
-  expect(config.bot.edgeThreshold).toBe(0.12);
+  expect(config.bot.edgeThreshold).toBe(0.15);
   expect(config.bot.minConfidence).toBe(0.65);
   expect(config.bot.maxKellyFraction).toBe(0.025);
   expect(config.bot.maxOpenPositions).toBe(6);
   expect(config.bot.maxContractsPerOrder).toBe(15);
+});
+
+test("loadConfig returns correct anti-churn defaults", () => {
+  const config = loadConfig();
+  expect(config.bot.minContractPrice).toBe(15);
+  expect(config.bot.exitCooldownTicks).toBe(3);
+  expect(config.bot.maxExposurePerTicker).toBe(500);
 });
 
 test("loadConfig returns correct exit strategy defaults", () => {
@@ -59,4 +69,15 @@ test("env vars override defaults", () => {
   expect(config.bot.maxKellyFraction).toBe(0.01);
   expect(config.bot.maxOpenPositions).toBe(3);
   expect(config.bot.maxContractsPerOrder).toBe(10);
+});
+
+test("anti-churn env vars override defaults", () => {
+  process.env.MIN_CONTRACT_PRICE = "20";
+  process.env.EXIT_COOLDOWN_TICKS = "5";
+  process.env.MAX_EXPOSURE_PER_TICKER = "1000";
+
+  const config = loadConfig();
+  expect(config.bot.minContractPrice).toBe(20);
+  expect(config.bot.exitCooldownTicks).toBe(5);
+  expect(config.bot.maxExposurePerTicker).toBe(1000);
 });

@@ -1,1 +1,1 @@
-export { ExecutionService, computeKelly } from "./services/execution";
+export { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns } from "./services/execution";

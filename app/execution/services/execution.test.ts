@@ -14,20 +14,33 @@ mock.module("@kcb/config", () => ({
       maxOpenPositions: 6,
       maxKellyFraction: 0.025,
       maxContractsPerOrder: 15,
+      minContractPrice: 15,
+      exitCooldownTicks: 3,
+      maxExposurePerTicker: 500,
     },
   }),
 }));
 
+let exposureTotal = 0;
 const mockResult: any = {
   where: () => mockResult,
   limit: () => mockResult,
   then: (resolve: any) => resolve([]),
 };
+const mockExposureResult: any = {
+  where: () => mockExposureResult,
+  limit: () => mockExposureResult,
+  then: (resolve: any) => resolve([{ total: exposureTotal }]),
+};
 mock.module("@kcb/db", () => ({
   getDb: () => ({
-    select: () => ({
-      from: () => mockResult,
-    }),
+    select: (fields?: any) => {
+      // If selecting a specific `total` field, return exposure mock
+      if (fields && "total" in fields) {
+        return { from: () => mockExposureResult };
+      }
+      return { from: () => mockResult };
+    },
     insert: () => ({
       values: (row: any) => {
         insertedRows.push(row);
@@ -39,9 +52,11 @@ mock.module("@kcb/db", () => ({
   positions: {},
   signals: {},
   eq: () => {},
+  and: () => {},
+  sql: Object.assign((..._args: any[]) => ({}), { raw: () => ({}) }),
 }));
 
-import { ExecutionService, computeKelly } from "./execution";
+import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns } from "./execution";
 import { bus } from "@kcb/engine";
 
 // Stub client passed via DI — avoids mocking @kcb/kalshi-client globally
@@ -51,6 +66,8 @@ const stubKalshi = {
 
 beforeEach(() => {
   insertedRows.length = 0;
+  exposureTotal = 0;
+  resetCooldowns();
 });
 
 describe("computeKelly", () => {
@@ -191,5 +208,92 @@ describe("ExecutionService.executeExit", () => {
 
     const row = insertedRows[startLen];
     expect(row.limitPrice).toBe(44);
+  });
+});
+
+// Helper signal for anti-churn tests
+function makeSignal(overrides: Partial<any> = {}): any {
+  return {
+    id: "sig-1",
+    ticker: "KXHIGHNY-26MAR04-B40",
+    seriesTicker: "KXHIGHNY",
+    estimatedProb: 0.7,
+    confidence: 0.8,
+    marketPrice: 0.5,
+    edge: 0.2,
+    edgeThreshold: 0.15,
+    recommendation: "buy_yes",
+    side: "yes",
+    kellyFraction: 0.02,
+    ensembleSize: 5,
+    reasoning: "test",
+    acted: false,
+    orderId: null,
+    skipReason: null,
+    createdAt: "2026-03-04T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("executeSignal anti-churn guards", () => {
+  test("skips contract priced below minContractPrice", async () => {
+    const service = new ExecutionService(stubKalshi);
+    // estimatedProb=0.9, marketPrice=0.08 → YES side price = 8¢ < 15¢ min
+    const signal = makeSignal({
+      estimatedProb: 0.9,
+      marketPrice: 0.08,
+      edge: 0.82,
+      side: "yes",
+    });
+
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("skips ticker with active cooldown", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal();
+
+    // Set cooldown for this ticker
+    recordExit(signal.ticker);
+    expect(getCooldown(signal.ticker)).toBe(3);
+
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("cooldown decrements and clears", () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    recordExit(ticker);
+    expect(getCooldown(ticker)).toBe(3);
+
+    tickCooldowns();
+    expect(getCooldown(ticker)).toBe(2);
+
+    tickCooldowns();
+    expect(getCooldown(ticker)).toBe(1);
+
+    tickCooldowns();
+    expect(getCooldown(ticker)).toBe(0);
+  });
+
+  test("skips when accumulated exposure would exceed limit", async () => {
+    const service = new ExecutionService(stubKalshi);
+    // Existing exposure of 490¢ + new order would exceed 500¢
+    exposureTotal = 490;
+    const signal = makeSignal();
+
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("allows trade when all guards pass", async () => {
+    const service = new ExecutionService(stubKalshi);
+    exposureTotal = 0;
+    const signal = makeSignal();
+
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeString();
+    expect(orderId).toStartWith("dry-");
   });
 });
