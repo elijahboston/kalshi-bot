@@ -1,0 +1,15 @@
+{
+  "name": "@kcb/viz",
+  "private": true,
+  "version": "0.0.1",
+  "main": "index.ts",
+  "dependencies": {
+    "@kcb/config": "workspace:*",
+    "@kcb/db": "workspace:*",
+    "@kcb/engine": "workspace:*",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.172.0"
+  }
+}

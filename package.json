@@ -15,7 +15,9 @@
     "build:exe": "bun build --compile --minify --bytecode app/cli/src/index.tsx --outfile dist/climatebot",
     "build:linux": "bun build --compile --minify --bytecode --target=bun-linux-x64 app/cli/src/index.tsx --outfile dist/climatebot-linux",
     "typecheck": "tsc --noEmit --project tsconfig.json",
-    "clean": "rm -rf node_modules app/*/node_modules packages/*/node_modules"
+    "clean": "rm -rf node_modules app/*/node_modules packages/*/node_modules",
+    "viz": "bun app/viz/index.ts",
+    "viz:dev": "bun --hot app/viz/index.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
