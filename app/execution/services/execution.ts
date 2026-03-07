@@ -222,10 +222,12 @@ export class ExecutionService {
     const side = position.side as "yes" | "no";
 
     // Price the sell at the current bid side to fill quickly.
-    // Sell 1¢ below the current price to cross the spread.
+    // Sell 1¢ below the current price to cross the spread, but floor at 2¢.
+    // Selling at 1¢ can fail with insufficient_balance on Kalshi due to
+    // collateral requirements on the counterparty side.
     const price = side === "yes"
-      ? Math.max(1, currentYesPrice - 1)
-      : Math.max(1, (100 - currentYesPrice) - 1);
+      ? Math.max(2, currentYesPrice - 1)
+      : Math.max(2, (100 - currentYesPrice) - 1);
 
     // Look up the original signal for this ticker to link exit to it
     const [origSignal] = await db

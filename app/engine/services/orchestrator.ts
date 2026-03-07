@@ -239,7 +239,13 @@ export async function initOrchestrator(): Promise<void> {
 
     const openPositions = await db.select().from(positions);
 
+    // Deduplicate: positions table has a unique ticker PK, but guard against
+    // any race that might produce duplicate rows in the same tick.
+    const seenTickers = new Set<string>();
+
     for (const position of openPositions) {
+      if (seenTickers.has(position.ticker)) continue;
+      seenTickers.add(position.ticker);
       try {
         const side = position.side as "yes" | "no";
 
@@ -295,9 +301,12 @@ export async function initOrchestrator(): Promise<void> {
           }
         }
       } catch (err) {
-        log.error(
-          `Exit evaluation failed for ${position.ticker}: ${err instanceof Error ? err.message : err}`
-        );
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes("insufficient_balance") || errMsg.includes("insufficient balance")) {
+          log.warn(`Exit failed for ${position.ticker}: insufficient balance (will retry next tick at a viable price)`);
+        } else {
+          log.error(`Exit evaluation failed for ${position.ticker}: ${errMsg}`);
+        }
       }
     }
 
@@ -360,13 +369,25 @@ export async function initOrchestrator(): Promise<void> {
               .where(eq(signals.id, signal.id));
           }
         } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+
+          // Stop placing orders this tick if we're out of money
+          if (errMsg.includes("insufficient_balance") || errMsg.includes("insufficient balance")) {
+            log.warn(`Insufficient balance — skipping remaining ${actionableSignals.length - actionableSignals.indexOf(signal) - 1} signals this tick`);
+            await db
+              .update(signals)
+              .set({ skipReason: "insufficient balance" })
+              .where(eq(signals.id, signal.id));
+            break;
+          }
+
           log.error(
-            `Execution failed for ${signal.ticker}: ${err instanceof Error ? err.message : err}`
+            `Execution failed for ${signal.ticker}: ${errMsg}`
           );
           await db
             .update(signals)
             .set({
-              skipReason: `execution error: ${err instanceof Error ? err.message : err}`,
+              skipReason: `execution error: ${errMsg}`,
             })
             .where(eq(signals.id, signal.id));
         }
