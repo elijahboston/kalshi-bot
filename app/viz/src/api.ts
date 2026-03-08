@@ -1,5 +1,5 @@
-import { getDb, orders, positions, balanceHistory, desc, eq } from "@kcb/db";
-import type { SnapshotData, StationInfo } from "./frontend/lib/types";
+import { getDb, orders, positions, balanceHistory, calibration, desc, eq, sql, count, avg, sum } from "@kcb/db";
+import type { SnapshotData, StationInfo, PerformanceData } from "./frontend/lib/types";
 
 /** Station coordinates — mirrors app/data/services/ensemble.ts */
 const STATION_COORDS: Record<string, { lat: number; lon: number }> = {
@@ -96,6 +96,115 @@ export function getSnapshot(): SnapshotData {
   };
 }
 
+export function getPerformance(): PerformanceData {
+  const db = getDb();
+
+  // Open positions + unrealized PnL
+  const openPos = db.select().from(positions).all();
+  const unrealizedPnl = openPos.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
+
+  // Calibration aggregates (settled traded markets)
+  const calAgg = db
+    .select({
+      avgBrier: avg(
+        sql`(${calibration.predictedProb} - ${calibration.actualOutcome}) * (${calibration.predictedProb} - ${calibration.actualOutcome})`
+      ),
+      settledCount: count(),
+      totalPnl: sum(calibration.realizedPnl),
+      wins: count(sql`CASE WHEN ${calibration.realizedPnl} > 0 THEN 1 END`),
+    })
+    .from(calibration)
+    .where(sql`${calibration.traded} = 1`)
+    .all();
+
+  const settledCount = Number(calAgg[0]?.settledCount ?? 0);
+  const wins = Number(calAgg[0]?.wins ?? 0);
+
+  // Windowed win rates (24h, 48h, 7d)
+  const windowedWinRates = [24, 48, 168].map((hours) => {
+    const label = hours <= 48 ? `${hours}h` : `${hours / 24}d`;
+    const cutoff = new Date(Date.now() - hours * 3600_000).toISOString();
+    const rows = db
+      .select({
+        total: count(),
+        wins: sql<number>`SUM(CASE WHEN ${calibration.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+      })
+      .from(calibration)
+      .where(sql`${calibration.traded} = 1 AND ${calibration.resolvedAt} >= ${cutoff}`)
+      .all();
+    const total = Number(rows[0]?.total ?? 0);
+    const w = Number(rows[0]?.wins ?? 0);
+    return { label, wins: w, total, rate: total > 0 ? w / total : 0 };
+  });
+
+  // Equity history (downsampled to ~200 points)
+  const allEquity = db
+    .select({ totalEquity: balanceHistory.totalEquity, recordedAt: balanceHistory.recordedAt })
+    .from(balanceHistory)
+    .orderBy(balanceHistory.recordedAt)
+    .all();
+
+  const step = Math.max(1, Math.floor(allEquity.length / 200));
+  const sampled = allEquity.filter((_, i) => i % step === 0 || i === allEquity.length - 1);
+
+  // Cap outlier equity values (e.g. from the over-sell bug) at p95 * 1.5
+  const sortedVals = sampled.map((r) => r.totalEquity).sort((a, b) => a - b);
+  const p95 = sortedVals[Math.floor(sortedVals.length * 0.95)] ?? Infinity;
+  const cap = Math.round(p95 * 1.5);
+
+  const equityHistory = sampled.map((r) => ({
+    value: Math.min(r.totalEquity, cap),
+    time: r.recordedAt,
+  }));
+
+  // Daily PnL (last 7 days)
+  const dailyPnl = db
+    .select({
+      day: sql<string>`date(${calibration.resolvedAt})`.as("day"),
+      pnl: sql<number>`COALESCE(SUM(${calibration.realizedPnl}), 0)`.as("pnl"),
+    })
+    .from(calibration)
+    .where(sql`${calibration.traded} = 1`)
+    .groupBy(sql`date(${calibration.resolvedAt})`)
+    .orderBy(sql`date(${calibration.resolvedAt}) DESC`)
+    .limit(7)
+    .all()
+    .map((r) => ({ date: r.day, pnl: Number(r.pnl) }))
+    .reverse();
+
+  // Recent resolutions
+  const resolutions = db
+    .select({
+      ticker: calibration.ticker,
+      predictedProb: calibration.predictedProb,
+      actualOutcome: calibration.actualOutcome,
+      edge: calibration.edge,
+      realizedPnl: calibration.realizedPnl,
+    })
+    .from(calibration)
+    .where(sql`${calibration.traded} = 1`)
+    .orderBy(desc(calibration.resolvedAt))
+    .limit(10)
+    .all();
+
+  const bal = getBalance();
+
+  return {
+    cash: bal?.cash ?? 0,
+    portfolio: bal?.portfolio ?? 0,
+    unrealizedPnl,
+    realizedPnl: Number(calAgg[0]?.totalPnl ?? 0),
+    winRate: settledCount > 0 ? wins / settledCount : 0,
+    brierScore: Number(calAgg[0]?.avgBrier ?? 0),
+    orderCount: db.select({ value: count() }).from(orders).all()[0]?.value ?? 0,
+    positionCount: openPos.length,
+    windowedWinRates,
+    equityHistory,
+    dailyPnl,
+    resolutions,
+  };
+}
+
 /** Handle REST API requests */
 export function handleApiRequest(req: Request): Response | null {
   const url = new URL(req.url);
@@ -109,6 +218,8 @@ export function handleApiRequest(req: Request): Response | null {
       return Response.json(getBalance());
     case "/api/orders/recent":
       return Response.json(getRecentOrders());
+    case "/api/performance":
+      return Response.json(getPerformance());
     default:
       return null;
   }

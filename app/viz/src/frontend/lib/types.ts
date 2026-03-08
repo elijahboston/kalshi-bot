@@ -115,3 +115,24 @@ export type RecentOrder = {
   status: string;
   createdAt: string;
 };
+
+export type PerformanceData = {
+  cash: number;
+  portfolio: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  winRate: number;
+  brierScore: number;
+  orderCount: number;
+  positionCount: number;
+  windowedWinRates: { label: string; wins: number; total: number; rate: number }[];
+  equityHistory: { value: number; time: string }[];
+  dailyPnl: { date: string; pnl: number }[];
+  resolutions: {
+    ticker: string;
+    predictedProb: number;
+    actualOutcome: number;
+    edge: number;
+    realizedPnl: number | null;
+  }[];
+};

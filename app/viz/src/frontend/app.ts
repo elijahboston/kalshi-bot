@@ -6,6 +6,7 @@ import { initParticles, emitParticles, emitSettlement, updateParticles } from ".
 import { createSettlementRing, createSignalRipple, updateEffects } from "./scene/effects";
 import { connectWs, onMessage } from "./lib/ws-client";
 import { initHud, handleHudMessage } from "./hud/overlay";
+import { initPerformancePanel, loadPerformance } from "./hud/performance";
 import type { WsMessage, StationInfo } from "./lib/types";
 import "./styles.css";
 
@@ -30,6 +31,8 @@ initParticles(scene);
 
 // HUD
 initHud();
+initPerformancePanel();
+loadPerformance();
 
 // Load initial data and connect WebSocket
 async function init() {
@@ -43,9 +46,17 @@ async function init() {
 
   connectWs();
 
+  // Refresh performance data every 60s
+  setInterval(() => loadPerformance(), 60_000);
+
   onMessage((msg: WsMessage) => {
     handleHudMessage(msg);
     handleSceneMessage(msg);
+
+    // Refresh performance on balance or resolution events
+    if (msg.type === "balance:update" || msg.type === "market:resolved") {
+      loadPerformance();
+    }
   });
 }
 
