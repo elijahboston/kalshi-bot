@@ -1,11 +1,9 @@
 import { test, expect, beforeAll } from "bun:test";
 import { handleApiRequest } from "./api";
-import { getDb, runMigrations } from "@kcb/db";
-import { getConfig } from "@kcb/config";
+import { runMigrations } from "@kcb/db";
 
 beforeAll(() => {
-  const config = getConfig();
-  runMigrations(config.db.path);
+  runMigrations();
 });
 
 test("GET /api/stations returns station list", () => {
@@ -39,7 +37,6 @@ test("GET /api/balance returns null or balance object", async () => {
   const res = handleApiRequest(req);
   expect(res).not.toBeNull();
   const data = await res!.json();
-  // Could be null if no balance history yet
   if (data !== null) {
     expect(data).toHaveProperty("cash");
     expect(data).toHaveProperty("portfolio");
@@ -52,6 +49,19 @@ test("GET /api/orders/recent returns array", async () => {
   expect(res).not.toBeNull();
   const data = await res!.json();
   expect(Array.isArray(data)).toBe(true);
+});
+
+test("GET /api/performance returns performance data", async () => {
+  const req = new Request("http://localhost/api/performance");
+  const res = handleApiRequest(req);
+  expect(res).not.toBeNull();
+  const data = await res!.json();
+  expect(data).toHaveProperty("cash");
+  expect(data).toHaveProperty("portfolio");
+  expect(data).toHaveProperty("winRate");
+  expect(data).toHaveProperty("equityHistory");
+  expect(data).toHaveProperty("dailyPnl");
+  expect(data).toHaveProperty("resolutions");
 });
 
 test("unknown API path returns null", () => {

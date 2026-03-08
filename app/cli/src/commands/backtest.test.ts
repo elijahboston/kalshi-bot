@@ -1,54 +1,7 @@
-import { test, expect, describe, mock } from "bun:test";
+import { test, expect, describe, mock, beforeEach } from "bun:test";
 
-// Track rows per table name for the mock
-const tableRows = new Map<string, any[]>();
+// DO NOT mock @kcb/db — it leaks globally. Use real in-memory DB instead.
 
-function setTableRows(tableName: string, rows: any[]) {
-  tableRows.set(tableName, rows);
-}
-
-function getTableRows(tableName: string): any[] {
-  return tableRows.get(tableName) || [];
-}
-
-// The drizzle table objects have a Symbol that references the table name.
-// We extract it via the table's own properties.
-function getTableName(table: any): string {
-  // Drizzle SQLite tables store the name in Symbol.for("drizzle:Name") or _.name
-  if (table?._?.name) return table._.name;
-  if (table?.[Symbol.for("drizzle:Name")]) return table[Symbol.for("drizzle:Name")];
-  return "unknown";
-}
-
-mock.module("@kcb/db", () => {
-  const actual = require("@kcb/db");
-  return {
-    ...actual,
-    getDb: () => ({
-      select: (...selectArgs: any[]) => ({
-        from: (table: any) => {
-          const tableName = getTableName(table);
-          const rows = getTableRows(tableName);
-          return {
-            where: (..._args: any[]) => {
-              const chainable = {
-                orderBy: () => Promise.resolve(rows),
-                limit: () => Promise.resolve(rows),
-              };
-              return Object.assign(Promise.resolve(rows), chainable);
-            },
-            orderBy: () => ({
-              limit: () => Promise.resolve(rows),
-            }),
-            limit: () => Promise.resolve(rows),
-          };
-        },
-      }),
-    }),
-  };
-});
-
-// Mock config
 mock.module("@kcb/config", () => ({
   getConfig: () => ({
     kalshi: { apiKey: "", apiSecret: "", baseUrl: "" },
@@ -73,9 +26,20 @@ mock.module("@kcb/config", () => ({
   }),
 }));
 
+import { runMigrations, getDb, weatherForecasts, calibration, stationBias } from "@kcb/db";
+
+runMigrations();
+
 import { backtestCommands } from "./backtest";
 
 const backtestHandler = backtestCommands[0]!.handler;
+
+beforeEach(() => {
+  const db = getDb();
+  db.delete(weatherForecasts).run();
+  db.delete(calibration).run();
+  db.delete(stationBias).run();
+});
 
 describe("backtest command", () => {
   test("returns usage when no series ticker provided", async () => {
@@ -89,39 +53,29 @@ describe("backtest command", () => {
   });
 
   test("returns no-data message when no forecasts found", async () => {
-    setTableRows("weather_forecasts", []);
-    setTableRows("calibration", []);
-    setTableRows("station_bias", []);
-
     const result = await backtestHandler(["KXHIGHNY"]);
     expect(result).toContain("No historical forecast data");
   });
 
   test("runs backtest with ensemble data and reports results", async () => {
     const yesterday = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+    const db = getDb();
 
-    setTableRows("weather_forecasts", [
-      {
-        id: "f1",
-        stationId: "KNYC",
-        targetDate: yesterday,
-        source: "multi_ensemble",
-        forecastType: "high_temp",
-        forecastHorizon: 1,
-        pointForecast: 30,
-        ensembleValues: JSON.stringify([28, 29, 30, 30, 30, 31, 32]),
-        ensembleSize: 7,
-        ensembleMean: 30,
-        ensembleStd: 1.2,
-        actualValue: 30.5,
-        fetchedAt: new Date().toISOString(),
-      },
-    ]);
-
-    // No calibration records — will use synthetic bracket
-    setTableRows("calibration", []);
-    // No bias data
-    setTableRows("station_bias", []);
+    db.insert(weatherForecasts).values({
+      id: "f1",
+      stationId: "KNYC",
+      targetDate: yesterday,
+      source: "multi_ensemble",
+      forecastType: "high_temp",
+      forecastHorizon: 1,
+      pointForecast: 30,
+      ensembleValues: JSON.stringify([28, 29, 30, 30, 30, 31, 32]),
+      ensembleSize: 7,
+      ensembleMean: 30,
+      ensembleStd: 1.2,
+      actualValue: 30.5,
+      fetchedAt: new Date().toISOString(),
+    }).run();
 
     const result = await backtestHandler(["KXHIGHNY", "--days", "7"]);
 
@@ -132,45 +86,34 @@ describe("backtest command", () => {
   });
 
   test("parses --days argument", async () => {
-    setTableRows("weather_forecasts", []);
-    setTableRows("calibration", []);
-    setTableRows("station_bias", []);
-
     const result = await backtestHandler(["KXHIGHNY", "--days", "60"]);
     expect(result).toContain("60 days");
   });
 
   test("defaults to 30 days", async () => {
-    setTableRows("weather_forecasts", []);
-    setTableRows("calibration", []);
-    setTableRows("station_bias", []);
-
     const result = await backtestHandler(["KXHIGHNY"]);
     expect(result).toContain("30 days");
   });
 
   test("skips forecasts with invalid ensemble JSON", async () => {
     const yesterday = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+    const db = getDb();
 
-    setTableRows("weather_forecasts", [
-      {
-        id: "f1",
-        stationId: "KNYC",
-        targetDate: yesterday,
-        source: "multi_ensemble",
-        forecastType: "high_temp",
-        forecastHorizon: 1,
-        pointForecast: 30,
-        ensembleValues: "not json",
-        ensembleSize: 0,
-        ensembleMean: null,
-        ensembleStd: null,
-        actualValue: 30.5,
-        fetchedAt: new Date().toISOString(),
-      },
-    ]);
-    setTableRows("calibration", []);
-    setTableRows("station_bias", []);
+    db.insert(weatherForecasts).values({
+      id: "f1",
+      stationId: "KNYC",
+      targetDate: yesterday,
+      source: "multi_ensemble",
+      forecastType: "high_temp",
+      forecastHorizon: 1,
+      pointForecast: 30,
+      ensembleValues: "not json",
+      ensembleSize: 0,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: 30.5,
+      fetchedAt: new Date().toISOString(),
+    }).run();
 
     const result = await backtestHandler(["KXHIGHNY"]);
     expect(result).toContain("No backtestable forecasts");

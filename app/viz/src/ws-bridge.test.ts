@@ -1,12 +1,10 @@
 import { test, expect, beforeAll } from "bun:test";
 import { bus } from "@kcb/engine";
 import { runMigrations } from "@kcb/db";
-import { getConfig } from "@kcb/config";
 import { startBridge } from "./ws-bridge";
 
 beforeAll(() => {
-  const config = getConfig();
-  runMigrations(config.db.path);
+  runMigrations();
 });
 
 test("startBridge returns cleanup function", () => {

@@ -1,11 +1,10 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
 
 // ── Mocks ──────────────────────────────────────────────────
-// Only mock @kcb/config and @kcb/db — these don't leak harmfully.
-// DO NOT mock @kcb/engine or @kcb/kalshi-client — those mocks leak
-// across test files and break log-writer.test.ts and client.test.ts.
-
-let insertedRows: any[] = [];
+// Only mock @kcb/config — it's safe and doesn't leak harmfully.
+// DO NOT mock @kcb/db — it leaks drizzle-orm internals (sql, count, migrate)
+// and breaks api.test.ts, ws-bridge.test.ts, and performance-query.test.ts.
+// DO NOT mock @kcb/engine or @kcb/kalshi-client — those leak too.
 
 mock.module("@kcb/config", () => ({
   getConfig: () => ({
@@ -21,53 +20,25 @@ mock.module("@kcb/config", () => ({
   }),
 }));
 
-let exposureTotal = 0;
-const mockResult: any = {
-  where: () => mockResult,
-  limit: () => mockResult,
-  then: (resolve: any) => resolve([]),
-};
-const mockExposureResult: any = {
-  where: () => mockExposureResult,
-  limit: () => mockExposureResult,
-  then: (resolve: any) => resolve([{ total: exposureTotal }]),
-};
-mock.module("@kcb/db", () => ({
-  getDb: () => ({
-    select: (fields?: any) => {
-      // If selecting a specific `total` field, return exposure mock
-      if (fields && "total" in fields) {
-        return { from: () => mockExposureResult };
-      }
-      return { from: () => mockResult };
-    },
-    insert: () => ({
-      values: (row: any) => {
-        insertedRows.push(row);
-        return Promise.resolve();
-      },
-    }),
-  }),
-  orders: {},
-  positions: {},
-  signals: {},
-  eq: () => {},
-  and: () => {},
-  sql: Object.assign((..._args: any[]) => ({}), { raw: () => ({}) }),
-}));
-
+import { getDb, runMigrations, orders, positions } from "@kcb/db";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns } from "./execution";
 import { bus } from "@kcb/engine";
+import { eq, sql } from "drizzle-orm";
+
+// Use real in-memory DB
+runMigrations();
 
 // Stub client passed via DI — avoids mocking @kcb/kalshi-client globally
 const stubKalshi = {
   createOrder: () => Promise.resolve({ order: { order_id: "live-123" } }),
 } as any;
 
-beforeEach(() => {
-  insertedRows.length = 0;
-  exposureTotal = 0;
+beforeEach(async () => {
   resetCooldowns();
+  // Clean tables between tests
+  const db = getDb();
+  db.delete(orders).run();
+  db.delete(positions).run();
 });
 
 describe("computeKelly", () => {
@@ -77,22 +48,17 @@ describe("computeKelly", () => {
   });
 
   test("positive edge on YES side returns positive fraction", () => {
-    // We think prob=0.7 but market says 0.5 → positive edge
     const result = computeKelly(0.7, 0.5, "yes");
     expect(result).toBeGreaterThan(0);
     expect(result).toBeLessThanOrEqual(1);
   });
 
   test("negative edge returns 0 (clamped)", () => {
-    // We think prob=0.3 but market says 0.5 → negative edge for YES
     const result = computeKelly(0.3, 0.5, "yes");
     expect(result).toBe(0);
   });
 
   test("NO side flips prob and cost correctly", () => {
-    // We think prob of YES = 0.3, so prob of NO = 0.7
-    // Market price for YES = 0.5, so cost of NO = 0.5
-    // This is equivalent to YES side with p=0.7, cost=0.5
     const noResult = computeKelly(0.3, 0.5, "no");
     const yesEquivalent = computeKelly(0.7, 0.5, "yes");
     expect(noResult).toBeCloseTo(yesEquivalent, 10);
@@ -115,7 +81,6 @@ describe("computeKelly", () => {
   });
 
   test("price near 1 with moderate prob yields 0 (no edge)", () => {
-    // Market already prices it at 0.95, we think 0.8 → negative edge
     const result = computeKelly(0.8, 0.95, "yes");
     expect(result).toBe(0);
   });
@@ -141,20 +106,20 @@ describe("ExecutionService.executeExit", () => {
     expect(orderId).toBeString();
     expect(orderId).toStartWith("dry-exit-");
 
-    // Should have inserted one order row
-    const row = insertedRows.findLast((r: any) => r.orderId === orderId);
-    expect(row).toBeDefined();
-    expect(row.ticker).toBe("KXTEMP-26FEB25-NYC-B40");
-    expect(row.action).toBe("sell");
-    expect(row.side).toBe("yes");
-    expect(row.quantity).toBe(5);
-    expect(row.filledQuantity).toBe(5);
-    expect(row.status).toBe("filled");
-    expect(row.dryRun).toBe(true);
-    // Exit orders are tagged with a signalId for PnL attribution
-    expect(row.signalId).toBe("bot-exit");
+    // Verify order was inserted in DB
+    const db = getDb();
+    const rows = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ticker).toBe("KXTEMP-26FEB25-NYC-B40");
+    expect(rows[0].action).toBe("sell");
+    expect(rows[0].side).toBe("yes");
+    expect(rows[0].quantity).toBe(5);
+    expect(rows[0].filledQuantity).toBe(5);
+    expect(rows[0].status).toBe("filled");
+    expect(rows[0].dryRun).toBe(true);
+    expect(rows[0].signalId).toBe("bot-exit");
     // YES side: price = currentYesPrice - 1 = 54
-    expect(row.limitPrice).toBe(54);
+    expect(rows[0].limitPrice).toBe(54);
   });
 
   test("dry-run exit emits order:placed with action sell", async () => {
@@ -190,7 +155,6 @@ describe("ExecutionService.executeExit", () => {
 
   test("dry-run exit prices 1¢ below current market", async () => {
     const service = new ExecutionService(stubKalshi);
-    const startLen = insertedRows.length;
     const position = {
       ticker: "KXTEMP-26FEB25-NYC-B40",
       side: "yes",
@@ -204,10 +168,11 @@ describe("ExecutionService.executeExit", () => {
     };
 
     // currentYesPrice=45 → YES side: 45 - 1 = 44
-    await service.executeExit(position as any, "time decay", 45);
+    const orderId = await service.executeExit(position as any, "time decay", 45);
 
-    const row = insertedRows[startLen];
-    expect(row.limitPrice).toBe(44);
+    const db = getDb();
+    const rows = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(rows[0].limitPrice).toBe(44);
   });
 });
 
@@ -238,7 +203,6 @@ function makeSignal(overrides: Partial<any> = {}): any {
 describe("executeSignal anti-churn guards", () => {
   test("skips contract priced below minContractPrice", async () => {
     const service = new ExecutionService(stubKalshi);
-    // estimatedProb=0.9, marketPrice=0.08 → YES side price = 8¢ < 15¢ min
     const signal = makeSignal({
       estimatedProb: 0.9,
       marketPrice: 0.08,
@@ -254,7 +218,6 @@ describe("executeSignal anti-churn guards", () => {
     const service = new ExecutionService(stubKalshi);
     const signal = makeSignal();
 
-    // Set cooldown for this ticker
     recordExit(signal.ticker);
     expect(getCooldown(signal.ticker)).toBe(3);
 
@@ -279,17 +242,30 @@ describe("executeSignal anti-churn guards", () => {
 
   test("skips when accumulated exposure would exceed limit", async () => {
     const service = new ExecutionService(stubKalshi);
-    // Existing exposure of 490¢ + new order would exceed 500¢
-    exposureTotal = 490;
-    const signal = makeSignal();
+    // Insert existing buy orders to create exposure near limit
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "existing-1",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      signalId: "sig-old",
+      dryRun: true,
+      createdAt: "2026-03-04T00:00:00Z",
+      updatedAt: "2026-03-04T00:00:00Z",
+    }).run();
 
+    const signal = makeSignal();
     const orderId = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
   test("allows trade when all guards pass", async () => {
     const service = new ExecutionService(stubKalshi);
-    exposureTotal = 0;
     const signal = makeSignal();
 
     const orderId = await service.executeSignal(signal, 10000);
