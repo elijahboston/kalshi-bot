@@ -31,12 +31,14 @@ export class ReconciliationService {
   async reconcile(): Promise<void> {
     try {
       await this.syncOrders();
+      await this.cancelStaleOrders();
       await this.syncHistoricalOrders();
       await this.ensureTradeRecords();
       await this.updatePositions();
       await this.syncPositionsFromKalshi();
       await this.syncSettlements();
       await this.checkResolutions();
+      await this.repairCalibrationPnl();
       await this.snapshotBalance();
     } catch (err) {
       log.error(
@@ -65,7 +67,7 @@ export class ReconciliationService {
       .from(orders)
       .where(
         and(
-          eq(orders.status, "open"),
+          sql`${orders.status} IN ('open', 'partial')`,
           eq(orders.dryRun, false)
         )
       );
@@ -83,8 +85,8 @@ export class ReconciliationService {
 
         if (!kalshiOrder) continue;
 
-        const count = kalshiOrder.count ?? 0;
-        const filled = kalshiOrder.status === "executed" ? count : Math.max(0, count - (kalshiOrder.remaining_count ?? count));
+        const count = kalshiOrder.initial_count ?? kalshiOrder.count ?? 0;
+        const filled = kalshiOrder.fill_count ?? (kalshiOrder.status === "executed" ? count : Math.max(0, count - (kalshiOrder.remaining_count ?? count)));
 
         const newStatus =
           kalshiOrder.status === "executed"
@@ -137,6 +139,58 @@ export class ReconciliationService {
         log.warn(
           `Failed to sync order ${order.orderId}: ${err instanceof Error ? err.message : err}`
         );
+      }
+    }
+  }
+
+  /**
+   * Cancel resting orders older than 30 minutes that haven't fully filled.
+   * Stale orders tie up collateral and prevent new trades.
+   */
+  private async cancelStaleOrders(): Promise<void> {
+    const config = getConfig();
+    const db = getDb();
+
+    const maxAgeMs = 30 * 60_000; // 30 minutes
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+
+    const staleOrders = await db
+      .select()
+      .from(orders)
+      .where(
+        and(
+          sql`${orders.status} IN ('open', 'partial')`,
+          sql`${orders.createdAt} < ${cutoff}`
+        )
+      );
+
+    if (staleOrders.length === 0) return;
+
+    log.info(`Found ${staleOrders.length} stale order(s) older than 30 min`);
+
+    for (const order of staleOrders) {
+      try {
+        if (!config.bot.dryRun && !order.dryRun) {
+          await this.kalshi.cancelOrder(order.orderId);
+          log.info(`Canceled stale order ${order.orderId} (${order.action} ${order.side} ${order.ticker}, ${order.filledQuantity}/${order.quantity} filled)`);
+        }
+
+        await db
+          .update(orders)
+          .set({ status: "canceled", updatedAt: now() })
+          .where(eq(orders.orderId, order.orderId));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Order may already be canceled/filled on Kalshi — just update DB status
+        if (msg.includes("not_found") || msg.includes("already")) {
+          await db
+            .update(orders)
+            .set({ status: "canceled", updatedAt: now() })
+            .where(eq(orders.orderId, order.orderId));
+          log.debug(`Order ${order.orderId} already gone on Kalshi, marked canceled`);
+        } else {
+          log.warn(`Failed to cancel stale order ${order.orderId}: ${msg}`);
+        }
       }
     }
   }
@@ -432,21 +486,37 @@ export class ReconciliationService {
       const db = getDb();
       let imported = 0;
 
+      let repaired = 0;
+
       for (const ko of kalshiOrders) {
-        // Skip if we already have this order
         const existing = await db
           .select()
           .from(orders)
           .where(eq(orders.orderId, ko.order_id))
           .limit(1);
 
-        if (existing.length > 0) continue;
+        if (existing.length > 0) {
+          // Repair orders stuck with filledQuantity=0 despite being executed
+          const ex = existing[0]!;
+          if (ex.filledQuantity === 0 && ko.status === "executed") {
+            const filled = ko.fill_count ?? (ko.initial_count ?? ko.count ?? 0);
+            if (filled > 0) {
+              await db
+                .update(orders)
+                .set({
+                  filledQuantity: filled,
+                  status: "filled",
+                  updatedAt: now(),
+                })
+                .where(eq(orders.orderId, ko.order_id));
+              repaired++;
+            }
+          }
+          continue;
+        }
 
-        const count = ko.count ?? 0;
-        const remaining = ko.remaining_count ?? count;
-        // For executed orders, Kalshi returns remaining_count equal to count
-        // instead of 0. Trust the status field over remaining_count arithmetic.
-        const filled = ko.status === "executed" ? count : Math.max(0, count - remaining);
+        const count = ko.initial_count ?? ko.count ?? 0;
+        const filled = ko.fill_count ?? (ko.status === "executed" ? count : Math.max(0, count - (ko.remaining_count ?? count)));
 
         const status =
           ko.status === "executed"
@@ -475,8 +545,10 @@ export class ReconciliationService {
         imported++;
       }
 
-      if (imported > 0) {
-        log.info(`Imported ${imported} historical order(s) from Kalshi`);
+      if (imported > 0 || repaired > 0) {
+        log.info(
+          `Historical orders: ${imported} imported, ${repaired} repaired`
+        );
       }
     } catch (err) {
       log.warn(
@@ -923,6 +995,55 @@ export class ReconciliationService {
     log.debug(
       `Updated station bias for ${stationId}: ${byHorizon.size} horizon(s)`
     );
+  }
+
+  /**
+   * D2. Recompute PnL for calibration records where traded=true but realizedPnl=0,
+   * in case order filledQuantity was repaired after the calibration record was created.
+   */
+  private async repairCalibrationPnl(): Promise<void> {
+    const db = getDb();
+
+    const stale = await db
+      .select()
+      .from(calibration)
+      .where(
+        sql`${calibration.traded} = 1 AND ${calibration.realizedPnl} = 0`
+      );
+
+    if (stale.length === 0) return;
+
+    let repaired = 0;
+
+    for (const cal of stale) {
+      const botOrders = await db
+        .select()
+        .from(orders)
+        .where(
+          and(
+            eq(orders.ticker, cal.ticker),
+            eq(orders.status, "filled"),
+            sql`${orders.signalId} IS NOT NULL`
+          )
+        );
+
+      // Only recompute if there are filled orders with nonzero filledQuantity
+      const hasFilledQty = botOrders.some((o) => o.filledQuantity > 0);
+      if (!hasFilledQty) continue;
+
+      const pnl = computePerSidePnl(botOrders, cal.actualOutcome);
+      if (pnl === 0) continue; // Still zero after recompute — nothing to repair
+
+      await db
+        .update(calibration)
+        .set({ realizedPnl: pnl })
+        .where(eq(calibration.id, cal.id));
+      repaired++;
+    }
+
+    if (repaired > 0) {
+      log.info(`Repaired PnL for ${repaired} calibration record(s)`);
+    }
   }
 
   /**

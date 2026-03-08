@@ -9,10 +9,23 @@ const log = createLogger("execution");
 /** Per-ticker cooldown tracking: ticker → remaining ticks */
 const cooldownMap = new Map<string, number>();
 
+/** Tickers to hold until settlement — skip all exit evaluation */
+const holdUntilSettlement = new Set<string>();
+
 /** Record that a ticker was just exited; starts its cooldown timer. */
 export function recordExit(ticker: string): void {
   const config = getConfig();
   cooldownMap.set(ticker, config.bot.exitCooldownTicks);
+}
+
+/** Mark a ticker to hold until settlement — no exits will be attempted. */
+export function holdTicker(ticker: string): void {
+  holdUntilSettlement.add(ticker);
+}
+
+/** Check if a ticker is on hold. */
+export function isTickerHeld(ticker: string): boolean {
+  return holdUntilSettlement.has(ticker);
 }
 
 /** Decrement all cooldown counters by 1 (call at tick start). */
@@ -66,6 +79,23 @@ export class ExecutionService {
     const existing = openPositions.find((p) => p.ticker === signal.ticker);
     if (existing) {
       log.info(`Skipping ${signal.ticker}: already have position`);
+      return null;
+    }
+
+    // Already have a resting buy order for this ticker?
+    const [restingBuy] = await db
+      .select({ orderId: orders.orderId })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.ticker, signal.ticker),
+          eq(orders.action, "buy"),
+          sql`${orders.status} IN ('open', 'partial')`
+        )
+      )
+      .limit(1);
+    if (restingBuy) {
+      log.info(`Skipping ${signal.ticker}: buy order ${restingBuy.orderId} already resting`);
       return null;
     }
 
@@ -220,6 +250,26 @@ export class ExecutionService {
     const config = getConfig();
     const db = getDb();
     const side = position.side as "yes" | "no";
+
+    // Guard: skip if there's already an open/partial sell order for this ticker.
+    // Without this check, the bot places a new sell every tick before reconciliation
+    // updates the position, causing massive over-selling into new short positions.
+    const [pendingSell] = await db
+      .select({ orderId: orders.orderId })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.ticker, position.ticker),
+          eq(orders.action, "sell"),
+          sql`${orders.status} IN ('open', 'partial')`
+        )
+      )
+      .limit(1);
+
+    if (pendingSell) {
+      log.info(`Skipping exit for ${position.ticker}: sell order ${pendingSell.orderId} already pending`);
+      return null;
+    }
 
     // Price the sell at the current bid side to fill quickly.
     // Sell 1¢ below the current price to cross the spread, but floor at 2¢.

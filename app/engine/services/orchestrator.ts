@@ -9,7 +9,7 @@ import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService } from "@kcb/data";
 import { ProbabilityEstimator, getEffectiveThreshold } from "@kcb/signals";
 import type { EstimateResult } from "@kcb/signals";
-import { ExecutionService, computeKelly, recordExit, tickCooldowns } from "@kcb/execution";
+import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
 import { uuid, now, seriesCategory } from "@kcb/shared";
 
@@ -246,6 +246,10 @@ export async function initOrchestrator(): Promise<void> {
     for (const position of openPositions) {
       if (seenTickers.has(position.ticker)) continue;
       seenTickers.add(position.ticker);
+
+      // Skip tickers marked for hold-until-settlement
+      if (isTickerHeld(position.ticker)) continue;
+
       try {
         const side = position.side as "yes" | "no";
 
@@ -328,6 +332,19 @@ export async function initOrchestrator(): Promise<void> {
         balance = kalshiBalance.balance;
       }
 
+      // Reserve enough cash to exit all open positions.
+      // Worst case: sell at 2¢ (floor), counterparty collateral = (100 - 2) = 98¢ per contract.
+      // But selling a position we OWN doesn't cost us — we receive proceeds.
+      // The reserve is for the scenario where prices move against us and we need
+      // cash to cover any resting order collateral. Use 2¢ per contract as buffer.
+      const openPositions = await db.select({ quantity: positions.quantity }).from(positions);
+      const exitReserve = openPositions.reduce((sum, p) => sum + p.quantity * 2, 0);
+      const availableBalance = Math.max(0, balance - exitReserve);
+
+      if (availableBalance < balance) {
+        log.debug(`Cash reserve: ${exitReserve}¢ for ${openPositions.length} positions, available: ${availableBalance}¢ of ${balance}¢`);
+      }
+
       for (const signal of actionableSignals) {
         try {
           // Build a signal-like object matching the Signal type
@@ -353,7 +370,7 @@ export async function initOrchestrator(): Promise<void> {
 
           const orderId = await executionService.executeSignal(
             signalRecord,
-            balance
+            availableBalance
           );
 
           // Update signal with result
