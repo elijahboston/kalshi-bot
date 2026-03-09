@@ -125,7 +125,7 @@ export class ExecutionService {
     const price = side === "yes"
       ? Math.round(signal.marketPrice * 100) // price in cents
       : Math.round((1 - signal.marketPrice) * 100);
-    const contracts = Math.min(
+    let contracts = Math.min(
       Math.floor(betAmount / price),
       config.bot.maxContractsPerOrder
     );
@@ -148,11 +148,15 @@ export class ExecutionService {
       .where(eq(positions.ticker, signal.ticker))
       .limit(1);
     const currentExposure = existingPosition?.costBasis ?? 0;
-    const newExposure = contracts * price;
-    if (currentExposure + newExposure > config.bot.maxExposurePerTicker) {
-      log.info(
-        `Skipping ${signal.ticker}: exposure ${currentExposure + newExposure}¢ would exceed max ${config.bot.maxExposurePerTicker}¢`
-      );
+    const remainingRoom = config.bot.maxExposurePerTicker - currentExposure;
+    if (remainingRoom <= 0) {
+      log.info(`Skipping ${signal.ticker}: already at max exposure ${currentExposure}¢`);
+      return null;
+    }
+    // Size down contracts to fit within exposure limit
+    contracts = Math.min(contracts, Math.floor(remainingRoom / price));
+    if (contracts <= 0) {
+      log.info(`Skipping ${signal.ticker}: price ${price}¢ exceeds remaining exposure room ${remainingRoom}¢`);
       return null;
     }
 
