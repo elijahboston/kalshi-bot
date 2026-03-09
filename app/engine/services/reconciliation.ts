@@ -127,6 +127,8 @@ export class ReconciliationService {
             action: order.action,
             filledAt: timestamp,
           });
+
+          log.info(`Order ${order.orderId} filled +${newFills} (${filled}/${count}) — ${order.action} ${order.side} ${order.ticker} @${price}¢`);
         }
 
         bus.emit("order:update", {

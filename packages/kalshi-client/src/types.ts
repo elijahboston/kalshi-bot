@@ -36,10 +36,15 @@ export interface KalshiOrder {
   type: "limit" | "market";
   yes_price: number;
   no_price: number;
-  count: number;
+  /** @deprecated Kalshi API now uses initial_count */
+  count?: number;
+  initial_count: number;
+  fill_count: number;
   remaining_count: number;
   status: "resting" | "canceled" | "executed" | "pending";
   created_time: string;
+  taker_fees?: number;
+  maker_fees?: number;
 }
 
 export interface KalshiPosition {
@@ -57,13 +62,16 @@ export interface KalshiPosition {
 
 export interface KalshiSettlement {
   ticker: string;
+  event_ticker?: string;
   market_result: "yes" | "no" | "all_yes" | "all_no";
   yes_count: number;
   yes_total_cost: number;
   no_count: number;
   no_total_cost: number;
   revenue: number;
-  realized_pnl: number;
+  /** Settlement value per contract in cents (usually 100) */
+  value?: number;
+  fee_cost?: string;
   settled_time: string;
   [key: string]: unknown;
 }

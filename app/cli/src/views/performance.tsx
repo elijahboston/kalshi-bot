@@ -35,6 +35,50 @@ interface Stats {
   positionCount: number;
 }
 
+export interface WindowedWinRate {
+  label: string;
+  wins: number;
+  total: number;
+  rate: number;
+}
+
+/**
+ * Query win rates for multiple time windows from the calibration table.
+ * Exported for testing.
+ */
+export async function queryWindowedWinRates(
+  db: ReturnType<typeof getDb>,
+): Promise<WindowedWinRate[]> {
+  const windows = [
+    { label: "24h", hours: 24 },
+    { label: "48h", hours: 48 },
+    { label: "7d", hours: 168 },
+  ];
+
+  const results: WindowedWinRate[] = [];
+  for (const w of windows) {
+    const cutoff = new Date(Date.now() - w.hours * 60 * 60 * 1000).toISOString();
+    const rows = await db
+      .select({
+        total: count(),
+        wins: sql<number>`SUM(CASE WHEN ${calibration.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+      })
+      .from(calibration)
+      .where(sql`${calibration.traded} = 1 AND ${calibration.resolvedAt} >= ${cutoff}`);
+
+    const total = Number(rows[0]?.total ?? 0);
+    const wins = Number(rows[0]?.wins ?? 0);
+    results.push({
+      label: w.label,
+      wins,
+      total,
+      rate: total > 0 ? wins / total : 0,
+    });
+  }
+
+  return results;
+}
+
 interface OrderRow {
   createdAt: string;
   ticker: string;
@@ -79,6 +123,7 @@ export function PerformanceView() {
   const [resolutions, setResolutions] = useState<Resolution[]>([]);
   const [bucketStats, setBucketStats] = useState<BucketData[]>([]);
   const [dailyPnl, setDailyPnl] = useState<DailyPnlEntry[]>([]);
+  const [windowedWinRates, setWindowedWinRates] = useState<WindowedWinRate[]>([]);
 
   const loadData = async () => {
     const db = getDb();
@@ -214,6 +259,9 @@ export function PerformanceView() {
         .map((r) => ({ date: r.day, pnl: Number(r.pnl) }))
         .reverse(),
     );
+
+    // Load windowed win rates
+    setWindowedWinRates(await queryWindowedWinRates(db));
   };
 
   useEffect(() => {
@@ -273,6 +321,19 @@ export function PerformanceView() {
           <Text bold color="cyan">Pos</Text>{" "}
           <Text>{stats.positionCount}</Text>
         </Text>
+      </Box>
+
+      {/* Windowed Win Rates */}
+      <Box gap={2} marginBottom={1}>
+        {windowedWinRates.map((w) => (
+          <Text key={w.label}>
+            <Text bold color="cyan">{w.label}</Text>{" "}
+            <Text color={w.total === 0 ? "gray" : w.rate >= 0.5 ? "green" : "red"}>
+              {w.total === 0 ? "—" : `${(w.rate * 100).toFixed(1)}%`}
+            </Text>
+            <Text color="gray"> ({w.wins}/{w.total})</Text>
+          </Text>
+        ))}
       </Box>
 
       {/* Portfolio Curve */}

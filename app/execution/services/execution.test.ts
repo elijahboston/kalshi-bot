@@ -242,20 +242,17 @@ describe("executeSignal anti-churn guards", () => {
 
   test("skips when accumulated exposure would exceed limit", async () => {
     const service = new ExecutionService(stubKalshi);
-    // Insert existing buy orders to create exposure near limit
+    // Insert an open position to create exposure near the limit
     const db = getDb();
-    db.insert(orders).values({
-      orderId: "existing-1",
+    db.insert(positions).values({
       ticker: "KXHIGHNY-26MAR04-B40",
-      action: "buy",
       side: "yes",
-      limitPrice: 50,
       quantity: 10,
-      filledQuantity: 10,
-      status: "filled",
-      signalId: "sig-old",
-      dryRun: true,
-      createdAt: "2026-03-04T00:00:00Z",
+      avgEntryPrice: 50,
+      costBasis: 500,
+      marketValue: 500,
+      unrealizedPnl: 0,
+      openedAt: "2026-03-04T00:00:00Z",
       updatedAt: "2026-03-04T00:00:00Z",
     }).run();
 

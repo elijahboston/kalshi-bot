@@ -208,6 +208,32 @@ describe("trade-based PnL computation", () => {
     expect(pnl).toBe(0);
   });
 
+  test("filledQuantity=0 produces zero PnL (the sync bug)", () => {
+    // When filledQuantity is 0, all math zeroes out regardless of prices
+    const pnl = computePerSidePnl(
+      [
+        { action: "buy", side: "no", limitPrice: 59, filledQuantity: 0 },
+        { action: "buy", side: "no", limitPrice: 62, filledQuantity: 0 },
+      ],
+      0, // NO won — should be a win
+    );
+    expect(pnl).toBe(0);
+  });
+
+  test("repaired filledQuantity produces correct PnL", () => {
+    // Same orders as above but with correct filledQuantity
+    const pnl = computePerSidePnl(
+      [
+        { action: "buy", side: "no", limitPrice: 59, filledQuantity: 2 },
+        { action: "buy", side: "no", limitPrice: 62, filledQuantity: 2 },
+      ],
+      0, // NO won
+    );
+    // noNetQty=4, noWon=true → settlement=400, buyCost=59*2+62*2=242
+    // PnL = 400 + 0 - 242 = 158
+    expect(pnl).toBe(158);
+  });
+
   test("cross-side sells: NO sells don't inflate YES PnL", () => {
     // Buy YES@16 x12, sell NO@94 x10, outcome NO (YES lost)
     // YES side: buyCost=192, netQty=12, yesWon=false → settlement=0

@@ -141,18 +141,13 @@ export class ExecutionService {
       return null;
     }
 
-    // Per-ticker accumulated exposure limit
-    const existingExposure = await db
-      .select({ total: sql<number>`COALESCE(SUM(${orders.limitPrice} * ${orders.filledQuantity}), 0)` })
-      .from(orders)
-      .where(
-        and(
-          eq(orders.ticker, signal.ticker),
-          eq(orders.action, "buy"),
-          sql`${orders.signalId} IS NOT NULL`
-        )
-      );
-    const currentExposure = existingExposure[0]?.total ?? 0;
+    // Per-ticker exposure limit — use current position cost basis (not historical orders)
+    const [existingPosition] = await db
+      .select({ costBasis: positions.costBasis })
+      .from(positions)
+      .where(eq(positions.ticker, signal.ticker))
+      .limit(1);
+    const currentExposure = existingPosition?.costBasis ?? 0;
     const newExposure = contracts * price;
     if (currentExposure + newExposure > config.bot.maxExposurePerTicker) {
       log.info(

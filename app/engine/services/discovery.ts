@@ -101,7 +101,7 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
         .join(", ");
       log.info(`Fetched ${allMarkets.length} markets for ${seriesTicker} (${breakdown})`);
     } else {
-      log.info(`Fetched 0 markets for ${seriesTicker}`);
+      log.debug(`Fetched 0 markets for ${seriesTicker}`);
     }
 
     // Keep open + recently closed/settled (for calibration & display)

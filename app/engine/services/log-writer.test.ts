@@ -7,6 +7,15 @@ import { startLogWriter } from "./log-writer";
 const TEST_DIR = join(import.meta.dir, "__test_logs__");
 const TEST_LOG = join(TEST_DIR, "bot.log");
 
+function emit(level: "debug" | "info" | "warn" | "error", message: string) {
+  bus.emit("log", {
+    level,
+    module: "test",
+    message,
+    timestamp: "2026-02-22T00:00:00.000Z",
+  });
+}
+
 beforeEach(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
@@ -17,21 +26,10 @@ afterEach(() => {
 
 describe("startLogWriter", () => {
   test("creates log directory and writes JSON lines", () => {
-    const unsub = startLogWriter(TEST_LOG);
+    const unsub = startLogWriter({ logPath: TEST_LOG });
 
-    bus.emit("log", {
-      level: "info",
-      module: "test",
-      message: "hello world",
-      timestamp: "2026-02-22T00:00:00.000Z",
-    });
-
-    bus.emit("log", {
-      level: "warn",
-      module: "test",
-      message: "something happened",
-      timestamp: "2026-02-22T00:00:01.000Z",
-    });
+    emit("info", "hello world");
+    emit("warn", "something happened");
 
     unsub();
 
@@ -51,23 +49,11 @@ describe("startLogWriter", () => {
   });
 
   test("unsubscribe stops writing", () => {
-    const unsub = startLogWriter(TEST_LOG);
+    const unsub = startLogWriter({ logPath: TEST_LOG });
 
-    bus.emit("log", {
-      level: "info",
-      module: "test",
-      message: "before unsub",
-      timestamp: "2026-02-22T00:00:00.000Z",
-    });
-
+    emit("info", "before unsub");
     unsub();
-
-    bus.emit("log", {
-      level: "info",
-      module: "test",
-      message: "after unsub",
-      timestamp: "2026-02-22T00:00:01.000Z",
-    });
+    emit("info", "after unsub");
 
     const content = readFileSync(TEST_LOG, "utf-8");
     const lines = content.trim().split("\n");
@@ -75,29 +61,69 @@ describe("startLogWriter", () => {
     expect(JSON.parse(lines[0]!).message).toBe("before unsub");
   });
 
-  test("rotates file when exceeding 10MB", () => {
-    const unsub = startLogWriter(TEST_LOG);
+  test("skips debug entries by default", () => {
+    const unsub = startLogWriter({ logPath: TEST_LOG });
 
-    // Pre-fill the log file to just under 10MB
+    emit("debug", "noisy debug");
+    emit("info", "useful info");
+    emit("debug", "more debug");
+    emit("error", "something broke");
+
+    unsub();
+
+    const content = readFileSync(TEST_LOG, "utf-8");
+    const lines = content.trim().split("\n");
+    expect(lines.length).toBe(2);
+    expect(JSON.parse(lines[0]!).message).toBe("useful info");
+    expect(JSON.parse(lines[1]!).message).toBe("something broke");
+  });
+
+  test("minLevel=debug writes everything", () => {
+    const unsub = startLogWriter({ logPath: TEST_LOG, minLevel: "debug" });
+
+    emit("debug", "included");
+    emit("info", "also included");
+
+    unsub();
+
+    const content = readFileSync(TEST_LOG, "utf-8");
+    const lines = content.trim().split("\n");
+    expect(lines.length).toBe(2);
+  });
+
+  test("minLevel=error only writes errors", () => {
+    const unsub = startLogWriter({ logPath: TEST_LOG, minLevel: "error" });
+
+    emit("info", "skipped");
+    emit("warn", "also skipped");
+    emit("error", "included");
+
+    unsub();
+
+    const content = readFileSync(TEST_LOG, "utf-8");
+    const lines = content.trim().split("\n");
+    expect(lines.length).toBe(1);
+    expect(JSON.parse(lines[0]!).message).toBe("included");
+  });
+
+  test("rotates file at 5MB with multiple backups", () => {
+    // Pre-fill the log file to just over 5MB before starting the writer
     mkdirSync(TEST_DIR, { recursive: true });
     const padding = "x".repeat(1024);
     let written = 0;
-    const target = 10 * 1024 * 1024; // 10MB
-    const chunk = padding + "\n";
+    const target = 5 * 1024 * 1024;
     const chunks: string[] = [];
     while (written < target) {
+      const chunk = padding + "\n";
       chunks.push(chunk);
       written += chunk.length;
     }
     writeFileSync(TEST_LOG, chunks.join(""));
 
+    const unsub = startLogWriter({ logPath: TEST_LOG });
+
     // This write should trigger rotation
-    bus.emit("log", {
-      level: "info",
-      module: "test",
-      message: "after rotation",
-      timestamp: "2026-02-22T00:00:00.000Z",
-    });
+    emit("info", "after rotation");
 
     unsub();
 
@@ -110,12 +136,59 @@ describe("startLogWriter", () => {
     expect(JSON.parse(lines[0]!).message).toBe("after rotation");
   });
 
+  test("shifts backups on subsequent rotations", () => {
+    mkdirSync(TEST_DIR, { recursive: true });
+
+    // Create fake pre-existing backups
+    writeFileSync(TEST_LOG + ".1", "old-backup-1\n");
+    writeFileSync(TEST_LOG + ".2", "old-backup-2\n");
+
+    // Pre-fill current log to trigger rotation
+    const padding = "x".repeat(5 * 1024 * 1024 + 1);
+    writeFileSync(TEST_LOG, padding);
+
+    const unsub = startLogWriter({ logPath: TEST_LOG });
+    emit("info", "new entry");
+    unsub();
+
+    // .1 should be the rotated current file (the padding)
+    expect(existsSync(TEST_LOG + ".1")).toBe(true);
+    // .2 should be old .1
+    expect(readFileSync(TEST_LOG + ".2", "utf-8")).toBe("old-backup-1\n");
+    // .3 should be old .2
+    expect(readFileSync(TEST_LOG + ".3", "utf-8")).toBe("old-backup-2\n");
+    // Current log has the new entry
+    expect(JSON.parse(readFileSync(TEST_LOG, "utf-8").trim()).message).toBe("new entry");
+  });
+
+  test("drops oldest backup beyond MAX_BACKUPS", () => {
+    mkdirSync(TEST_DIR, { recursive: true });
+
+    // Create 3 existing backups (the max)
+    writeFileSync(TEST_LOG + ".1", "backup-1\n");
+    writeFileSync(TEST_LOG + ".2", "backup-2\n");
+    writeFileSync(TEST_LOG + ".3", "backup-3\n");
+
+    // Pre-fill current log to trigger rotation
+    const padding = "x".repeat(5 * 1024 * 1024 + 1);
+    writeFileSync(TEST_LOG, padding);
+
+    const unsub = startLogWriter({ logPath: TEST_LOG });
+    emit("info", "newest");
+    unsub();
+
+    // .3 should now be old .2 (old .3 was dropped)
+    expect(readFileSync(TEST_LOG + ".3", "utf-8")).toBe("backup-2\n");
+    // No .4 should exist
+    expect(existsSync(TEST_LOG + ".4")).toBe(false);
+  });
+
   test("writes valid JSON on each line", () => {
-    const unsub = startLogWriter(TEST_LOG);
+    const unsub = startLogWriter({ logPath: TEST_LOG });
 
     for (let i = 0; i < 10; i++) {
       bus.emit("log", {
-        level: "debug",
+        level: "info",
         module: "test",
         message: `entry ${i}`,
         data: { index: i, nested: { value: true } },

@@ -31,7 +31,9 @@
       "@kcb/signals": ["./app/signals/index.ts"],
       "@kcb/signals/*": ["./app/signals/*"],
       "@kcb/execution": ["./app/execution/index.ts"],
-      "@kcb/execution/*": ["./app/execution/*"]
+      "@kcb/execution/*": ["./app/execution/*"],
+      "@kcb/viz": ["./app/viz/index.ts"],
+      "@kcb/viz/*": ["./app/viz/*"]
     },
     "baseUrl": "."
   },

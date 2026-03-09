@@ -280,9 +280,13 @@ export async function initOrchestrator(): Promise<void> {
           exitReason = `edge reversal (${(edge * 100).toFixed(1)}¢ < ${(config.bot.exitEdgeThreshold * 100).toFixed(1)}¢ threshold)`;
         }
 
-        // 2. Stop-loss
+        // 2. Stop-loss — compute from live market price, not stale unrealizedPnl
         if (!exitReason && position.costBasis > 0) {
-          const lossPct = position.unrealizedPnl / position.costBasis;
+          const currentSidePrice = side === "yes"
+            ? (market.lastYesPrice ?? 50)
+            : (market.lastNoPrice ?? 50);
+          const liveUnrealized = position.quantity * currentSidePrice - position.costBasis;
+          const lossPct = liveUnrealized / position.costBasis;
           if (lossPct < -config.bot.stopLossPct) {
             exitReason = `stop-loss (${(lossPct * 100).toFixed(1)}% loss > ${(config.bot.stopLossPct * 100).toFixed(0)}% limit)`;
           }

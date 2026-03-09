@@ -10,6 +10,8 @@
     "@kcb/config": "workspace:*",
     "@kcb/db": "workspace:*",
     "@kcb/engine": "workspace:*",
+    "@kcb/execution": "workspace:*",
+    "@kcb/viz": "workspace:*",
     "ink": "^5.1.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.0",

@@ -1,7 +1,9 @@
 import * as THREE from "three";
+import { getDotTexture } from "./dot-texture";
 
 const MAX_PARTICLES = 2000;
 const PARTICLE_LIFETIME = 2.0; // seconds
+const HIDE_POS = 9999; // off-screen position for dead particles
 
 type Particle = {
   alive: boolean;
@@ -16,35 +18,38 @@ let geometry: THREE.BufferGeometry;
 let points: THREE.Points;
 let positionAttr: THREE.BufferAttribute;
 let colorAttr: THREE.BufferAttribute;
-let alphaAttr: THREE.BufferAttribute;
 
 export function initParticles(scene: THREE.Scene): void {
   particles = Array.from({ length: MAX_PARTICLES }, () => ({
     alive: false,
     age: 0,
-    position: new THREE.Vector3(),
+    position: new THREE.Vector3(HIDE_POS, HIDE_POS, HIDE_POS),
     velocity: new THREE.Vector3(),
     color: new THREE.Color(),
   }));
 
   const positions = new Float32Array(MAX_PARTICLES * 3);
   const colors = new Float32Array(MAX_PARTICLES * 3);
-  const alphas = new Float32Array(MAX_PARTICLES);
+
+  // Initialize all positions off-screen
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    positions[i * 3] = HIDE_POS;
+    positions[i * 3 + 1] = HIDE_POS;
+    positions[i * 3 + 2] = HIDE_POS;
+  }
 
   geometry = new THREE.BufferGeometry();
   positionAttr = new THREE.BufferAttribute(positions, 3);
   colorAttr = new THREE.BufferAttribute(colors, 3);
-  alphaAttr = new THREE.BufferAttribute(alphas, 1);
 
   geometry.setAttribute("position", positionAttr);
   geometry.setAttribute("color", colorAttr);
-  geometry.setAttribute("alpha", alphaAttr);
 
   const mat = new THREE.PointsMaterial({
-    size: 0.015,
+    size: 0.02,
+    map: getDotTexture(),
     vertexColors: true,
     transparent: true,
-    opacity: 0.8,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     sizeAttenuation: true,
@@ -139,18 +144,20 @@ export function emitSettlement(
 }
 
 export function updateParticles(delta: number): void {
-  const gravity = new THREE.Vector3(0, 0, 0); // Slight pull toward center
+  const gravity = new THREE.Vector3();
   for (let i = 0; i < MAX_PARTICLES; i++) {
     const p = particles[i]!;
     if (!p.alive) {
-      alphaAttr.setX(i, 0);
+      // Park dead particles off-screen
+      positionAttr.setXYZ(i, HIDE_POS, HIDE_POS, HIDE_POS);
       continue;
     }
 
     p.age += delta;
     if (p.age >= PARTICLE_LIFETIME) {
       p.alive = false;
-      alphaAttr.setX(i, 0);
+      p.position.set(HIDE_POS, HIDE_POS, HIDE_POS);
+      positionAttr.setXYZ(i, HIDE_POS, HIDE_POS, HIDE_POS);
       continue;
     }
 
@@ -161,16 +168,13 @@ export function updateParticles(delta: number): void {
     // Integrate
     p.position.addScaledVector(p.velocity, delta);
 
-    // Fade
+    // Fade by darkening color (additive blending makes dark = invisible)
     const t = p.age / PARTICLE_LIFETIME;
-    const alpha = 1 - t * t; // quadratic fade
-
+    const fade = 1 - t * t;
+    colorAttr.setXYZ(i, p.color.r * fade, p.color.g * fade, p.color.b * fade);
     positionAttr.setXYZ(i, p.position.x, p.position.y, p.position.z);
-    colorAttr.setXYZ(i, p.color.r, p.color.g, p.color.b);
-    alphaAttr.setX(i, alpha);
   }
 
   positionAttr.needsUpdate = true;
   colorAttr.needsUpdate = true;
-  alphaAttr.needsUpdate = true;
 }

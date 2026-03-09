@@ -2,6 +2,7 @@
 import { getConfig } from "@kcb/config";
 import { runMigrations } from "@kcb/db";
 import { orchestrator, startLogWriter } from "@kcb/engine";
+import { holdTicker } from "@kcb/execution";
 import { startVizServer } from "./src/server";
 
 async function main() {
@@ -12,6 +13,9 @@ async function main() {
 
   // Initialize the engine
   await orchestrator.initOrchestrator();
+
+  // Hold damaged position until settlement — do not attempt exits
+  holdTicker("KXHIGHCHI-26MAR07-B62.5");
 
   // Start log writer
   const stopLogWriter = startLogWriter();

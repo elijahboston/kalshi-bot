@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getDotTexture } from "./dot-texture";
 
 /** Create the Earth globe with atmosphere and starfield */
 export function createGlobe(scene: THREE.Scene): {
@@ -88,6 +89,9 @@ export function createGlobe(scene: THREE.Scene): {
   const starMat = new THREE.PointsMaterial({
     color: 0xffffff,
     size: 0.15,
+    map: getDotTexture(),
+    transparent: true,
+    depthWrite: false,
     sizeAttenuation: true,
   });
   scene.add(new THREE.Points(starGeo, starMat));

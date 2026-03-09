@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import { sql, count, avg, sum } from "drizzle-orm";
+import { sql, count } from "drizzle-orm";
 import { calibration } from "@kcb/db";
+import { queryWindowedWinRates } from "./performance";
 
 function createTestDb() {
   const sqlite = new Database(":memory:");
@@ -23,43 +24,46 @@ function createTestDb() {
       resolved_at TEXT NOT NULL
     );
   `);
-  return drizzle(sqlite, { schema: { calibration } });
+  const db = drizzle(sqlite, { schema: { calibration } });
+  return { sqlite, db };
 }
 
-function insertCalibration(
-  db: ReturnType<typeof createTestDb>,
+function insert(
+  sqlite: Database,
   overrides: Partial<{
-    id: string;
-    ticker: string;
     realizedPnl: number | null;
     traded: boolean;
-    actualOutcome: number;
-    predictedProb: number;
-    marketPrice: number;
+    resolvedAt: string;
   }> = {},
 ) {
-  const id = overrides.id ?? crypto.randomUUID();
-  return db.insert(calibration).values({
-    id,
-    ticker: overrides.ticker ?? `TICKER-${id.slice(0, 6)}`,
-    seriesTicker: "KXHIGHNY",
-    category: "high_temp",
-    predictedProb: overrides.predictedProb ?? 0.6,
-    actualOutcome: overrides.actualOutcome ?? 1,
-    marketPrice: overrides.marketPrice ?? 0.5,
-    edge: 0.1,
-    realizedPnl: overrides.realizedPnl ?? null,
-    traded: overrides.traded ?? false,
-    forecastHorizon: null,
-    resolvedAt: new Date().toISOString(),
-  });
+  const id = crypto.randomUUID();
+  sqlite.run(
+    `INSERT INTO calibration (id, ticker, series_ticker, category, predicted_prob, actual_outcome, market_price, edge, realized_pnl, traded, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      `TICKER-${id.slice(0, 6)}`,
+      "KXHIGHNY",
+      "high_temp",
+      0.6,
+      1,
+      0.5,
+      0.1,
+      overrides.realizedPnl ?? null,
+      overrides.traded ? 1 : 0,
+      overrides.resolvedAt ?? new Date().toISOString(),
+    ],
+  );
+}
+
+function hoursAgo(h: number): string {
+  return new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
 }
 
 /**
- * This is the EXACT query from performance.tsx (the current code).
- * We test it to see if count(sql`CASE WHEN ... THEN 1 END`) works.
+ * Original query from performance.tsx — uses count(CASE WHEN ...).
  */
-async function queryWinRateOriginal(db: ReturnType<typeof createTestDb>) {
+async function queryWinRateOriginal(db: ReturnType<typeof drizzle>) {
   const calAgg = await db
     .select({
       settledCount: count(),
@@ -76,9 +80,9 @@ async function queryWinRateOriginal(db: ReturnType<typeof createTestDb>) {
 }
 
 /**
- * Fixed version: use sql<number> for the full aggregate expression.
+ * Fixed version: use SUM(CASE WHEN ...) instead of count(CASE WHEN ...).
  */
-async function queryWinRateFixed(db: ReturnType<typeof createTestDb>) {
+async function queryWinRateFixed(db: ReturnType<typeof drizzle>) {
   const calAgg = await db
     .select({
       settledCount: count(),
@@ -94,12 +98,11 @@ async function queryWinRateFixed(db: ReturnType<typeof createTestDb>) {
 
 describe("performance win rate query", () => {
   test("original query: 3 traded, 2 wins → wins should be 2", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: true, realizedPnl: 150 });
-    await insertCalibration(db, { traded: true, realizedPnl: -50 });
-    await insertCalibration(db, { traded: true, realizedPnl: 200 });
-    // Non-traded should be excluded
-    await insertCalibration(db, { traded: false, realizedPnl: 100 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 150 });
+    insert(sqlite, { traded: true, realizedPnl: -50 });
+    insert(sqlite, { traded: true, realizedPnl: 200 });
+    insert(sqlite, { traded: false, realizedPnl: 100 });
 
     const result = await queryWinRateOriginal(db);
     expect(result.settledCount).toBe(3);
@@ -108,11 +111,11 @@ describe("performance win rate query", () => {
   });
 
   test("fixed query: 3 traded, 2 wins → wins should be 2", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: true, realizedPnl: 150 });
-    await insertCalibration(db, { traded: true, realizedPnl: -50 });
-    await insertCalibration(db, { traded: true, realizedPnl: 200 });
-    await insertCalibration(db, { traded: false, realizedPnl: 100 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 150 });
+    insert(sqlite, { traded: true, realizedPnl: -50 });
+    insert(sqlite, { traded: true, realizedPnl: 200 });
+    insert(sqlite, { traded: false, realizedPnl: 100 });
 
     const result = await queryWinRateFixed(db);
     expect(result.settledCount).toBe(3);
@@ -121,8 +124,8 @@ describe("performance win rate query", () => {
   });
 
   test("no traded records → winRate 0", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: false, realizedPnl: 100 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: false, realizedPnl: 100 });
 
     const original = await queryWinRateOriginal(db);
     expect(original.settledCount).toBe(0);
@@ -134,9 +137,9 @@ describe("performance win rate query", () => {
   });
 
   test("all losses → winRate 0", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: true, realizedPnl: -50 });
-    await insertCalibration(db, { traded: true, realizedPnl: -100 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: -50 });
+    insert(sqlite, { traded: true, realizedPnl: -100 });
 
     const original = await queryWinRateOriginal(db);
     const fixed = await queryWinRateFixed(db);
@@ -148,9 +151,9 @@ describe("performance win rate query", () => {
   });
 
   test("realizedPnl = 0 does not count as win", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: true, realizedPnl: 0 });
-    await insertCalibration(db, { traded: true, realizedPnl: 100 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 0 });
+    insert(sqlite, { traded: true, realizedPnl: 100 });
 
     const fixed = await queryWinRateFixed(db);
     expect(fixed.settledCount).toBe(2);
@@ -159,13 +162,87 @@ describe("performance win rate query", () => {
   });
 
   test("realizedPnl = null does not count as win", async () => {
-    const db = createTestDb();
-    await insertCalibration(db, { traded: true, realizedPnl: null });
-    await insertCalibration(db, { traded: true, realizedPnl: 50 });
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: null });
+    insert(sqlite, { traded: true, realizedPnl: 50 });
 
     const fixed = await queryWinRateFixed(db);
     expect(fixed.settledCount).toBe(2);
     expect(fixed.wins).toBe(1);
     expect(fixed.winRate).toBe(0.5);
+  });
+});
+
+describe("queryWindowedWinRates", () => {
+  test("returns 3 windows: 24h, 48h, 7d", async () => {
+    const { db } = createTestDb();
+    const results = await queryWindowedWinRates(db);
+    expect(results.length).toBe(3);
+    expect(results.map((r) => r.label)).toEqual(["24h", "48h", "7d"]);
+  });
+
+  test("empty table returns 0 for all windows", async () => {
+    const { db } = createTestDb();
+    const results = await queryWindowedWinRates(db);
+    for (const r of results) {
+      expect(r.total).toBe(0);
+      expect(r.wins).toBe(0);
+      expect(r.rate).toBe(0);
+    }
+  });
+
+  test("recent trades appear in all windows", async () => {
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 100, resolvedAt: hoursAgo(1) });
+    insert(sqlite, { traded: true, realizedPnl: 50, resolvedAt: hoursAgo(1) });
+    insert(sqlite, { traded: true, realizedPnl: -30, resolvedAt: hoursAgo(1) });
+
+    const results = await queryWindowedWinRates(db);
+    for (const r of results) {
+      expect(r.total).toBe(3);
+      expect(r.wins).toBe(2);
+      expect(r.rate).toBeCloseTo(0.6667, 3);
+    }
+  });
+
+  test("trades outside 24h only appear in wider windows", async () => {
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 100, resolvedAt: hoursAgo(30) });
+    insert(sqlite, { traded: true, realizedPnl: 50, resolvedAt: hoursAgo(1) });
+
+    const results = await queryWindowedWinRates(db);
+    const r24 = results.find((r) => r.label === "24h")!;
+    const r48 = results.find((r) => r.label === "48h")!;
+    const r7d = results.find((r) => r.label === "7d")!;
+
+    expect(r24.total).toBe(1);
+    expect(r24.wins).toBe(1);
+
+    expect(r48.total).toBe(2);
+    expect(r48.wins).toBe(2);
+
+    expect(r7d.total).toBe(2);
+    expect(r7d.wins).toBe(2);
+  });
+
+  test("trades outside 7d are excluded from all windows", async () => {
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: true, realizedPnl: 100, resolvedAt: hoursAgo(200) });
+
+    const results = await queryWindowedWinRates(db);
+    for (const r of results) {
+      expect(r.total).toBe(0);
+    }
+  });
+
+  test("non-traded records are excluded", async () => {
+    const { sqlite, db } = createTestDb();
+    insert(sqlite, { traded: false, realizedPnl: 100, resolvedAt: hoursAgo(1) });
+    insert(sqlite, { traded: true, realizedPnl: 50, resolvedAt: hoursAgo(1) });
+
+    const results = await queryWindowedWinRates(db);
+    const r24 = results.find((r) => r.label === "24h")!;
+    expect(r24.total).toBe(1);
+    expect(r24.wins).toBe(1);
   });
 });
