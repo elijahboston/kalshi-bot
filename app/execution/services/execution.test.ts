@@ -240,6 +240,29 @@ describe("executeSignal anti-churn guards", () => {
     expect(getCooldown(ticker)).toBe(0);
   });
 
+  test("skips when recently filled buy order exists for same ticker", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "filled-recent",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      signalId: "sig-1",
+      dryRun: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
   test("skips when accumulated exposure would exceed limit", async () => {
     const service = new ExecutionService(stubKalshi);
     // Insert an open position to create exposure near the limit

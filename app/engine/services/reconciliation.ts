@@ -511,7 +511,29 @@ export class ReconciliationService {
                   updatedAt: now(),
                 })
                 .where(eq(orders.orderId, ko.order_id));
+
+              // Also create the missing trade record
+              const existingTrades = await db
+                .select()
+                .from(trades)
+                .where(eq(trades.orderId, ko.order_id));
+              const tradedQty = existingTrades.reduce((s, t) => s + t.quantity, 0);
+              if (filled > tradedQty) {
+                const price = ex.side === "yes" ? ko.yes_price : ko.no_price;
+                await db.insert(trades).values({
+                  id: uuid(),
+                  orderId: ko.order_id,
+                  ticker: ex.ticker,
+                  side: ex.side,
+                  price: price ?? ex.limitPrice,
+                  quantity: filled - tradedQty,
+                  action: ex.action,
+                  filledAt: ko.created_time || ex.createdAt,
+                });
+              }
+
               repaired++;
+              log.info(`Repaired order ${ko.order_id}: ${filled} fills + trade record (${ex.action} ${ex.side} ${ex.ticker})`);
             }
           }
           continue;

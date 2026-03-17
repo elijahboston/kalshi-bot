@@ -82,20 +82,21 @@ export class ExecutionService {
       return null;
     }
 
-    // Already have a resting buy order for this ticker?
-    const [restingBuy] = await db
-      .select({ orderId: orders.orderId })
+    // Already have a resting or recently filled buy order for this ticker?
+    const recentCutoff = new Date(Date.now() - 60 * 60_000).toISOString(); // 1 hour
+    const [existingBuy] = await db
+      .select({ orderId: orders.orderId, status: orders.status })
       .from(orders)
       .where(
         and(
           eq(orders.ticker, signal.ticker),
           eq(orders.action, "buy"),
-          sql`${orders.status} IN ('open', 'partial')`
+          sql`(${orders.status} IN ('open', 'partial') OR (${orders.status} = 'filled' AND ${orders.createdAt} > ${recentCutoff}))`
         )
       )
       .limit(1);
-    if (restingBuy) {
-      log.info(`Skipping ${signal.ticker}: buy order ${restingBuy.orderId} already resting`);
+    if (existingBuy) {
+      log.info(`Skipping ${signal.ticker}: buy order ${existingBuy.orderId} already ${existingBuy.status}`);
       return null;
     }
 

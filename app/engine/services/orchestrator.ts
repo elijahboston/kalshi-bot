@@ -349,7 +349,15 @@ export async function initOrchestrator(): Promise<void> {
         log.debug(`Cash reserve: ${exitReserve}¢ for ${openPositions.length} positions, available: ${availableBalance}¢ of ${balance}¢`);
       }
 
+      const maxOrdersPerTick = 3;
+      let ordersPlacedThisTick = 0;
+
       for (const signal of actionableSignals) {
+        if (ordersPlacedThisTick >= maxOrdersPerTick) {
+          log.info(`Reached max orders per tick (${maxOrdersPerTick}), deferring remaining signals`);
+          break;
+        }
+
         try {
           // Build a signal-like object matching the Signal type
           const signalRecord = {
@@ -379,6 +387,7 @@ export async function initOrchestrator(): Promise<void> {
 
           // Update signal with result
           if (orderId) {
+            ordersPlacedThisTick++;
             await db
               .update(signals)
               .set({ acted: true, orderId })
