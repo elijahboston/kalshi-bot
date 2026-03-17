@@ -14,6 +14,9 @@ const MUTABLE_KEYS: Record<string, { path: string[]; type: "number" | "boolean" 
   "bias_window_days":     { path: ["calibration", "biasWindowDays"], type: "number" },
   "max_calibration_error":{ path: ["calibration", "maxCalibrationError"], type: "number" },
   "log_level":            { path: ["log", "level"], type: "string" },
+  "min_balance_floor":    { path: ["bot", "minBalanceFloor"], type: "number" },
+  "max_exposure":         { path: ["bot", "maxExposurePerTicker"], type: "number" },
+  "stop_loss_pct":        { path: ["bot", "stopLossPct"], type: "number" },
 };
 
 function getNestedValue(obj: unknown, path: string[]): unknown {

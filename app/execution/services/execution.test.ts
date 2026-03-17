@@ -16,6 +16,7 @@ mock.module("@kcb/config", () => ({
       minContractPrice: 15,
       exitCooldownTicks: 3,
       maxExposurePerTicker: 500,
+      minBalanceFloor: 0,
     },
   }),
 }));

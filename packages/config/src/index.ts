@@ -46,6 +46,8 @@ export interface BotConfig {
     exitCooldownTicks: number;
     /** Maximum total buy cost per ticker in cents (e.g. 500 = $5) */
     maxExposurePerTicker: number;
+    /** Minimum balance floor in cents — bot won't trade below this */
+    minBalanceFloor: number;
   };
 
   /** Calibration parameters */
@@ -124,6 +126,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   min_contract_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minContractPrice = n; },
   exit_cooldown_ticks: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitCooldownTicks = n; },
   max_exposure_per_ticker: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePerTicker = n; },
+  min_balance_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minBalanceFloor = n; },
   enabled_stations: (c, v) => { c.bot.enabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
 };
 
@@ -160,6 +163,7 @@ export function loadConfig(): BotConfig {
       minContractPrice: envNum("MIN_CONTRACT_PRICE", 15),
       exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 3),
       maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 500),
+      minBalanceFloor: envNum("MIN_BALANCE_FLOOR", 5000), // $50 default
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

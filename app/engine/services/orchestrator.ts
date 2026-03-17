@@ -343,10 +343,13 @@ export async function initOrchestrator(): Promise<void> {
       // cash to cover any resting order collateral. Use 2¢ per contract as buffer.
       const openPositions = await db.select({ quantity: positions.quantity }).from(positions);
       const exitReserve = openPositions.reduce((sum, p) => sum + p.quantity * 2, 0);
-      const availableBalance = Math.max(0, balance - exitReserve);
+      const balanceFloor = config.bot.minBalanceFloor;
+      const availableBalance = Math.max(0, balance - exitReserve - balanceFloor);
 
-      if (availableBalance < balance) {
-        log.debug(`Cash reserve: ${exitReserve}¢ for ${openPositions.length} positions, available: ${availableBalance}¢ of ${balance}¢`);
+      if (availableBalance <= 0) {
+        log.info(`Balance ${balance}¢ at or below floor (${balanceFloor}¢ floor + ${exitReserve}¢ exit reserve) — skipping execution`);
+      } else if (availableBalance < balance) {
+        log.debug(`Reserves: ${balanceFloor}¢ floor + ${exitReserve}¢ exits, available: ${availableBalance}¢ of ${balance}¢`);
       }
 
       const maxOrdersPerTick = 3;
