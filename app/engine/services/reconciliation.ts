@@ -491,6 +491,7 @@ export class ReconciliationService {
       let repaired = 0;
 
       for (const ko of kalshiOrders) {
+        try {
         const existing = await db
           .select()
           .from(orders)
@@ -553,12 +554,18 @@ export class ReconciliationService {
 
         const timestamp = ko.created_time || now();
 
+        const limitPrice = ko.side === "yes" ? ko.yes_price : ko.no_price;
+        if (limitPrice == null) {
+          log.debug(`Skipping import of order ${ko.order_id}: no price data`);
+          continue;
+        }
+
         await db.insert(orders).values({
           orderId: ko.order_id,
           ticker: ko.ticker,
           action: ko.action,
           side: ko.side,
-          limitPrice: ko.side === "yes" ? ko.yes_price : ko.no_price,
+          limitPrice,
           quantity: count,
           filledQuantity: filled,
           status,
@@ -567,6 +574,9 @@ export class ReconciliationService {
           updatedAt: timestamp,
         });
         imported++;
+        } catch (err) {
+          log.warn(`Failed to process order ${ko.order_id}: ${err instanceof Error ? err.message : err}`);
+        }
       }
 
       if (imported > 0 || repaired > 0) {
