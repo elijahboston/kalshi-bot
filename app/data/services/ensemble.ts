@@ -1,4 +1,5 @@
 import { getDb, weatherForecasts, eq, and } from "@kcb/db";
+import { getConfig } from "@kcb/config";
 import { createLogger } from "@kcb/engine";
 import { cToF, uuid, now } from "@kcb/shared";
 import type { MarketCategory } from "@kcb/shared";
@@ -28,6 +29,14 @@ const CATEGORY_TO_VARIABLE: Record<string, string> = {
   snowfall: "snowfall_sum",
 };
 
+/** Map market category to Tomorrow.io daily field names */
+const CATEGORY_TO_TOMORROW: Record<string, string> = {
+  high_temp: "temperatureMax",
+  low_temp: "temperatureMin",
+  precip: "rainAccumulation",
+  snowfall: "snowAccumulation",
+};
+
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 export class EnsembleService {
@@ -50,20 +59,42 @@ export class EnsembleService {
       return cached;
     }
 
-    // Fetch from Open-Meteo
+    // Fetch from Open-Meteo (primary ensemble source)
+    let values: number[] = [];
     try {
-      const values = await this.fetchOpenMeteo(stationId, targetDate, category);
-      await this.cacheValues(stationId, targetDate, forecastType, values);
+      values = await this.fetchOpenMeteo(stationId, targetDate, category);
       log.info(
-        `Fetched ${values.length} ensemble members for ${stationId} ${targetDate}`
+        `Fetched ${values.length} ensemble members from Open-Meteo for ${stationId} ${targetDate}`
       );
-      return values;
     } catch (err) {
       log.warn(
-        `Open-Meteo failed for ${stationId}: ${err instanceof Error ? err.message : err}. Falling back to NWS synthetic.`
+        `Open-Meteo failed for ${stationId}: ${err instanceof Error ? err.message : err}`
       );
-      return this.syntheticFallback(stationId, targetDate, category);
     }
+
+    // Augment with Tomorrow.io point forecast (adds independent model opinion)
+    try {
+      const tomorrowValues = await this.fetchTomorrowIo(stationId, targetDate, category);
+      if (tomorrowValues.length > 0) {
+        values.push(...tomorrowValues);
+        log.info(
+          `Added ${tomorrowValues.length} value(s) from Tomorrow.io for ${stationId} ${targetDate}`
+        );
+      }
+    } catch (err) {
+      log.debug(
+        `Tomorrow.io unavailable for ${stationId}: ${err instanceof Error ? err.message : err}`
+      );
+    }
+
+    if (values.length > 0) {
+      await this.cacheValues(stationId, targetDate, forecastType, values);
+      return values;
+    }
+
+    // All APIs failed — fall back to NWS synthetic
+    log.warn(`All forecast APIs failed for ${stationId} ${targetDate}, falling back to NWS synthetic`);
+    return this.syntheticFallback(stationId, targetDate, category);
   }
 
   private async getCached(
@@ -149,6 +180,98 @@ export class EnsembleService {
 
     if (values.length === 0) {
       throw new Error(`No ensemble members found for ${variable} at ${targetDate}`);
+    }
+
+    return values;
+  }
+
+  /**
+   * Fetch point forecast from Tomorrow.io and return as pseudo-ensemble values.
+   * Tomorrow.io provides a single deterministic forecast per model run,
+   * which we treat as an independent model opinion alongside Open-Meteo's
+   * ensemble members. Returns a small array of values (typically 1-2 per
+   * forecast day) to avoid over-weighting a single source.
+   */
+  async fetchTomorrowIo(
+    stationId: string,
+    targetDate: string,
+    category: MarketCategory
+  ): Promise<number[]> {
+    // Read API key from config, falling back to env var directly.
+    // The fallback handles the case where @kcb/config is mocked in tests.
+    let apiKey: string | undefined;
+    try {
+      apiKey = getConfig().weather.tomorrowIoApiKey;
+    } catch {
+      apiKey = process.env.TOMORROW_IO_API_KEY;
+    }
+    if (!apiKey) return [];
+
+    const coords = STATION_COORDS[stationId];
+    if (!coords) return [];
+
+    const field = CATEGORY_TO_TOMORROW[category];
+    if (!field) return [];
+
+    const url =
+      `https://api.tomorrow.io/v4/weather/forecast` +
+      `?location=${coords.lat},${coords.lon}` +
+      `&timesteps=1d` +
+      `&units=imperial` +
+      `&apikey=${apiKey}`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Tomorrow.io ${res.status}: ${await res.text()}`);
+    }
+
+    const data = (await res.json()) as {
+      timelines: {
+        daily: Array<{
+          time: string;
+          values: Record<string, number | null>;
+        }>;
+      };
+    };
+
+    const values: number[] = [];
+    for (const day of data.timelines?.daily ?? []) {
+      // Match target date (Tomorrow.io returns ISO timestamps)
+      if (!day.time.startsWith(targetDate)) continue;
+      const val = day.values[field];
+      if (val != null) values.push(val);
+    }
+
+    if (values.length > 0) {
+      // Cache the Tomorrow.io point forecast separately for bias tracking
+      const db = getDb();
+      const horizon = Math.ceil(
+        (new Date(targetDate).getTime() - Date.now()) / 86400_000
+      );
+      await db
+        .delete(weatherForecasts)
+        .where(
+          and(
+            eq(weatherForecasts.stationId, stationId),
+            eq(weatherForecasts.targetDate, targetDate),
+            eq(weatherForecasts.source, "tomorrow_io"),
+            eq(weatherForecasts.forecastType, category)
+          )
+        );
+      await db.insert(weatherForecasts).values({
+        id: uuid(),
+        stationId,
+        targetDate,
+        source: "tomorrow_io",
+        forecastType: category,
+        forecastHorizon: Math.max(1, horizon),
+        pointForecast: values[0]!,
+        ensembleValues: null,
+        ensembleSize: null,
+        ensembleMean: null,
+        ensembleStd: null,
+        fetchedAt: now(),
+      });
     }
 
     return values;
@@ -280,7 +403,7 @@ export class EnsembleService {
     }
 
     if (pointForecast == null) {
-      // Last resort: use a generic temperature
+      // Last resort: use a generic value
       pointForecast =
         category === "high_temp"
           ? 50
@@ -291,7 +414,9 @@ export class EnsembleService {
               : 0;
     }
 
-    // Generate synthetic normal distribution
+    const isPrecip = category === "precip" || category === "snowfall";
+
+    // Generate synthetic ensemble
     const stdDev =
       category === "high_temp" || category === "low_temp"
         ? 3 // 3 deg F
@@ -305,7 +430,10 @@ export class EnsembleService {
       const u1 = Math.random();
       const u2 = Math.random();
       const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-      synthetic.push(pointForecast + z * stdDev);
+      let value = pointForecast + z * stdDev;
+      // Precip/snow can't be negative
+      if (isPrecip) value = Math.max(0, value);
+      synthetic.push(value);
     }
 
     log.info(

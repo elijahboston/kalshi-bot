@@ -269,6 +269,175 @@ describe("EnsembleService", () => {
     });
   });
 
+  describe("fetchTomorrowIo", () => {
+    test("fetches point forecast and returns value in imperial", async () => {
+      const service = new EnsembleService();
+
+      // Set API key via env
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("tomorrow.io")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            timelines: {
+              daily: [
+                {
+                  time: "2026-02-23T00:00:00Z",
+                  values: { temperatureMax: 72.5 },
+                },
+              ],
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.fetchTomorrowIo("KNYC", "2026-02-23", "high_temp");
+
+      expect(values).toHaveLength(1);
+      expect(values[0]).toBe(72.5); // Already imperial from Tomorrow.io
+
+      // Verify it was cached separately
+      const db = getDb();
+      const rows = db.select().from(weatherForecasts)
+        .where(and(
+          eq(weatherForecasts.stationId, "KNYC"),
+          eq(weatherForecasts.source, "tomorrow_io"),
+        )).all();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].pointForecast).toBe(72.5);
+
+      globalThis.fetch = originalFetch;
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+
+    test("returns empty array for unknown station", async () => {
+      const service = new EnsembleService();
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      // Unknown station — should return empty without making API call
+      const values = await service.fetchTomorrowIo("KXYZ", "2026-02-23", "high_temp");
+      expect(values).toHaveLength(0);
+
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+
+    test("returns empty array when target date not in response", async () => {
+      const service = new EnsembleService();
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({
+          timelines: {
+            daily: [
+              {
+                time: "2026-02-24T00:00:00Z",
+                values: { temperatureMax: 72 },
+              },
+            ],
+          },
+        }), { status: 200 }))
+      ) as any;
+
+      const values = await service.fetchTomorrowIo("KNYC", "2026-02-23", "high_temp");
+      expect(values).toHaveLength(0);
+
+      globalThis.fetch = originalFetch;
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+
+    test("fetches precip in imperial (inches)", async () => {
+      const service = new EnsembleService();
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({
+          timelines: {
+            daily: [
+              {
+                time: "2026-02-23T00:00:00Z",
+                values: { rainAccumulation: 0.35 },
+              },
+            ],
+          },
+        }), { status: 200 }))
+      ) as any;
+
+      const values = await service.fetchTomorrowIo("KNYC", "2026-02-23", "precip");
+      expect(values).toHaveLength(1);
+      expect(values[0]).toBe(0.35);
+
+      globalThis.fetch = originalFetch;
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+  });
+
+  describe("getEnsembleValues with Tomorrow.io augmentation", () => {
+    test("merges Open-Meteo and Tomorrow.io values", async () => {
+      const service = new EnsembleService();
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      let callCount = 0;
+      globalThis.fetch = mock((url: string) => {
+        callCount++;
+        if (url.includes("open-meteo.com")) {
+          const daily: Record<string, any> = {
+            time: ["2026-02-23"],
+            temperature_2m_max_member01: [20],
+            temperature_2m_max_member02: [21],
+          };
+          return Promise.resolve(new Response(JSON.stringify({ daily }), { status: 200 }));
+        }
+        if (url.includes("tomorrow.io")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            timelines: {
+              daily: [{ time: "2026-02-23T00:00:00Z", values: { temperatureMax: 70 } }],
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.getEnsembleValues("KNYC", "2026-02-23", "high_temp");
+
+      // 2 from Open-Meteo (converted C→F) + 1 from Tomorrow.io (already F)
+      expect(values).toHaveLength(3);
+      // Last value should be the Tomorrow.io point (70°F)
+      expect(values[2]).toBe(70);
+
+      globalThis.fetch = originalFetch;
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+
+    test("uses Tomorrow.io alone when Open-Meteo fails", async () => {
+      const service = new EnsembleService();
+      process.env.TOMORROW_IO_API_KEY = "test-key";
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("open-meteo.com")) {
+          return Promise.resolve(new Response("error", { status: 500 }));
+        }
+        if (url.includes("tomorrow.io")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            timelines: {
+              daily: [{ time: "2026-02-23T00:00:00Z", values: { temperatureMax: 65 } }],
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.getEnsembleValues("KNYC", "2026-02-23", "high_temp");
+
+      // Only Tomorrow.io value (no synthetic fallback needed)
+      expect(values).toHaveLength(1);
+      expect(values[0]).toBe(65);
+
+      globalThis.fetch = originalFetch;
+      delete process.env.TOMORROW_IO_API_KEY;
+    });
+  });
+
   describe("URL construction", () => {
     test("requests all three models in URL", async () => {
       const service = new EnsembleService();
