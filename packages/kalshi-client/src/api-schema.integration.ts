@@ -146,17 +146,30 @@ describe.skipIf(!hasCredentials)("Kalshi API schema validation", () => {
         const pos = res.market_positions[0]!;
         expect(pos).toHaveProperty("ticker");
         expect(typeof pos.ticker).toBe("string");
+
+        // v3 quantity/exposure fields
+        const hasV3Qty = "position_fp" in pos;
+        const hasV2Qty = "position" in pos;
+        expect(hasV3Qty || hasV2Qty).toBe(true);
+
+        const hasV3Exposure = "market_exposure_dollars" in pos;
+        const hasV2Exposure = "market_exposure" in pos;
+        expect(hasV3Exposure || hasV2Exposure).toBe(true);
       }
     });
   });
 
   describe("GET /portfolio/balance", () => {
-    test("returns balance as a number", async () => {
+    test("returns balance and portfolio_value", async () => {
       const bal = await client.getBalance();
 
       expect(bal).toHaveProperty("balance");
       expect(typeof bal.balance).toBe("number");
       expect(bal.balance).toBeGreaterThanOrEqual(0);
+
+      // v3 includes portfolio_value for total equity
+      expect(bal).toHaveProperty("portfolio_value");
+      expect(typeof bal.portfolio_value).toBe("number");
     });
   });
 

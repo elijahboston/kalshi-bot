@@ -14,7 +14,7 @@ import {
   sql,
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
-import { KalshiClient, parseOrderFields } from "@kcb/kalshi-client";
+import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
 import { bus, createLogger } from "../events";
 import { uuid, now } from "@kcb/shared";
 
@@ -397,12 +397,9 @@ export class ReconciliationService {
         const ticker = kp.ticker;
         if (!ticker) continue;
 
-        // Derive quantity: prefer explicit `position` field, fall back to exposure math
-        const exposure = Number(kp.market_exposure) || 0;
-        const restExposure = Number(kp.rest_of_market_exposure) || 0;
-        let quantity = typeof kp.position === "number"
-          ? Math.abs(kp.position)
-          : Math.round((exposure + restExposure) / 100);
+        const parsed = parsePositionFields(kp);
+        let quantity = parsed.quantity;
+        const exposure = parsed.exposure;
 
         if (!quantity || quantity <= 0) continue;
 
@@ -418,9 +415,11 @@ export class ReconciliationService {
           .where(eq(markets.ticker, ticker))
           .limit(1);
 
-        if (typeof kp.position === "number" && kp.position < 0) {
+        // Check legacy position field for sign (negative = NO side)
+        const rawPosition = parseFloat(String(kp.position_fp ?? kp.position ?? "0"));
+        if (rawPosition < 0) {
           side = "no";
-          quantity = Math.abs(kp.position);
+          quantity = Math.abs(rawPosition);
         } else if (market?.lastYesPrice != null && avgEntry > 0) {
           const yesPrice = market.lastYesPrice;
           const noPrice = 100 - yesPrice;
@@ -1162,6 +1161,7 @@ export class ReconciliationService {
     const db = getDb();
 
     let balance: number;
+    let kalshiPortfolioValue: number | undefined;
 
     if (config.bot.dryRun) {
       // Use last known balance (default $100 = 10000 cents)
@@ -1175,11 +1175,12 @@ export class ReconciliationService {
     } else {
       const kalshiBalance = await this.kalshi.getBalance();
       balance = kalshiBalance.balance;
+      kalshiPortfolioValue = kalshiBalance.portfolio_value;
     }
 
-    // Sum position market values
+    // Sum position market values from local DB
     const openPositions = await db.select().from(positions);
-    const positionValue = openPositions.reduce(
+    const localPositionValue = openPositions.reduce(
       (sum, p) => sum + (p.marketValue ?? 0),
       0
     );
@@ -1191,6 +1192,9 @@ export class ReconciliationService {
       0
     );
 
+    // Use Kalshi's portfolio_value as authoritative when available,
+    // fall back to local position value calculation
+    const positionValue = kalshiPortfolioValue ?? localPositionValue;
     const portfolio = balance + positionValue;
 
     await db.insert(balanceHistory).values({

@@ -125,15 +125,45 @@ export function parseOrderFields(ko: KalshiOrder): {
 
 export interface KalshiPosition {
   ticker: string;
-  /** Net contract count (positive = long, may indicate side) */
+  /** @deprecated — v3 uses position_fp */
   position?: number;
   market_exposure?: number;
   rest_of_market_exposure?: number;
-  fees_paid?: number;
-  total_traded?: number;
-  realized_pnl?: number;
+  /** Kalshi v3 fields */
+  position_fp?: string;
+  market_exposure_dollars?: string;
+  total_traded_dollars?: string;
+  realized_pnl_dollars?: string;
+  fees_paid_dollars?: string;
+  resting_orders_count?: number;
   /** Additional fields the API may return */
   [key: string]: unknown;
+}
+
+/**
+ * Parse a Kalshi position's fields, handling both legacy and v3 formats.
+ */
+export function parsePositionFields(kp: KalshiPosition): {
+  quantity: number;
+  exposure: number;
+} {
+  const toNum = (v: string | number | undefined | null): number => {
+    if (v == null) return 0;
+    if (typeof v === "number") return v;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  };
+  const toCents = (v: string | number | undefined | null): number => {
+    if (v == null) return 0;
+    if (typeof v === "number") return v;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : Math.round(n * 100);
+  };
+
+  return {
+    quantity: Math.round(Math.abs(toNum(kp.position_fp) || toNum(kp.position))),
+    exposure: toCents(kp.market_exposure_dollars) || Number(kp.market_exposure) || 0,
+  };
 }
 
 export interface KalshiSettlement {
@@ -154,7 +184,9 @@ export interface KalshiSettlement {
 
 export interface KalshiBalance {
   balance: number;
-  payout: number;
+  payout?: number;
+  /** Kalshi v3: value of open positions in cents */
+  portfolio_value?: number;
 }
 
 export interface CreateOrderParams {
