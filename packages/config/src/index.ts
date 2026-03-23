@@ -48,6 +48,10 @@ export interface BotConfig {
     maxExposurePerTicker: number;
     /** Minimum balance floor in cents — bot won't trade below this */
     minBalanceFloor: number;
+    /** Total deposited capital in cents — used to compute profits */
+    seedCapital: number;
+    /** Fraction of profits to reserve (0-1). e.g. 0.5 = keep 50% of winnings */
+    profitReservePct: number;
   };
 
   /** Calibration parameters */
@@ -127,6 +131,8 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   exit_cooldown_ticks: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitCooldownTicks = n; },
   max_exposure_per_ticker: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePerTicker = n; },
   min_balance_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minBalanceFloor = n; },
+  seed_capital: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.seedCapital = n; },
+  profit_reserve_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.profitReservePct = n; },
   enabled_stations: (c, v) => { c.bot.enabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
 };
 
@@ -164,6 +170,8 @@ export function loadConfig(): BotConfig {
       exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 3),
       maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 500),
       minBalanceFloor: envNum("MIN_BALANCE_FLOOR", 5000), // $50 default
+      seedCapital: envNum("SEED_CAPITAL", 17556), // $175.56 current balance
+      profitReservePct: envNum("PROFIT_RESERVE_PCT", 0.5), // keep 50% of profits
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),
