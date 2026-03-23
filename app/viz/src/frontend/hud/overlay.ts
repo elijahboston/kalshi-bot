@@ -27,6 +27,12 @@ export function initHud(): void {
       <div class="stat-row"><span class="stat-label">Portfolio</span><span class="stat-value" id="stat-portfolio">--</span></div>
       <div class="stat-row"><span class="stat-label">Positions</span><span class="stat-value" id="stat-positions">--</span></div>
     </div>
+    <div id="legend">
+      <h3>Stations</h3>
+      <div class="legend-item"><span class="legend-dot" style="background:#0cc;box-shadow:0 0 6px #0cc"></span> Idle</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#0f8;box-shadow:0 0 6px #0f8"></span> Active Position</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#fc0;box-shadow:0 0 6px #fc0"></span> Signal Detected</div>
+    </div>
     <div id="feed">
       <h3>Activity</h3>
       <div id="feed-list"></div>
