@@ -6,18 +6,52 @@ export interface KalshiMarket {
   series_ticker: string;
   title: string;
   subtitle: string;
-  status: "open" | "closed" | "settled";
+  status: "open" | "closed" | "settled" | "active";
   close_time: string;
-  result: "yes" | "no" | "all_yes" | "all_no" | null;
-  yes_bid: number;
-  yes_ask: number;
-  no_bid: number;
-  no_ask: number;
-  last_price: number;
-  volume: number;
-  open_interest: number;
+  result: "yes" | "no" | "all_yes" | "all_no" | null | "";
+  /** @deprecated — Kalshi v3 API uses *_dollars string fields now */
+  yes_bid?: number;
+  yes_ask?: number;
+  no_bid?: number;
+  no_ask?: number;
+  last_price?: number;
+  volume?: number;
+  open_interest?: number;
+  /** Kalshi v3 API dollar-string fields */
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  no_bid_dollars?: string;
+  no_ask_dollars?: string;
+  last_price_dollars?: string;
+  volume_fp?: string;
+  open_interest_fp?: string;
+  volume_24h_fp?: string;
   floor_strike?: number;
   cap_strike?: number;
+}
+
+/**
+ * Parse a Kalshi market's price fields, handling both legacy (number)
+ * and v3 (dollar string) formats. Returns cents (integer).
+ */
+export function parseMarketPrices(km: KalshiMarket): {
+  lastPrice: number | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+} {
+  const toCents = (v: string | number | undefined | null): number | null => {
+    if (v == null) return null;
+    if (typeof v === "number") return v > 0 ? v : null;
+    const n = parseFloat(v);
+    if (isNaN(n) || n <= 0) return null;
+    return Math.round(n * 100);
+  };
+
+  return {
+    lastPrice: toCents(km.last_price_dollars) ?? toCents(km.last_price),
+    yesBid: toCents(km.yes_bid_dollars) ?? toCents(km.yes_bid),
+    yesAsk: toCents(km.yes_ask_dollars) ?? toCents(km.yes_ask),
+  };
 }
 
 export interface KalshiEvent {
@@ -34,17 +68,59 @@ export interface KalshiOrder {
   action: "buy" | "sell";
   side: "yes" | "no";
   type: "limit" | "market";
-  yes_price: number;
-  no_price: number;
-  /** @deprecated Kalshi API now uses initial_count */
+  /** @deprecated — v3 uses yes_price_dollars */
+  yes_price?: number;
+  no_price?: number;
+  /** @deprecated — v3 uses initial_count_fp */
   count?: number;
-  initial_count: number;
-  fill_count: number;
-  remaining_count: number;
+  initial_count?: number;
+  fill_count?: number;
+  remaining_count?: number;
+  /** Kalshi v3 fields */
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
+  initial_count_fp?: string;
+  fill_count_fp?: string;
+  remaining_count_fp?: string;
   status: "resting" | "canceled" | "executed" | "pending";
   created_time: string;
   taker_fees?: number;
   maker_fees?: number;
+  taker_fees_dollars?: string;
+  maker_fees_dollars?: string;
+}
+
+/**
+ * Parse a Kalshi order's quantity and price fields, handling both
+ * legacy (number) and v3 (fp string / dollar string) formats.
+ */
+export function parseOrderFields(ko: KalshiOrder): {
+  initialCount: number;
+  fillCount: number;
+  remainingCount: number;
+  yesPrice: number;
+  noPrice: number;
+} {
+  const toNum = (v: string | number | undefined | null): number => {
+    if (v == null) return 0;
+    if (typeof v === "number") return v;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  };
+  const toCents = (v: string | number | undefined | null): number => {
+    if (v == null) return 0;
+    if (typeof v === "number") return v;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : Math.round(n * 100);
+  };
+
+  return {
+    initialCount: Math.round(toNum(ko.initial_count_fp) || toNum(ko.initial_count) || toNum(ko.count)),
+    fillCount: Math.round(toNum(ko.fill_count_fp) || toNum(ko.fill_count)),
+    remainingCount: Math.round(toNum(ko.remaining_count_fp) || toNum(ko.remaining_count)),
+    yesPrice: toCents(ko.yes_price_dollars) || ko.yes_price || 0,
+    noPrice: toCents(ko.no_price_dollars) || ko.no_price || 0,
+  };
 }
 
 export interface KalshiPosition {

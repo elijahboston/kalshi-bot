@@ -14,7 +14,7 @@ import {
   sql,
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
-import { KalshiClient } from "@kcb/kalshi-client";
+import { KalshiClient, parseOrderFields } from "@kcb/kalshi-client";
 import { bus, createLogger } from "../events";
 import { uuid, now } from "@kcb/shared";
 
@@ -34,6 +34,7 @@ export class ReconciliationService {
       await this.cancelStaleOrders();
       await this.syncHistoricalOrders();
       await this.ensureTradeRecords();
+      await this.finalizeExpiredMarkets();
       await this.updatePositions();
       await this.syncPositionsFromKalshi();
       await this.syncSettlements();
@@ -85,8 +86,9 @@ export class ReconciliationService {
 
         if (!kalshiOrder) continue;
 
-        const count = kalshiOrder.initial_count ?? kalshiOrder.count ?? 0;
-        const filled = kalshiOrder.fill_count ?? (kalshiOrder.status === "executed" ? count : Math.max(0, count - (kalshiOrder.remaining_count ?? count)));
+        const parsed = parseOrderFields(kalshiOrder);
+        const count = parsed.initialCount;
+        const filled = parsed.fillCount || (kalshiOrder.status === "executed" ? count : Math.max(0, count - parsed.remainingCount));
 
         const newStatus =
           kalshiOrder.status === "executed"
@@ -114,8 +116,8 @@ export class ReconciliationService {
           const newFills = filled - prevFilled;
           const price =
             order.side === "yes"
-              ? kalshiOrder.yes_price
-              : kalshiOrder.no_price;
+              ? parsed.yesPrice
+              : parsed.noPrice;
 
           await db.insert(trades).values({
             id: uuid(),
@@ -240,19 +242,48 @@ export class ReconciliationService {
   /**
    * C. Recompute positions from trades and update the positions table.
    */
+  /**
+   * Mark markets as finalized if their target date has passed and they're
+   * still showing as active. This prevents updatePositions from rebuilding
+   * phantom positions from old trades every tick.
+   */
+  private async finalizeExpiredMarkets(): Promise<void> {
+    const db = getDb();
+    const cutoff = new Date(Date.now() - 2 * 86400_000).toISOString().slice(0, 10); // 2 days ago
+
+    const stale = await db
+      .update(markets)
+      .set({ status: "finalized", updatedAt: now() })
+      .where(
+        and(
+          eq(markets.status, "active"),
+          sql`${markets.targetDate} IS NOT NULL AND ${markets.targetDate} < ${cutoff}`
+        )
+      );
+  }
+
   private async updatePositions(): Promise<void> {
     const db = getDb();
 
-    // Get all trades grouped by ticker
+    // Only rebuild positions for markets that are NOT settled/finalized.
+    // Without this filter, historical trades from settled markets create phantom
+    // positions that syncPositionsFromKalshi immediately deletes every tick.
+    const activeMarketRows = await db
+      .select({ ticker: markets.ticker })
+      .from(markets)
+      .where(sql`${markets.status} NOT IN ('settled', 'finalized')`);
+    const activeMarketTickers = new Set(activeMarketRows.map((m) => m.ticker));
+
     const allTrades = await db.select().from(trades);
 
-    // Group trades by ticker
+    // Group trades by ticker (active markets only)
     const byTicker = new Map<
       string,
       { side: string; totalQty: number; totalCost: number; firstAt: string }
     >();
 
     for (const t of allTrades) {
+      if (!activeMarketTickers.has(t.ticker)) continue;
       let pos = byTicker.get(t.ticker);
       if (!pos) {
         pos = { side: t.side, totalQty: 0, totalCost: 0, firstAt: t.filledAt };
@@ -498,11 +529,13 @@ export class ReconciliationService {
           .where(eq(orders.orderId, ko.order_id))
           .limit(1);
 
+        const parsed = parseOrderFields(ko);
+
         if (existing.length > 0) {
           // Repair orders stuck with filledQuantity=0 despite being executed
           const ex = existing[0]!;
           if (ex.filledQuantity === 0 && ko.status === "executed") {
-            const filled = ko.fill_count ?? (ko.initial_count ?? ko.count ?? 0);
+            const filled = parsed.fillCount || parsed.initialCount;
             if (filled > 0) {
               await db
                 .update(orders)
@@ -520,13 +553,13 @@ export class ReconciliationService {
                 .where(eq(trades.orderId, ko.order_id));
               const tradedQty = existingTrades.reduce((s, t) => s + t.quantity, 0);
               if (filled > tradedQty) {
-                const price = ex.side === "yes" ? ko.yes_price : ko.no_price;
+                const price = ex.side === "yes" ? parsed.yesPrice : parsed.noPrice;
                 await db.insert(trades).values({
                   id: uuid(),
                   orderId: ko.order_id,
                   ticker: ex.ticker,
                   side: ex.side,
-                  price: price ?? ex.limitPrice,
+                  price: price || ex.limitPrice,
                   quantity: filled - tradedQty,
                   action: ex.action,
                   filledAt: ko.created_time || ex.createdAt,
@@ -540,8 +573,8 @@ export class ReconciliationService {
           continue;
         }
 
-        const count = ko.initial_count ?? ko.count ?? 0;
-        const filled = ko.fill_count ?? (ko.status === "executed" ? count : Math.max(0, count - (ko.remaining_count ?? count)));
+        const count = parsed.initialCount;
+        const filled = parsed.fillCount || (ko.status === "executed" ? count : Math.max(0, count - parsed.remainingCount));
 
         const status =
           ko.status === "executed"
@@ -554,8 +587,8 @@ export class ReconciliationService {
 
         const timestamp = ko.created_time || now();
 
-        const limitPrice = ko.side === "yes" ? ko.yes_price : ko.no_price;
-        if (limitPrice == null) {
+        const limitPrice = ko.side === "yes" ? parsed.yesPrice : parsed.noPrice;
+        if (!limitPrice) {
           log.debug(`Skipping import of order ${ko.order_id}: no price data`);
           continue;
         }
@@ -635,20 +668,25 @@ export class ReconciliationService {
         const actualOutcome =
           s.market_result === "yes" || s.market_result === "all_yes" ? 1 : 0;
 
-        // Only count settlements where the bot actually placed an order
-        // (has a signal_id). syncHistoricalOrders imports ALL Kalshi orders
-        // including manual trades, so checking orders alone isn't enough.
-        const botOrder = await db
+        // Check if there are bot-attributable orders (signal_id IS NOT NULL)
+        const botOrders = await db
           .select()
           .from(orders)
           .where(
             and(
               eq(orders.ticker, s.ticker),
+              eq(orders.status, "filled"),
               sql`${orders.signalId} IS NOT NULL`
             )
-          )
-          .limit(1);
-        const traded = botOrder.length > 0;
+          );
+
+        // Also check trades table as fallback — trades may exist without
+        // corresponding orders (e.g. from earlier bot versions or imports)
+        const tickerTrades = botOrders.length === 0
+          ? await db.select().from(trades).where(eq(trades.ticker, s.ticker))
+          : [];
+
+        const traded = botOrders.length > 0 || tickerTrades.length > 0;
 
         if (!traded) {
           // Still record for calibration but without PnL
@@ -672,31 +710,30 @@ export class ReconciliationService {
           continue;
         }
 
-        // Compute PnL from bot-attributable orders only (signal_id IS NOT NULL).
-        // This includes bot buys (signal_id = signal UUID) and bot exit sells
-        // (signal_id = signal UUID or "bot-exit"), but excludes manual trades
-        // imported by syncHistoricalOrders.
-        const botOrders = await db
-          .select()
-          .from(orders)
-          .where(
-            and(
-              eq(orders.ticker, s.ticker),
-              eq(orders.status, "filled"),
-              sql`${orders.signalId} IS NOT NULL`
-            )
-          );
+        // Compute PnL: prefer bot orders (signal_id IS NOT NULL), fall back to trades
+        let realizedPnl: number;
+        if (botOrders.length > 0) {
+          realizedPnl = computePerSidePnl(botOrders, actualOutcome);
+        } else {
+          // Map trades to the format computePerSidePnl expects
+          const tradeRows = tickerTrades.map((t) => ({
+            action: t.action,
+            side: t.side,
+            limitPrice: t.price,
+            filledQuantity: t.quantity,
+          }));
+          realizedPnl = computePerSidePnl(tradeRows, actualOutcome);
+        }
 
-        // Compute PnL per side to handle cross-side sells correctly.
-        // Selling NO is economically opening a short, not closing a YES long.
-        const realizedPnl = computePerSidePnl(botOrders, actualOutcome);
-
-        // Compute market price from the bot's orders
-        const botBuys = botOrders.filter((o) => o.action === "buy");
+        // Compute market price from orders or trades
+        const allRows = botOrders.length > 0
+          ? botOrders.map((o) => ({ action: o.action, price: o.limitPrice, qty: o.filledQuantity }))
+          : tickerTrades.map((t) => ({ action: t.action, price: t.price, qty: t.quantity }));
+        const buys = allRows.filter((r) => r.action === "buy");
         const marketPrice = signal?.marketPrice
-          ?? (botBuys.length > 0
-            ? botBuys.reduce((s, o) => s + o.limitPrice * o.filledQuantity, 0) /
-              botBuys.reduce((s, o) => s + o.filledQuantity, 0) / 100
+          ?? (buys.length > 0
+            ? buys.reduce((s, r) => s + r.price * r.qty, 0) /
+              buys.reduce((s, r) => s + r.qty, 0) / 100
             : 0.5);
 
         const predictedProb = signal?.estimatedProb ?? marketPrice;
@@ -772,7 +809,7 @@ export class ReconciliationService {
 
       if (!signal) continue; // No signal means we never evaluated this market
 
-      // Compute realized PnL from bot-attributable orders only
+      // Compute realized PnL from bot-attributable orders, with trades as fallback
       const botOrders = await db
         .select()
         .from(orders)
@@ -784,12 +821,26 @@ export class ReconciliationService {
           )
         );
 
+      const tickerTrades = botOrders.length === 0
+        ? await db.select().from(trades).where(eq(trades.ticker, market.ticker))
+        : [];
+
       let realizedPnl: number | null = null;
-      const traded = botOrders.length > 0;
+      const traded = botOrders.length > 0 || tickerTrades.length > 0;
 
       if (traded) {
         const outcome = market.result === "yes" ? 1 : 0;
-        realizedPnl = computePerSidePnl(botOrders, outcome);
+        if (botOrders.length > 0) {
+          realizedPnl = computePerSidePnl(botOrders, outcome);
+        } else {
+          const tradeRows = tickerTrades.map((t) => ({
+            action: t.action,
+            side: t.side,
+            limitPrice: t.price,
+            filledQuantity: t.quantity,
+          }));
+          realizedPnl = computePerSidePnl(tradeRows, outcome);
+        }
       }
 
       const actualOutcome = market.result === "yes" ? 1 : 0;
@@ -967,23 +1018,25 @@ export class ReconciliationService {
 
     if (forecasts.length === 0) return;
 
-    // Group by horizon
-    const byHorizon = new Map<number, { errors: number[] }>();
+    // Group by category (forecastType) + horizon
+    const byKey = new Map<string, { category: string; horizon: number; errors: number[] }>();
 
     for (const f of forecasts) {
       if (f.pointForecast == null || f.actualValue == null) continue;
       const horizon = Math.min(f.forecastHorizon, 7);
-      let group = byHorizon.get(horizon);
+      const category = f.forecastType || "high_temp";
+      const key = `${category}_${horizon}`;
+      let group = byKey.get(key);
       if (!group) {
-        group = { errors: [] };
-        byHorizon.set(horizon, group);
+        group = { category, horizon, errors: [] };
+        byKey.set(key, group);
       }
       group.errors.push(f.pointForecast - f.actualValue);
     }
 
     const timestamp = now();
 
-    for (const [horizon, group] of byHorizon) {
+    for (const [, group] of byKey) {
       const n = group.errors.length;
       if (n === 0) continue;
 
@@ -992,7 +1045,7 @@ export class ReconciliationService {
         group.errors.reduce((s, e) => s + (e - meanBias) ** 2, 0) / n;
       const stdBias = Math.sqrt(variance);
 
-      const biasId = `${stationId}_${horizon}`;
+      const biasId = `${stationId}_${group.category}_${group.horizon}`;
 
       // Upsert
       const existing = await db
@@ -1016,7 +1069,8 @@ export class ReconciliationService {
         await db.insert(stationBias).values({
           id: biasId,
           stationId,
-          forecastHorizonDays: horizon,
+          category: group.category,
+          forecastHorizonDays: group.horizon,
           meanBias,
           stdBias,
           sampleSize: n,
@@ -1032,17 +1086,22 @@ export class ReconciliationService {
   }
 
   /**
-   * D2. Recompute PnL for calibration records where traded=true but realizedPnl=0,
-   * in case order filledQuantity was repaired after the calibration record was created.
+   * D2. Repair calibration records:
+   * - Fix traded=0 records that have trades in the trades table
+   * - Recompute PnL for traded records with realizedPnl=0
    */
   private async repairCalibrationPnl(): Promise<void> {
     const db = getDb();
 
+    // Find records that are either: traded=1 with pnl=0, or traded=0 but have trades
     const stale = await db
       .select()
       .from(calibration)
       .where(
-        sql`${calibration.traded} = 1 AND ${calibration.realizedPnl} = 0`
+        sql`(${calibration.traded} = 1 AND ${calibration.realizedPnl} = 0)
+         OR (${calibration.traded} = 0 AND EXISTS (
+           SELECT 1 FROM trades WHERE trades.ticker = ${calibration.ticker}
+         ))`
       );
 
     if (stale.length === 0) return;
@@ -1061,16 +1120,31 @@ export class ReconciliationService {
           )
         );
 
-      // Only recompute if there are filled orders with nonzero filledQuantity
-      const hasFilledQty = botOrders.some((o) => o.filledQuantity > 0);
+      const tickerTrades = botOrders.length === 0
+        ? await db.select().from(trades).where(eq(trades.ticker, cal.ticker))
+        : [];
+
+      // Only recompute if there are filled orders or trades
+      const hasFilledQty = botOrders.some((o) => o.filledQuantity > 0) || tickerTrades.length > 0;
       if (!hasFilledQty) continue;
 
-      const pnl = computePerSidePnl(botOrders, cal.actualOutcome);
-      if (pnl === 0) continue; // Still zero after recompute — nothing to repair
+      let pnl: number;
+      if (botOrders.length > 0) {
+        pnl = computePerSidePnl(botOrders, cal.actualOutcome);
+      } else {
+        const tradeRows = tickerTrades.map((t) => ({
+          action: t.action,
+          side: t.side,
+          limitPrice: t.price,
+          filledQuantity: t.quantity,
+        }));
+        pnl = computePerSidePnl(tradeRows, cal.actualOutcome);
+      }
+      if (pnl === 0 && cal.traded) continue; // Still zero after recompute — nothing to repair
 
       await db
         .update(calibration)
-        .set({ realizedPnl: pnl })
+        .set({ realizedPnl: pnl, traded: true })
         .where(eq(calibration.id, cal.id));
       repaired++;
     }
@@ -1133,8 +1207,12 @@ export class ReconciliationService {
       portfolio: Math.round(portfolio),
     });
 
+    const profit = Math.max(0, balance - config.bot.seedCapital);
+    const profitReserve = Math.round(profit * config.bot.profitReservePct);
+    const reserveStr = profitReserve > 0 ? `, profit reserve $${(profitReserve / 100).toFixed(2)}` : "";
+
     log.info(
-      `Snapshot: cash $${(balance / 100).toFixed(2)}, ${openPositions.length} positions, portfolio $${(portfolio / 100).toFixed(2)}`
+      `Snapshot: cash $${(balance / 100).toFixed(2)}, ${openPositions.length} positions, portfolio $${(portfolio / 100).toFixed(2)}${reserveStr}`
     );
   }
 }

@@ -1,4 +1,4 @@
-import { KalshiClient, type KalshiMarket } from "@kcb/kalshi-client";
+import { KalshiClient, type KalshiMarket, parseMarketPrices } from "@kcb/kalshi-client";
 import { getDb, markets, eq } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { bus, createLogger } from "../events";
@@ -131,13 +131,21 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
         .where(eq(markets.ticker, km.ticker))
         .limit(1);
 
+      // Parse prices from Kalshi API (handles both legacy and v3 dollar-string fields)
+      const prices = parseMarketPrices(km);
+      const yesPrice = prices.lastPrice
+        ?? (prices.yesBid != null && prices.yesAsk != null
+          ? Math.round((prices.yesBid + prices.yesAsk) / 2)
+          : prices.yesBid ?? prices.yesAsk);
+      const noPrice = yesPrice != null ? 100 - yesPrice : null;
+
       if (existing.length > 0) {
         // Update prices and status
         await db
           .update(markets)
           .set({
-            lastYesPrice: km.last_price,
-            lastNoPrice: km.last_price != null ? 100 - km.last_price : null,
+            lastYesPrice: yesPrice,
+            lastNoPrice: noPrice,
             status: km.status,
             result: km.result ?? undefined,
             updatedAt: timestamp,
@@ -157,8 +165,8 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
           bracketHigh: parsed.bracketLow != null ? parsed.bracketLow + 1 : null,
           status: km.status,
           closeTime: km.close_time,
-          lastYesPrice: km.last_price,
-          lastNoPrice: km.last_price != null ? 100 - km.last_price : null,
+          lastYesPrice: yesPrice,
+          lastNoPrice: noPrice,
           discoveredAt: timestamp,
           updatedAt: timestamp,
         });

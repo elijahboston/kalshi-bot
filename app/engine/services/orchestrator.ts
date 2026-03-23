@@ -135,7 +135,14 @@ export async function initOrchestrator(): Promise<void> {
     const actionableSignals: ActionableSignal[] = [];
 
     for (const { market, estimate } of estimates) {
-      const marketPrice = (market.lastYesPrice ?? 50) / 100;
+      // Skip markets with no price data — placing orders at the 50¢ default
+      // creates resting orders that never fill and churn through cancel/re-place cycles
+      if (market.lastYesPrice == null) {
+        log.debug(`Skipping ${market.ticker}: no price data yet`);
+        continue;
+      }
+
+      const marketPrice = market.lastYesPrice / 100;
 
       // Determine side and edge
       const yesEdge = estimate.probability - marketPrice;
@@ -260,8 +267,9 @@ export async function initOrchestrator(): Promise<void> {
           .where(eq(markets.ticker, position.ticker))
           .limit(1);
         if (!market) continue;
+        if (market.lastYesPrice == null) continue; // no price data
 
-        const marketPrice = (market.lastYesPrice ?? 50) / 100;
+        const marketPrice = market.lastYesPrice / 100;
 
         // Find the latest estimate for this ticker
         const est = estimates.find((e) => e.market.ticker === position.ticker);
@@ -344,12 +352,24 @@ export async function initOrchestrator(): Promise<void> {
       const openPositions = await db.select({ quantity: positions.quantity }).from(positions);
       const exitReserve = openPositions.reduce((sum, p) => sum + p.quantity * 2, 0);
       const balanceFloor = config.bot.minBalanceFloor;
-      const availableBalance = Math.max(0, balance - exitReserve - balanceFloor);
+
+      // Profit reserve: lock away a percentage of gains above seed capital
+      const totalEquity = balance + openPositions.reduce((sum, p) => sum + (p.quantity ?? 0) * 2, 0); // rough equity
+      const profit = Math.max(0, balance - config.bot.seedCapital);
+      const profitReserve = Math.round(profit * config.bot.profitReservePct);
+
+      const availableBalance = Math.max(0, balance - exitReserve - balanceFloor - profitReserve);
 
       if (availableBalance <= 0) {
-        log.info(`Balance ${balance}¢ at or below floor (${balanceFloor}¢ floor + ${exitReserve}¢ exit reserve) — skipping execution`);
+        log.info(
+          `Balance ${balance}¢ at or below reserves ` +
+          `(${balanceFloor}¢ floor + ${exitReserve}¢ exits + ${profitReserve}¢ profit reserve) — skipping execution`
+        );
       } else if (availableBalance < balance) {
-        log.debug(`Reserves: ${balanceFloor}¢ floor + ${exitReserve}¢ exits, available: ${availableBalance}¢ of ${balance}¢`);
+        log.debug(
+          `Reserves: ${balanceFloor}¢ floor + ${exitReserve}¢ exits + ${profitReserve}¢ profit (${(config.bot.profitReservePct * 100).toFixed(0)}%), ` +
+          `available: ${availableBalance}¢ of ${balance}¢`
+        );
       }
 
       const maxOrdersPerTick = 3;
