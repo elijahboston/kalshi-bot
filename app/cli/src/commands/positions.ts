@@ -1,5 +1,9 @@
-import { getDb, positions, trades, orders, desc, eq } from "@kcb/db";
+import { getDb, positions, trades, orders, markets, desc, eq } from "@kcb/db";
 import type { CommandDef } from "./index";
+
+const CAT_LABELS: Record<string, string> = {
+  high_temp: "HIGH", low_temp: "LOW", precip: "RAIN", snowfall: "SNOW",
+};
 
 export const positionsCommands: CommandDef[] = [
   {
@@ -14,11 +18,19 @@ export const positionsCommands: CommandDef[] = [
         return "No open positions.";
       }
 
-      const header = "TICKER".padEnd(30) + "SIDE".padEnd(6) + "QTY".padStart(5) + "  AVG".padStart(6) + "  P&L".padStart(8);
+      // Look up categories for each position's ticker
+      const db2 = getDb();
+      const allMarkets = await db2.select({ ticker: markets.ticker, category: markets.category }).from(markets);
+      const catMap = new Map(allMarkets.map((m) => [m.ticker, m.category]));
+
+      const header = "TYPE ".padEnd(6) + "TICKER".padEnd(30) + "SIDE".padEnd(6) + "QTY".padStart(5) + "  AVG".padStart(6) + "  P&L".padStart(8);
       const lines = rows.map((p) => {
         const pnl = p.unrealizedPnl ?? 0;
         const pnlStr = (pnl >= 0 ? "+" : "") + (pnl / 100).toFixed(2);
+        const cat = catMap.get(p.ticker) ?? "?";
+        const catStr = (CAT_LABELS[cat] ?? cat).padEnd(5);
         return (
+          catStr + " " +
           p.ticker.padEnd(30) +
           p.side.toUpperCase().padEnd(6) +
           String(p.quantity).padStart(5) +

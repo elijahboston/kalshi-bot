@@ -39,13 +39,15 @@ export const calibration = sqliteTable("calibration", {
  * This is the single biggest lever for accuracy improvement over time.
  */
 export const stationBias = sqliteTable("station_bias", {
-  /** Composite key: stationId + forecastHorizonDays */
+  /** Composite key: stationId + category + forecastHorizonDays */
   id: text("id").primaryKey(),
   /** NWS station ID, e.g. KNYC, KORD, KLAX */
   stationId: text("station_id").notNull(),
+  /** Forecast category: high_temp, low_temp, precip, snowfall */
+  category: text("category").notNull().default("high_temp"),
   /** Forecast horizon: 1, 2, 3, ... 7 days out */
   forecastHorizonDays: integer("forecast_horizon_days").notNull(),
-  /** Mean bias in °F (positive = model runs warm) */
+  /** Mean bias in native units (°F for temp, inches for precip/snow) */
   meanBias: real("mean_bias").notNull().default(0),
   /** Std deviation of bias */
   stdBias: real("std_bias").notNull().default(1),

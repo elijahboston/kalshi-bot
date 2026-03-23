@@ -4,6 +4,7 @@ import type {
   WsMessage,
   BotStatusData,
 } from "../lib/types";
+import { categoryFromTicker, categoryLabel } from "../lib/category";
 
 let balance: BalanceData | null = null;
 let positionCount = 0;
@@ -32,6 +33,16 @@ export function initHud(): void {
     </div>
   `;
   document.body.appendChild(hud);
+
+  // CRT scan lines overlay
+  const scanlines = document.createElement("div");
+  scanlines.className = "scanlines";
+  document.body.appendChild(scanlines);
+
+  // Vignette overlay
+  const vignette = document.createElement("div");
+  vignette.className = "vignette";
+  document.body.appendChild(vignette);
 }
 
 export function handleHudMessage(msg: WsMessage): void {
@@ -55,21 +66,29 @@ export function handleHudMessage(msg: WsMessage): void {
     case "bot:status":
       botStatus = msg.data;
       updateBotStatus();
+      addFeedItem(
+        `Tick #${msg.data.tickCount} complete${msg.data.dryRun ? " [DRY]" : ""}`,
+        "tick"
+      );
       break;
 
-    case "signal:new":
+    case "signal:new": {
+      const cat = categoryLabel(categoryFromTicker(msg.data.ticker));
       addFeedItem(
-        `Signal: ${msg.data.ticker} ${msg.data.recommendation} (edge ${(msg.data.edge * 100).toFixed(1)}%)`,
+        `Signal: [${cat}] ${msg.data.ticker} ${msg.data.recommendation} (edge ${(msg.data.edge * 100).toFixed(1)}%)`,
         "signal"
       );
       break;
+    }
 
-    case "order:placed":
+    case "order:placed": {
+      const cat = categoryLabel(categoryFromTicker(msg.data.ticker));
       addFeedItem(
-        `Order: ${msg.data.action.toUpperCase()} ${msg.data.quantity}x ${msg.data.ticker} @ ${msg.data.price}c`,
+        `Order: ${msg.data.action.toUpperCase()} [${cat}] ${msg.data.quantity}x ${msg.data.ticker} @ ${msg.data.price}c`,
         msg.data.action === "buy" ? "order-buy" : "order-sell"
       );
       break;
+    }
 
     case "market:resolved": {
       const win =
@@ -81,6 +100,15 @@ export function handleHudMessage(msg: WsMessage): void {
         `Settled: ${msg.data.ticker} → ${msg.data.result} ${pnlStr}`,
         win ? "resolved-win" : "resolved-loss"
       );
+      break;
+    }
+
+    case "log": {
+      // Show info+ log messages from key modules in the activity feed
+      if (msg.data.level === "info" || msg.data.level === "warn" || msg.data.level === "error") {
+        const cssClass = msg.data.level === "error" ? "error" : msg.data.level === "warn" ? "warn" : "log-info";
+        addFeedItem(`[${msg.data.module}] ${msg.data.message}`, cssClass);
+      }
       break;
     }
   }

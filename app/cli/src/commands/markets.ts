@@ -16,6 +16,7 @@ export const marketsCommands: CommandDef[] = [
         .select({
           ticker: markets.ticker,
           title: markets.title,
+          category: markets.category,
           status: markets.status,
           lastYesPrice: markets.lastYesPrice,
           closeTime: markets.closeTime,
@@ -34,8 +35,10 @@ export const marketsCommands: CommandDef[] = [
         return "No markets found. Start the bot to begin discovery.";
       }
 
-      const header = "TICKER".padEnd(30) + "PRICE".padStart(6) + "  STATUS".padEnd(10) + "  CLOSES";
+      const CAT: Record<string, string> = { high_temp: "HIGH", low_temp: "LOW", precip: "RAIN", snowfall: "SNOW" };
+      const header = "TYPE ".padEnd(6) + "TICKER".padEnd(30) + "PRICE".padStart(6) + "  STATUS".padEnd(10) + "  CLOSES";
       const lines = rows.map((r) => {
+        const cat = (CAT[r.category] ?? r.category).padEnd(5);
         const price = r.lastYesPrice != null ? `${r.lastYesPrice}¢` : "—";
         const closes = r.closeTime
           ? new Date(r.closeTime).toLocaleString("en-US", {
@@ -46,6 +49,7 @@ export const marketsCommands: CommandDef[] = [
             })
           : "—";
         return (
+          cat + " " +
           r.ticker.padEnd(30) +
           price.padStart(6) +
           `  ${r.status}`.padEnd(10) +

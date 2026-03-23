@@ -227,17 +227,129 @@ describe("getHistoricalHitRate", () => {
     const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
     expect(result).toBeNull();
   });
+});
 
-  test("estimate includes historicalHitRate when data available", async () => {
+function makePrecipMarket(overrides: Partial<any> = {}) {
+  return {
+    ticker: "KXRAINNY-26MAR21-T0.1",
+    stationId: "KNYC",
+    category: "precip",
+    bracketLow: 0.1,
+    bracketHigh: 0.25,
+    targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    ...overrides,
+  } as any;
+}
+
+function makeSnowMarket(overrides: Partial<any> = {}) {
+  return {
+    ticker: "KXSNOWNY-26MAR21-T1",
+    stationId: "KNYC",
+    category: "snowfall",
+    bracketLow: 1,
+    bracketHigh: 3,
+    targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    ...overrides,
+  } as any;
+}
+
+describe("ProbabilityEstimator — precip/snow", () => {
+  test("precip: uses empirical counting, not normal CDF", async () => {
+    const estimator = new ProbabilityEstimator();
+    // 3 out of 10 members are in [0.1, 0.25)
+    const ensemble = [0, 0, 0, 0.05, 0.12, 0.15, 0.2, 0.3, 0.5, 1.0];
+
+    const result = await estimator.estimate(makePrecipMarket(), ensemble);
+
+    // Empirical: 3/10 = 0.3. CDF should equal counting for precip.
+    expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
+    expect(result.probability).toBe(result.reasoning.countingProbability);
+    expect(result.reasoning.membersInBracket).toBe(3);
+  });
+
+  test("precip: clamps negative values to zero after bias correction", async () => {
     const db = getDb();
-    for (const outcome of [1, 1, 0, 0, 0]) {
-      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
-    }
+    // Insert a positive bias (model runs wet) → correction subtracts, could go negative
+    db.insert(stationBias).values({
+      id: "KNYC_precip_1",
+      stationId: "KNYC",
+      category: "precip",
+      forecastHorizonDays: 1,
+      meanBias: 0.2,
+      stdBias: 0.1,
+      sampleSize: 50,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
 
     const estimator = new ProbabilityEstimator();
-    const ensemble = [28, 29, 30, 30, 30, 30, 30, 31, 32, 33];
+    // After subtracting 0.2 bias: [0.05→-0.15, 0.1→-0.1, 0.15→-0.05, 0.35→0.15, 0.8→0.6]
+    // After clamping at 0: [0, 0, 0, 0.15, 0.6]
+    const ensemble = [0.05, 0.1, 0.15, 0.35, 0.8];
 
-    const result = await estimator.estimate(makeMarket(), ensemble);
-    expect(result.reasoning.historicalHitRate).toBe(0.4);
+    const result = await estimator.estimate(makePrecipMarket(), ensemble);
+
+    // Members in [0.1, 0.25): just 0.15 → 1 out of 5
+    expect(result.reasoning.membersInBracket).toBe(1);
+    expect(result.reasoning.biasCorrection).not.toBeNull();
+    expect(result.reasoning.biasCorrection!.meanBias).toBe(0.2);
+  });
+
+  test("precip: zero-heavy ensemble gets correct zero-rain probability", async () => {
+    const estimator = new ProbabilityEstimator();
+    // 7 out of 10 members predict no rain at all
+    const ensemble = [0, 0, 0, 0, 0, 0, 0, 0.05, 0.12, 0.3];
+
+    // Market: will precip be >= 0.1 inches?
+    const market = makePrecipMarket({ bracketLow: 0.1, bracketHigh: Infinity });
+    const result = await estimator.estimate(market, ensemble);
+
+    // Only 2/10 members >= 0.1 → P = 0.2
+    expect(result.reasoning.countingProbability).toBe(0.2);
+    expect(result.probability).toBe(0.2);
+  });
+
+  test("snowfall: uses empirical counting", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Most members predict no snow, a few predict significant snow
+    const ensemble = [0, 0, 0, 0, 0, 0, 0, 1.5, 4, 8];
+
+    const result = await estimator.estimate(makeSnowMarket(), ensemble);
+
+    // Members in [1, 3): just 1.5 → 1 out of 10
+    expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
+    expect(result.reasoning.membersInBracket).toBe(1);
+  });
+
+  test("snowfall: clamps negative values to zero", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Some ensemble members might have slightly negative values from model artifacts
+    const ensemble = [-0.5, -0.1, 0, 0, 0, 1.5, 2, 3, 5, 8];
+
+    const result = await estimator.estimate(makeSnowMarket(), ensemble);
+
+    // After clamping: [0, 0, 0, 0, 0, 1.5, 2, 3, 5, 8]
+    // Members in [1, 3): 1.5 and 2 → 2 out of 10
+    expect(result.reasoning.membersInBracket).toBe(2);
+  });
+
+  test("per-category bias: precip bias doesn't affect temperature", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: "KNYC_precip_1",
+      stationId: "KNYC",
+      category: "precip",
+      forecastHorizonDays: 1,
+      meanBias: 0.5,
+      stdBias: 0.1,
+      sampleSize: 50,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    // Temperature market should NOT pick up the precip bias
+    const tempResult = await estimator.estimate(makeMarket(), [28, 29, 30, 30, 31]);
+    expect(tempResult.reasoning.biasCorrection).toBeNull();
   });
 });

@@ -1,4 +1,5 @@
 import type { PerformanceData } from "../lib/types";
+import { categoryBadge, categoryFromTicker } from "../lib/category";
 
 let perfData: PerformanceData | null = null;
 let visible = false;
@@ -215,8 +216,9 @@ function renderResolutions(): void {
       : "--";
     // Shorten ticker: KXHIGHNY-26MAR07-B50.5 → HIGHNY B50.5
     const short = r.ticker.replace(/^KX/, "").replace(/-\d{2}[A-Z]{3}\d{2}-/, " ");
+    const badge = categoryBadge(categoryFromTicker(r.ticker));
     return `<div class="res-row">
-      <span class="res-ticker">${short}</span>
+      <span class="res-ticker">${badge}${short}</span>
       <span class="res-pred">${(r.predictedProb * 100).toFixed(0)}%</span>
       <span class="res-actual">${r.actualOutcome === 1 ? "YES" : "NO"}</span>
       <span class="res-pnl" style="color:${pnlColor}">${pnlStr}</span>

@@ -42,8 +42,9 @@ export class ProbabilityEstimator {
   /**
    * Estimate the probability that a market resolves YES.
    *
-   * For temperature markets: uses ensemble forecast distribution
-   * with station-specific bias correction.
+   * For temperature markets: uses normal CDF fitted to ensemble distribution.
+   * For precip/snow markets: uses empirical CDF (direct counting) since
+   * precipitation distributions are zero-inflated and skewed, not Gaussian.
    */
   async estimate(
     market: Market,
@@ -59,16 +60,23 @@ export class ProbabilityEstimator {
         )
       : 1;
 
-    // Step 1: Get bias correction for this station + horizon
+    const isPrecipCategory = market.category === "precip" || market.category === "snowfall";
+
+    // Step 1: Get bias correction for this station + horizon + category
     const biasCorrection = await this.getBiasCorrection(
       market.stationId,
-      forecastHorizon
+      forecastHorizon,
+      market.category
     );
 
-    // Step 2: Apply bias correction to ensemble
-    const correctedValues = biasCorrection
+    // Step 2: Apply bias correction and clamp precip/snow at zero
+    let correctedValues = biasCorrection
       ? ensembleValues.map((v) => v - biasCorrection.meanBias)
-      : ensembleValues;
+      : [...ensembleValues];
+
+    if (isPrecipCategory) {
+      correctedValues = correctedValues.map((v) => Math.max(0, v));
+    }
 
     // Step 3: Count members in bracket
     const membersInBracket = correctedValues.filter(
@@ -82,9 +90,13 @@ export class ProbabilityEstimator {
 
     const countingProb = membersInBracket / correctedValues.length;
 
-    // CDF-fitted probability: integrate normal distribution over bracket
+    // CDF-fitted probability: use normal CDF for temperature, empirical for precip/snow
     let cdfProb: number;
-    if (corrStd === 0) {
+    if (isPrecipCategory) {
+      // Precip/snow: empirical CDF only — normal distribution is wrong for
+      // zero-inflated, right-skewed precipitation data
+      cdfProb = countingProb;
+    } else if (corrStd === 0) {
       // Zero spread — CDF is undefined, fall back to counting
       cdfProb = countingProb;
     } else {
@@ -94,13 +106,21 @@ export class ProbabilityEstimator {
     }
 
     // Blend counting and CDF based on ensemble size
-    const countingWeight = Math.min(1, correctedValues.length / 200);
+    // For precip/snow, always use counting (cdfProb === countingProb)
+    const countingWeight = isPrecipCategory
+      ? 1.0
+      : Math.min(1, correctedValues.length / 200);
     const probability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
 
     // Step 4: Compute confidence
     // Higher confidence when: more ensemble members, smaller spread, more bias data
+    // For precip/snow, use relative spread (CoV) since absolute spread in inches is small
 
-    const spreadFactor = Math.max(0, 1 - corrStd / 10); // Tighter spread → more confident
+    const spreadNorm = isPrecipCategory
+      ? (corrMean > 0 ? corrStd / corrMean : corrStd) // Coefficient of variation
+      : corrStd;
+    const spreadDivisor = isPrecipCategory ? 2 : 10;
+    const spreadFactor = Math.max(0, 1 - spreadNorm / spreadDivisor);
     const biasFactor = biasCorrection
       ? Math.min(1, biasCorrection.sampleSize / 30) // More data → more confident
       : 0.5;
@@ -138,20 +158,39 @@ export class ProbabilityEstimator {
     return { probability, confidence, ensembleSize: ensembleValues.length, reasoning };
   }
 
-  private async getBiasCorrection(stationId: string, horizon: number) {
+  private async getBiasCorrection(stationId: string, horizon: number, category: string) {
     const db = getDb();
+    // Try category-specific bias first
     const [bias] = await db
       .select()
       .from(stationBias)
       .where(
         and(
           eq(stationBias.stationId, stationId),
+          eq(stationBias.category, category),
           eq(stationBias.forecastHorizonDays, Math.min(horizon, 7))
         )
       )
       .limit(1);
 
-    return bias || null;
+    if (bias) return bias;
+
+    // Fall back to legacy rows (pre-category migration, default = "high_temp")
+    if (category !== "high_temp") return null;
+
+    const [legacy] = await db
+      .select()
+      .from(stationBias)
+      .where(
+        and(
+          eq(stationBias.stationId, stationId),
+          eq(stationBias.category, "high_temp"),
+          eq(stationBias.forecastHorizonDays, Math.min(horizon, 7))
+        )
+      )
+      .limit(1);
+
+    return legacy || null;
   }
 
   /**
