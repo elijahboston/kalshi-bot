@@ -109,10 +109,10 @@ canvas {
 .stat-value.positive { color: #0fa; text-shadow: 0 0 6px rgba(0, 255, 170, 0.3); }
 .stat-value.negative { color: #f45; text-shadow: 0 0 6px rgba(255, 68, 85, 0.3); }
 
-/* ═══ Station legend - bottom left ═══ */
+/* ═══ Station legend - below bot status ═══ */
 #legend {
   position: absolute;
-  bottom: 210px;
+  top: 90px;
   left: 20px;
   background: rgba(0, 4, 12, 0.7);
   border: 1px solid rgba(0, 255, 255, 0.1);
