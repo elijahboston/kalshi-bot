@@ -1,5 +1,8 @@
-import { getDb, orders, positions, balanceHistory, calibration, desc, eq, sql, count, avg, sum } from "@kcb/db";
+import { readFileSync } from "node:fs";
+import * as topojson from "topojson-client";
+import { getDb, orders, positions, balanceHistory, calibration, weatherForecasts, desc, eq, sql, count, avg, sum } from "@kcb/db";
 import type { SnapshotData, StationInfo, PerformanceData } from "./frontend/lib/types";
+import type { WeatherStation } from "./frontend/scene/weather-layer";
 
 /** Station coordinates — mirrors app/data/services/ensemble.ts */
 const STATION_COORDS: Record<string, { lat: number; lon: number }> = {
@@ -21,6 +24,14 @@ const ICAO_TO_SUFFIX: Record<string, string> = {
   KNYC: "NY", KORD: "CHI", KLAX: "LAX", KDFW: "DFW", KIAH: "IAH",
   KDEN: "DEN", KPHL: "PHL", KATL: "ATL", KSFO: "SFO", KMIA: "MIA",
   KAUS: "AUS",
+};
+
+/** Human-readable station names */
+const STATION_NAMES: Record<string, string> = {
+  KNYC: "New York", KORD: "Chicago", KLAX: "Los Angeles",
+  KDFW: "Dallas-Fort Worth", KIAH: "Houston", KDEN: "Denver",
+  KPHL: "Philadelphia", KATL: "Atlanta", KSFO: "San Francisco",
+  KMIA: "Miami", KAUS: "Austin",
 };
 
 function tickerMatchesStation(ticker: string, stationId: string): boolean {
@@ -205,9 +216,149 @@ export function getPerformance(): PerformanceData {
   };
 }
 
+export function getWeather(): WeatherStation[] {
+  const db = getDb();
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Get latest high_temp forecast for each station for today
+  const forecasts = db
+    .select({
+      stationId: weatherForecasts.stationId,
+      forecastType: weatherForecasts.forecastType,
+      ensembleMean: weatherForecasts.ensembleMean,
+    })
+    .from(weatherForecasts)
+    .where(
+      sql`${weatherForecasts.targetDate} = ${today} AND ${weatherForecasts.forecastType} = 'high_temp'`
+    )
+    .orderBy(desc(weatherForecasts.fetchedAt))
+    .all();
+
+  // Deduplicate: take first (most recent) per station
+  const byStation = new Map<string, number>();
+  for (const f of forecasts) {
+    if (!byStation.has(f.stationId) && f.ensembleMean != null) {
+      byStation.set(f.stationId, f.ensembleMean);
+    }
+  }
+
+  return Object.entries(STATION_COORDS).map(([id, coords]) => {
+    const temp = byStation.get(id);
+    // Derive condition from temperature (simplified — no live obs yet)
+    let condition: "clear" | "rain" | "snow" | "cloudy" = "clear";
+    if (temp !== undefined) {
+      if (temp < 33) condition = "snow";
+      else if (temp < 45) condition = "cloudy";
+    }
+    return {
+      id,
+      lat: coords.lat,
+      lon: coords.lon,
+      temp,
+      condition,
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// US Map state boundary data (from us-atlas TopoJSON)
+// ═══════════════════════════════════════════════════════════
+
+type MapStateData = { polygons: number[][][] };
+let cachedMapData: MapStateData[] | null = null;
+
+export function getMapData(): MapStateData[] {
+  if (cachedMapData) return cachedMapData;
+
+  const topoPath = require.resolve("us-atlas/states-10m.json");
+  const raw = readFileSync(topoPath, "utf-8");
+  const topo = JSON.parse(raw);
+  const geoStates = (topojson as any).feature(topo, topo.objects.states);
+
+  // Exclude Alaska, Hawaii, and territories (only CONUS)
+  const EXCLUDE_IDS = new Set(["02", "15", "60", "66", "69", "72", "78"]);
+
+  cachedMapData = geoStates.features
+    .filter((f: any) => !EXCLUDE_IDS.has(String(f.id).padStart(2, "0")))
+    .map((f: any) => {
+      const polys: number[][][] = [];
+      if (f.geometry.type === "Polygon") {
+        polys.push(...f.geometry.coordinates);
+      } else if (f.geometry.type === "MultiPolygon") {
+        for (const mp of f.geometry.coordinates) {
+          polys.push(...mp);
+        }
+      }
+      return { polygons: polys };
+    });
+
+  return cachedMapData!;
+}
+
+/** Get detailed data for a specific station */
+export function getStationDetail(stationId: string) {
+  const coords = STATION_COORDS[stationId];
+  if (!coords) return null;
+
+  const db = getDb();
+
+  // Positions matching this station
+  const allPositions = db.select().from(positions).all();
+  const stationPositions = allPositions.filter((p) =>
+    tickerMatchesStation(p.ticker, stationId)
+  );
+
+  // Recent orders matching this station
+  const allOrders = db
+    .select()
+    .from(orders)
+    .orderBy(desc(orders.createdAt))
+    .limit(200)
+    .all();
+  const stationOrders = allOrders
+    .filter((o) => tickerMatchesStation(o.ticker, stationId))
+    .slice(0, 10);
+
+  // Weather
+  const weather = getWeather().find((w) => w.id === stationId);
+
+  return {
+    id: stationId,
+    name: STATION_NAMES[stationId] ?? stationId,
+    lat: coords.lat,
+    lon: coords.lon,
+    temp: weather?.temp,
+    condition: weather?.condition ?? "unknown",
+    positions: stationPositions.map((p) => ({
+      ticker: p.ticker,
+      side: p.side,
+      quantity: p.quantity,
+      avgEntryPrice: p.avgEntryPrice,
+      unrealizedPnl: p.unrealizedPnl,
+    })),
+    recentOrders: stationOrders.map((o) => ({
+      ticker: o.ticker,
+      action: o.action,
+      side: o.side,
+      limitPrice: o.limitPrice,
+      filledQuantity: o.filledQuantity,
+      status: o.status,
+      createdAt: o.createdAt,
+    })),
+  };
+}
+
 /** Handle REST API requests */
 export function handleApiRequest(req: Request): Response | null {
   const url = new URL(req.url);
+
+  // Dynamic route: /api/station/:id
+  const stationMatch = url.pathname.match(/^\/api\/station\/(\w+)$/);
+  if (stationMatch) {
+    const detail = getStationDetail(stationMatch[1]);
+    if (detail) return Response.json(detail);
+    return new Response("Station not found", { status: 404 });
+  }
 
   switch (url.pathname) {
     case "/api/stations":
@@ -220,6 +371,10 @@ export function handleApiRequest(req: Request): Response | null {
       return Response.json(getRecentOrders());
     case "/api/performance":
       return Response.json(getPerformance());
+    case "/api/weather":
+      return Response.json(getWeather());
+    case "/api/us-map":
+      return Response.json(getMapData());
     default:
       return null;
   }

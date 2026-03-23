@@ -1,142 +1,238 @@
 import * as THREE from "three";
-import { latLngToVec3 } from "./globe";
+import { latLngToVec3 } from "./map";
 import type { StationInfo } from "../lib/types";
 
 export type StationMesh = {
   id: string;
   position: THREE.Vector3;
-  /** Solid circle marker — always visible */
-  marker: THREE.Sprite;
-  /** Pulsing glow — shown on signal, fades out */
-  glow: THREE.Sprite;
+  group: THREE.Group;
+  basePlane: THREE.Mesh;
+  outerRing: THREE.Mesh;
+  column: THREE.Mesh;
+  columnGlow: THREE.Mesh;
+  tipSprite: THREE.Sprite;
   label: THREE.Sprite;
+  labelCanvas: HTMLCanvasElement;
+  labelTexture: THREE.CanvasTexture;
   state: "idle" | "active" | "signal";
-  /** Signal pulse timer — counts down from 1 to 0 */
   pulseT: number;
+  temp: number | undefined;
+  targetColumnH: number;
+  currentColumnH: number;
 };
 
 let stationMeshes: StationMesh[] = [];
-let circleTexture: THREE.Texture | null = null;
-let glowTexture: THREE.Texture | null = null;
 
-/** Solid filled circle with a bright edge */
-function getCircleTexture(): THREE.Texture {
-  if (circleTexture) return circleTexture;
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  const cx = size / 2;
+// ═══════════════════════════════════════════════════════════
+// Temperature utilities
+// ═══════════════════════════════════════════════════════════
 
-  // Filled circle
-  ctx.beginPath();
-  ctx.arc(cx, cx, cx * 0.7, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.fill();
+const MIN_COL_H = 0.2;
+const MAX_COL_H = 1.0;
 
-  // Bright ring edge
-  ctx.beginPath();
-  ctx.arc(cx, cx, cx * 0.7, 0, Math.PI * 2);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(255,255,255,1.0)";
-  ctx.stroke();
-
-  circleTexture = new THREE.CanvasTexture(canvas);
-  return circleTexture;
+function tempToColor(temp?: number): THREE.Color {
+  if (temp === undefined) return new THREE.Color(0x00aacc);
+  const t = Math.max(0, Math.min(1, (temp - 20) / 70));
+  // Blue (cold) → cyan → green → orange (hot)
+  const hue = 0.55 - t * 0.45;
+  return new THREE.Color().setHSL(hue, 0.85, 0.4 + t * 0.1);
 }
 
-/** Soft radial glow for signal pulse */
-function getGlowTexture(): THREE.Texture {
-  if (glowTexture) return glowTexture;
-  const size = 128;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  const cx = size / 2;
-
-  const gradient = ctx.createRadialGradient(cx, cx, 0, cx, cx, cx);
-  gradient.addColorStop(0, "rgba(255,255,255,1.0)");
-  gradient.addColorStop(0.2, "rgba(255,255,255,0.6)");
-  gradient.addColorStop(0.5, "rgba(255,255,255,0.2)");
-  gradient.addColorStop(1, "rgba(255,255,255,0.0)");
-
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, size, size);
-
-  glowTexture = new THREE.CanvasTexture(canvas);
-  return glowTexture;
+function tempToHeight(temp?: number): number {
+  if (temp === undefined) return MIN_COL_H;
+  const t = Math.max(0, Math.min(1, (temp - 20) / 70));
+  return MIN_COL_H + t * (MAX_COL_H - MIN_COL_H);
 }
 
-// Colors
-const COLOR_IDLE = 0x00cccc;
-const COLOR_ACTIVE = 0x00ff88;
-const COLOR_SIGNAL = 0xffcc00;
+// State colors
+const COLOR_IDLE = new THREE.Color(0x00cccc);
+const COLOR_ACTIVE = new THREE.Color(0x00ff88);
+const COLOR_SIGNAL = new THREE.Color(0xffcc00);
+
+function stateColor(state: string): THREE.Color {
+  if (state === "active") return COLOR_ACTIVE;
+  if (state === "signal") return COLOR_SIGNAL;
+  return COLOR_IDLE;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Label rendering
+// ═══════════════════════════════════════════════════════════
+
+function createLabelCanvas(): { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 128;
+  const texture = new THREE.CanvasTexture(canvas);
+  return { canvas, texture };
+}
+
+function drawLabel(canvas: HTMLCanvasElement, id: string, temp?: number): void {
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, 256, 128);
+
+  // Station ID
+  ctx.font = "bold 36px 'SF Mono', 'Fira Code', monospace";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#00ffff";
+  ctx.shadowColor = "rgba(0, 255, 255, 0.5)";
+  ctx.shadowBlur = 8;
+  ctx.fillText(id, 128, 48);
+  ctx.shadowBlur = 0;
+
+  // Temperature
+  if (temp !== undefined) {
+    ctx.font = "26px 'SF Mono', 'Fira Code', monospace";
+    ctx.fillStyle = "rgba(0, 200, 220, 0.8)";
+    ctx.fillText(`${Math.round(temp)}°F`, 128, 88);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Station creation
+// ═══════════════════════════════════════════════════════════
 
 export function createStations(
   scene: THREE.Scene,
   stations: StationInfo[]
 ): StationMesh[] {
+  // Clean up existing
   for (const s of stationMeshes) {
-    scene.remove(s.marker);
-    scene.remove(s.glow);
-    scene.remove(s.label);
+    scene.remove(s.group);
   }
   stationMeshes = [];
 
-  const circleTex = getCircleTexture();
-  const glowTex = getGlowTexture();
-
   for (const station of stations) {
-    const pos = latLngToVec3(station.lat, station.lon, 1.01);
+    const pos = latLngToVec3(station.lat, station.lon, 0);
+    const group = new THREE.Group();
+    group.position.copy(pos);
+    group.userData = { stationId: station.id };
 
-    // Solid circle marker
-    const markerMat = new THREE.SpriteMaterial({
-      map: circleTex,
-      color: station.activeMarkets > 0 ? COLOR_ACTIVE : COLOR_IDLE,
-      transparent: true,
-      depthTest: false,
-    });
-    const marker = new THREE.Sprite(markerMat);
-    marker.position.copy(pos);
-    marker.scale.set(0.04, 0.04, 1);
-    scene.add(marker);
+    const initColor = tempToColor(undefined);
+    const ringColor = station.activeMarkets > 0 ? COLOR_ACTIVE : COLOR_IDLE;
+    const columnH = MIN_COL_H;
 
-    // Glow sprite — hidden until signal
-    const glowMat = new THREE.SpriteMaterial({
-      map: glowTex,
-      color: COLOR_SIGNAL,
+    // ── Base disc (flat circle on the map surface) ──
+    const baseGeo = new THREE.CircleGeometry(0.12, 32);
+    const baseMat = new THREE.MeshBasicMaterial({
+      color: initColor,
       transparent: true,
-      opacity: 0,
-      depthTest: false,
+      opacity: 0.4,
       blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
     });
-    const glow = new THREE.Sprite(glowMat);
-    glow.position.copy(pos);
-    glow.scale.set(0.12, 0.12, 1);
-    glow.visible = false;
-    scene.add(glow);
+    const basePlane = new THREE.Mesh(baseGeo, baseMat);
+    basePlane.rotation.x = -Math.PI / 2;
+    basePlane.position.y = 0.005;
+    group.add(basePlane);
 
-    // Text label
-    const labelSprite = createTextSprite(station.id);
-    const labelPos = latLngToVec3(station.lat, station.lon, 1.05);
-    labelSprite.position.copy(labelPos);
-    labelSprite.scale.set(0.08, 0.04, 1);
-    scene.add(labelSprite);
+    // ── Outer activity ring ──
+    const ringGeo = new THREE.RingGeometry(0.15, 0.175, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: ringColor,
+      transparent: true,
+      opacity: 0.35,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const outerRing = new THREE.Mesh(ringGeo, ringMat);
+    outerRing.rotation.x = -Math.PI / 2;
+    outerRing.position.y = 0.006;
+    group.add(outerRing);
+
+    // ── Data column (thin beam) ──
+    const colGeo = new THREE.CylinderGeometry(0.008, 0.008, 1.0, 6);
+    const colMat = new THREE.MeshBasicMaterial({ color: initColor });
+    const column = new THREE.Mesh(colGeo, colMat);
+    column.scale.y = columnH;
+    column.position.y = columnH / 2;
+    group.add(column);
+
+    // ── Column glow sleeve ──
+    const glowGeo = new THREE.CylinderGeometry(0.025, 0.025, 1.0, 8);
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: initColor,
+      transparent: true,
+      opacity: 0.12,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const columnGlow = new THREE.Mesh(glowGeo, glowMat);
+    columnGlow.scale.y = columnH;
+    columnGlow.position.y = columnH / 2;
+    group.add(columnGlow);
+
+    // ── Tip dot ──
+    const tipMat = new THREE.SpriteMaterial({
+      color: 0x00ffff,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+    });
+    const tipSprite = new THREE.Sprite(tipMat);
+    tipSprite.scale.set(0.06, 0.06, 1);
+    tipSprite.position.y = columnH;
+    group.add(tipSprite);
+
+    // ── Label ──
+    const { canvas: labelCanvas, texture: labelTexture } = createLabelCanvas();
+    drawLabel(labelCanvas, station.id);
+    const labelMat = new THREE.SpriteMaterial({
+      map: labelTexture,
+      transparent: true,
+      depthTest: false,
+    });
+    const label = new THREE.Sprite(labelMat);
+    label.scale.set(0.6, 0.3, 1);
+    label.position.y = columnH + 0.15;
+    group.add(label);
+
+    scene.add(group);
 
     stationMeshes.push({
       id: station.id,
       position: pos,
-      marker,
-      glow,
-      label: labelSprite,
+      group,
+      basePlane,
+      outerRing,
+      column,
+      columnGlow,
+      tipSprite,
+      label,
+      labelCanvas,
+      labelTexture,
       state: station.activeMarkets > 0 ? "active" : "idle",
       pulseT: 0,
+      temp: undefined,
+      targetColumnH: columnH,
+      currentColumnH: columnH,
     });
   }
 
   return stationMeshes;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Updates
+// ═══════════════════════════════════════════════════════════
+
+/** Update a station's temperature data — adjusts column height and color */
+export function updateStationWeather(stationId: string, temp: number): void {
+  const s = stationMeshes.find((m) => m.id === stationId);
+  if (!s) return;
+  s.temp = temp;
+  s.targetColumnH = tempToHeight(temp);
+
+  const color = tempToColor(temp);
+  (s.basePlane.material as THREE.MeshBasicMaterial).color.copy(color);
+  (s.column.material as THREE.MeshBasicMaterial).color.copy(color);
+  (s.columnGlow.material as THREE.MeshBasicMaterial).color.copy(color);
+
+  drawLabel(s.labelCanvas, s.id, temp);
+  s.labelTexture.needsUpdate = true;
 }
 
 export function setStationState(
@@ -147,51 +243,61 @@ export function setStationState(
   if (!s) return;
   s.state = state;
 
-  // Update marker color
-  const markerColor = state === "active" ? COLOR_ACTIVE : COLOR_IDLE;
-  (s.marker.material as THREE.SpriteMaterial).color.setHex(markerColor);
+  (s.outerRing.material as THREE.MeshBasicMaterial).color.copy(stateColor(state));
 
   if (state === "signal") {
-    s.pulseT = 1; // start pulse countdown
-    s.glow.visible = true;
+    s.pulseT = 1;
   }
 }
 
-/** Call each frame to animate signal pulses */
+/** Call each frame — animates columns, pulses, breathing */
 export function updateStations(delta: number): void {
-  for (const s of stationMeshes) {
-    if (s.pulseT <= 0) continue;
+  const now = performance.now() / 1000;
 
-    s.pulseT -= delta * 0.4; // ~2.5s full cycle
-    if (s.pulseT <= 0) {
-      s.pulseT = 0;
-      s.glow.visible = false;
-      (s.glow.material as THREE.SpriteMaterial).opacity = 0;
-      if (s.state === "signal") s.state = "idle";
-      continue;
+  for (const s of stationMeshes) {
+    // Smooth column height interpolation
+    if (Math.abs(s.currentColumnH - s.targetColumnH) > 0.001) {
+      s.currentColumnH += (s.targetColumnH - s.currentColumnH) * delta * 3;
+      s.column.scale.y = s.currentColumnH;
+      s.column.position.y = s.currentColumnH / 2;
+      s.columnGlow.scale.y = s.currentColumnH;
+      s.columnGlow.position.y = s.currentColumnH / 2;
+      s.tipSprite.position.y = s.currentColumnH;
+      s.label.position.y = s.currentColumnH + 0.15;
     }
 
-    // Pulsing: oscillate opacity and scale
-    const pulse = Math.sin(s.pulseT * Math.PI * 4) * 0.5 + 0.5; // 2 full pulses
-    const glowMat = s.glow.material as THREE.SpriteMaterial;
-    glowMat.opacity = 0.4 + pulse * 0.6;
+    // Signal pulse animation
+    if (s.pulseT > 0) {
+      s.pulseT -= delta * 0.4;
+      if (s.pulseT <= 0) {
+        s.pulseT = 0;
+        const restoreState = s.state === "signal" ? "idle" : s.state;
+        if (s.state === "signal") s.state = "idle";
+        (s.outerRing.material as THREE.MeshBasicMaterial).color.copy(
+          stateColor(restoreState)
+        );
+        (s.outerRing.material as THREE.MeshBasicMaterial).opacity = 0.35;
+        s.outerRing.scale.set(1, 1, 1);
+        (s.tipSprite.material as THREE.SpriteMaterial).opacity = 0.9;
+        s.tipSprite.scale.setScalar(0.06);
+        continue;
+      }
 
-    const scale = 0.1 + pulse * 0.06;
-    s.glow.scale.set(scale, scale, 1);
+      const pulse = Math.sin(s.pulseT * Math.PI * 4) * 0.5 + 0.5;
+      const ringMat = s.outerRing.material as THREE.MeshBasicMaterial;
+      ringMat.color.copy(COLOR_SIGNAL);
+      ringMat.opacity = 0.3 + pulse * 0.5;
 
-    // Also pulse the marker brightness
-    const markerMat = s.marker.material as THREE.SpriteMaterial;
-    markerMat.color.setHex(COLOR_SIGNAL);
-    const markerScale = 0.04 + pulse * 0.015;
-    s.marker.scale.set(markerScale, markerScale, 1);
-  }
+      const scale = 1.0 + pulse * 0.3;
+      s.outerRing.scale.set(scale, scale, 1);
 
-  // Reset marker color for non-pulsing stations
-  for (const s of stationMeshes) {
-    if (s.pulseT > 0) continue;
-    const color = s.state === "active" ? COLOR_ACTIVE : COLOR_IDLE;
-    (s.marker.material as THREE.SpriteMaterial).color.setHex(color);
-    s.marker.scale.set(0.04, 0.04, 1);
+      (s.tipSprite.material as THREE.SpriteMaterial).opacity = 0.7 + pulse * 0.3;
+      s.tipSprite.scale.setScalar(0.06 + pulse * 0.03);
+    } else {
+      // Subtle idle breathing on outer ring
+      const breath = Math.sin(now * 1.5 + s.position.x * 10) * 0.08;
+      (s.outerRing.material as THREE.MeshBasicMaterial).opacity = 0.3 + breath;
+    }
   }
 }
 
@@ -199,11 +305,10 @@ export function getStationMeshes(): StationMesh[] {
   return stationMeshes;
 }
 
-/**
- * Kalshi uses city suffixes (NY, CHI, LAX) not ICAO codes (KNYC, KORD, KLAX).
- * Tickers look like KXHIGHNY-25FEB19-B37 — extract the suffix after the
- * series prefix (KXHIGH, KXLOW, KXRAIN, KXSNOW) and map to ICAO.
- */
+// ═══════════════════════════════════════════════════════════
+// Ticker matching
+// ═══════════════════════════════════════════════════════════
+
 const SUFFIX_TO_ICAO: Record<string, string> = {
   NY: "KNYC",
   CHI: "KORD",
@@ -219,7 +324,9 @@ const SUFFIX_TO_ICAO: Record<string, string> = {
 };
 
 /** Find which station a ticker belongs to */
-export function findStationForTicker(ticker: string): StationMesh | undefined {
+export function findStationForTicker(
+  ticker: string
+): StationMesh | undefined {
   const match = ticker.match(/^KX(?:HIGH|LOW|RAIN|SNOW)(.+?)(?:-|$)/);
   if (match?.[1]) {
     const icao = SUFFIX_TO_ICAO[match[1]];
@@ -229,24 +336,4 @@ export function findStationForTicker(ticker: string): StationMesh | undefined {
     if (ticker.includes(s.id)) return s;
   }
   return undefined;
-}
-
-function createTextSprite(text: string): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = 128;
-  canvas.height = 64;
-  const ctx = canvas.getContext("2d")!;
-  ctx.font = "bold 24px monospace";
-  ctx.fillStyle = "#00ffff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, 64, 32);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({
-    map: tex,
-    transparent: true,
-    depthTest: false,
-  });
-  return new THREE.Sprite(mat);
 }

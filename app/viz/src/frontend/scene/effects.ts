@@ -20,8 +20,6 @@ function addRing(
   maxAge: number,
   endScale: number
 ): void {
-  const normal = position.clone().normalize();
-
   const ringGeo = new THREE.RingGeometry(innerR, outerR, 48);
   const ringMat = new THREE.MeshBasicMaterial({
     color,
@@ -33,8 +31,10 @@ function addRing(
   });
 
   const ring = new THREE.Mesh(ringGeo, ringMat);
-  ring.position.copy(position.clone().multiplyScalar(1.005));
-  ring.lookAt(ring.position.clone().add(normal));
+  ring.position.copy(position);
+  ring.position.y += 0.02;
+  // Lay flat on XZ plane
+  ring.rotation.x = -Math.PI / 2;
 
   scene.add(ring);
   activeRings.push({ mesh: ring, age: 0, maxAge, startScale: 1, endScale });
@@ -46,7 +46,7 @@ export function createSettlementRing(
   position: THREE.Vector3,
   win: boolean
 ): void {
-  addRing(scene, position, win ? 0x4caf50 : 0xf44336, 0.8, 0.02, 0.035, 1.5, 4);
+  addRing(scene, position, win ? 0x4caf50 : 0xf44336, 0.8, 0.08, 0.14, 1.5, 4);
 }
 
 /** Create a ripple (3 staggered rings) at a signal location */
@@ -54,12 +54,9 @@ export function createSignalRipple(
   scene: THREE.Scene,
   position: THREE.Vector3
 ): void {
-  const color = 0x00ffcc; // cyan-green
-  // 3 rings launched with slight delays via staggered ages
+  const color = 0x00ffcc;
   for (let i = 0; i < 3; i++) {
-    const normal = position.clone().normalize();
-
-    const ringGeo = new THREE.RingGeometry(0.008, 0.015, 48);
+    const ringGeo = new THREE.RingGeometry(0.03, 0.06, 48);
     const ringMat = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
@@ -70,8 +67,9 @@ export function createSignalRipple(
     });
 
     const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.position.copy(position.clone().multiplyScalar(1.005));
-    ring.lookAt(ring.position.clone().add(normal));
+    ring.position.copy(position);
+    ring.position.y += 0.02;
+    ring.rotation.x = -Math.PI / 2;
 
     scene.add(ring);
     activeRings.push({

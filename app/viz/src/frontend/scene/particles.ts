@@ -46,7 +46,7 @@ export function initParticles(scene: THREE.Scene): void {
   geometry.setAttribute("color", colorAttr);
 
   const mat = new THREE.PointsMaterial({
-    size: 0.02,
+    size: 0.06,
     map: getDotTexture(),
     vertexColors: true,
     transparent: true,
@@ -65,7 +65,11 @@ export function emitParticles(
   action: "buy" | "sell",
   count = 30
 ): void {
-  const normal = surfacePos.clone().normalize();
+  // On flat terrain, normal is straight up
+  const normal = new THREE.Vector3(0, 1, 0);
+  const tangent1 = new THREE.Vector3(1, 0, 0);
+  const tangent2 = new THREE.Vector3(0, 0, 1);
+
   const color =
     action === "buy" ? new THREE.Color(0x4caf50) : new THREE.Color(0xff9800);
 
@@ -79,18 +83,11 @@ export function emitParticles(
     p.position.copy(surfacePos);
     p.color.copy(color);
 
-    // Velocity: outward along normal + random tangential spread
-    const tangent1 = new THREE.Vector3()
-      .crossVectors(normal, new THREE.Vector3(0, 1, 0))
-      .normalize();
-    const tangent2 = new THREE.Vector3()
-      .crossVectors(normal, tangent1)
-      .normalize();
-
-    const spread = 0.1;
+    // Velocity: upward along normal + random tangential spread
+    const spread = 0.3;
     p.velocity
       .copy(normal)
-      .multiplyScalar(0.15 + Math.random() * 0.15)
+      .multiplyScalar(0.4 + Math.random() * 0.4)
       .add(tangent1.clone().multiplyScalar((Math.random() - 0.5) * spread))
       .add(tangent2.clone().multiplyScalar((Math.random() - 0.5) * spread));
 
@@ -104,17 +101,12 @@ export function emitSettlement(
   win: boolean,
   count = 50
 ): void {
-  const normal = surfacePos.clone().normalize();
   const color = win
     ? new THREE.Color(0x4caf50)
     : new THREE.Color(0xf44336);
 
-  const tangent1 = new THREE.Vector3()
-    .crossVectors(normal, new THREE.Vector3(0, 1, 0))
-    .normalize();
-  const tangent2 = new THREE.Vector3()
-    .crossVectors(normal, tangent1)
-    .normalize();
+  const tangent1 = new THREE.Vector3(1, 0, 0);
+  const tangent2 = new THREE.Vector3(0, 0, 1);
 
   let spawned = 0;
   for (const p of particles) {
@@ -126,25 +118,25 @@ export function emitSettlement(
     p.position.copy(surfacePos);
     p.color.copy(color);
 
-    // Ring pattern: mostly tangential, slight outward
+    // Ring pattern: mostly horizontal, slight upward
     const angle = (spawned / count) * Math.PI * 2;
     const ringDir = tangent1
       .clone()
       .multiplyScalar(Math.cos(angle))
       .add(tangent2.clone().multiplyScalar(Math.sin(angle)));
 
-    const outward = win ? 0.08 : -0.03; // Win: fountain up, loss: inward
+    const upward = win ? 0.2 : -0.05;
     p.velocity
       .copy(ringDir)
-      .multiplyScalar(0.1 + Math.random() * 0.05)
-      .add(normal.clone().multiplyScalar(outward + Math.random() * 0.1));
+      .multiplyScalar(0.3 + Math.random() * 0.15)
+      .addScaledVector(new THREE.Vector3(0, 1, 0), upward + Math.random() * 0.3);
 
     spawned++;
   }
 }
 
 export function updateParticles(delta: number): void {
-  const gravity = new THREE.Vector3();
+  const gravity = new THREE.Vector3(0, -0.5 * delta, 0);
   for (let i = 0; i < MAX_PARTICLES; i++) {
     const p = particles[i]!;
     if (!p.alive) {
@@ -161,12 +153,17 @@ export function updateParticles(delta: number): void {
       continue;
     }
 
-    // Apply gravity (pull back toward center)
-    gravity.copy(p.position).normalize().multiplyScalar(-0.02 * delta);
+    // Apply gravity (pull downward)
     p.velocity.add(gravity);
 
     // Integrate
     p.position.addScaledVector(p.velocity, delta);
+
+    // Don't let particles go below terrain
+    if (p.position.y < 0) {
+      p.position.y = 0;
+      p.velocity.y = Math.abs(p.velocity.y) * 0.3; // slight bounce
+    }
 
     // Fade by darkening color (additive blending makes dark = invisible)
     const t = p.age / PARTICLE_LIFETIME;

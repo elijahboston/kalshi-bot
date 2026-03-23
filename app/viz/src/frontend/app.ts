@@ -1,12 +1,38 @@
 import * as THREE from "three";
-import { createGlobe } from "./scene/globe";
-import { createStations, findStationForTicker, setStationState, updateStations } from "./scene/stations";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { createMap, updateMap } from "./scene/map";
+import {
+  createStations,
+  findStationForTicker,
+  setStationState,
+  updateStations,
+  updateStationWeather,
+} from "./scene/stations";
 import { setupCamera, updateCamera } from "./scene/camera";
-import { initParticles, emitParticles, emitSettlement, updateParticles } from "./scene/particles";
-import { createSettlementRing, createSignalRipple, updateEffects } from "./scene/effects";
+import {
+  initParticles,
+  emitParticles,
+  emitSettlement,
+  updateParticles,
+} from "./scene/particles";
+import {
+  createSettlementRing,
+  createSignalRipple,
+  updateEffects,
+} from "./scene/effects";
+import {
+  initWeatherLayer,
+  updateWeatherLayer,
+  updateWeatherData,
+  type WeatherStation,
+} from "./scene/weather-layer";
 import { connectWs, onMessage } from "./lib/ws-client";
 import { initHud, handleHudMessage } from "./hud/overlay";
 import { initPerformancePanel, loadPerformance } from "./hud/performance";
+import { initStationDetail } from "./hud/station-detail";
 import type { WsMessage, StationInfo } from "./lib/types";
 import "./styles.css";
 
@@ -22,20 +48,39 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(0x000510);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);
 
-// Scene
-const { earth } = createGlobe(scene);
+// Bloom post-processing
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.25,  // strength — very subtle
+  0.3,   // radius
+  0.4    // threshold — only brightest elements bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// Camera + scene setup (non-map elements)
 const controls = setupCamera(camera, renderer);
 initParticles(scene);
+initWeatherLayer(scene);
 
 // HUD
 initHud();
 initPerformancePanel();
+initStationDetail(scene, camera, renderer.domElement);
 loadPerformance();
 
 // Load initial data and connect WebSocket
 async function init() {
+  // Create the flat map (async — fetches state boundary data)
+  await createMap(scene);
+
+  // Load station markers
   try {
     const res = await fetch("/api/stations");
     const stations: StationInfo[] = await res.json();
@@ -44,20 +89,42 @@ async function init() {
     console.warn("Failed to load stations:", e);
   }
 
+  // Load initial weather data (updates both weather overlay and station pillars)
+  loadWeather();
+
   connectWs();
 
-  // Refresh performance data every 60s
+  // Periodic refreshes
   setInterval(() => loadPerformance(), 60_000);
+  setInterval(() => loadWeather(), 300_000);
 
   onMessage((msg: WsMessage) => {
     handleHudMessage(msg);
     handleSceneMessage(msg);
 
-    // Refresh performance on balance or resolution events
-    if (msg.type === "balance:update" || msg.type === "market:resolved") {
+    if (msg.type === "bot:status" || msg.type === "market:resolved") {
       loadPerformance();
     }
   });
+}
+
+async function loadWeather(): Promise<void> {
+  try {
+    const res = await fetch("/api/weather");
+    if (res.ok) {
+      const data: WeatherStation[] = await res.json();
+      // Update weather canvas overlay
+      updateWeatherData(data);
+      // Update station pillar heights and colors
+      for (const ws of data) {
+        if (ws.temp !== undefined) {
+          updateStationWeather(ws.id, ws.temp);
+        }
+      }
+    }
+  } catch {
+    // Weather data is optional
+  }
 }
 
 function handleSceneMessage(msg: WsMessage): void {
@@ -84,7 +151,6 @@ function handleSceneMessage(msg: WsMessage): void {
     }
 
     case "order:update": {
-      // Mark station as active when an order fills
       const station = findStationForTicker(msg.data.ticker);
       if (station && msg.data.filledQuantity > 0) {
         setStationState(station.id, "active");
@@ -99,7 +165,6 @@ function handleSceneMessage(msg: WsMessage): void {
           msg.data.realizedPnl !== undefined && msg.data.realizedPnl > 0;
         emitSettlement(station.position, win, 50);
         createSettlementRing(scene, station.position, win);
-        // Reset to idle after settlement animation
         setTimeout(() => setStationState(station.id, "idle"), 3000);
       }
       break;
@@ -123,11 +188,13 @@ function animate(): void {
   const delta = clock.getDelta();
 
   updateCamera(camera, delta);
+  updateMap(delta);
   updateStations(delta);
   updateParticles(delta);
   updateEffects(scene, delta);
+  updateWeatherLayer(delta);
 
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 // Handle resize
@@ -135,6 +202,7 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 init();
