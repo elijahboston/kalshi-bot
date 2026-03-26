@@ -17,12 +17,13 @@ mock.module("@kcb/config", () => ({
       exitCooldownTicks: 3,
       maxExposurePerTicker: 500,
       minBalanceFloor: 0,
+      tickIntervalSec: 120,
     },
   }),
 }));
 
 import { getDb, runMigrations, orders, positions } from "@kcb/db";
-import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking } from "./execution";
+import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
 import { bus } from "@kcb/engine";
 import { eq, sql } from "drizzle-orm";
 
@@ -37,6 +38,7 @@ const stubKalshi = {
 beforeEach(async () => {
   resetCooldowns();
   resetLossTracking();
+  resetRestoredFlag();
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -352,5 +354,79 @@ describe("loss-based re-entry guard", () => {
     // We can't easily fake time, but we can verify the expiry logic
     // by checking that getRecentLoss returns null for unknown tickers
     expect(getRecentLoss("UNKNOWN")).toBeNull();
+  });
+});
+
+describe("restoreAntiChurnState", () => {
+  test("rebuilds cooldown from recent sell orders in DB", async () => {
+    const db = getDb();
+    // Insert a sell order from 5 minutes ago
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "sell-recent",
+      ticker: "KXHIGHNY-26MAR26-T72",
+      action: "sell",
+      side: "no",
+      limitPrice: 25,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      dryRun: false,
+      createdAt: fiveMinAgo,
+      updatedAt: fiveMinAgo,
+    }).run();
+
+    await restoreAntiChurnState();
+
+    // Should have a cooldown for this ticker
+    const cd = getCooldown("KXHIGHNY-26MAR26-T72");
+    expect(cd).toBeGreaterThan(0);
+  });
+
+  test("rebuilds loss flag when sell price < buy price", async () => {
+    const db = getDb();
+    const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+
+    // Buy at 50, then sell at 30 (loss)
+    db.insert(orders).values({
+      orderId: "buy-loss",
+      ticker: "KXHIGHNY-26MAR26-T72",
+      action: "buy",
+      side: "no",
+      limitPrice: 50,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      dryRun: false,
+      createdAt: tenMinAgo,
+      updatedAt: tenMinAgo,
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-loss",
+      ticker: "KXHIGHNY-26MAR26-T72",
+      action: "sell",
+      side: "no",
+      limitPrice: 30,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      dryRun: false,
+      createdAt: fiveMinAgo,
+      updatedAt: fiveMinAgo,
+    }).run();
+
+    await restoreAntiChurnState();
+
+    const loss = getRecentLoss("KXHIGHNY-26MAR26-T72");
+    expect(loss).not.toBeNull();
+    expect(loss!.lossPct).toBeLessThan(0);
+  });
+
+  test("only runs once (idempotent)", async () => {
+    await restoreAntiChurnState();
+    // Second call should be a no-op
+    await restoreAntiChurnState();
+    // No error means success
   });
 });

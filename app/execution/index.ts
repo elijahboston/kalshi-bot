@@ -1,1 +1,1 @@
-export { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, holdTicker, isTickerHeld, getRecentLoss, resetLossTracking } from "./services/execution";
+export { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, holdTicker, isTickerHeld, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./services/execution";

@@ -9,7 +9,7 @@ import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService } from "@kcb/data";
 import { ProbabilityEstimator, getEffectiveThreshold } from "@kcb/signals";
 import type { EstimateResult } from "@kcb/signals";
-import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld } from "@kcb/execution";
+import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld, restoreAntiChurnState } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
 import { uuid, now, seriesCategory } from "@kcb/shared";
 
@@ -47,6 +47,9 @@ export async function initOrchestrator(): Promise<void> {
   startFeed(feed);
 
   registerTick(async () => {
+    // Restore anti-churn state from DB on first tick after restart
+    await restoreAntiChurnState();
+
     // Decrement post-exit cooldowns before evaluating new signals
     tickCooldowns();
 

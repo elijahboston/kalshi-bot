@@ -15,6 +15,83 @@ const holdUntilSettlement = new Set<string>();
 /** Track tickers where the last exit was a loss — requires higher edge to re-enter */
 const recentLossMap = new Map<string, { lossAt: number; lossPct: number }>();
 
+/** Whether we've rebuilt state from DB after a restart */
+let stateRestored = false;
+
+/**
+ * Rebuild cooldown and loss state from recent orders in the DB.
+ * Called on first tick after a process restart to survive watch-mode reloads.
+ */
+export async function restoreAntiChurnState(): Promise<void> {
+  if (stateRestored) return;
+  stateRestored = true;
+
+  const config = getConfig();
+  const db = getDb();
+  const cooldownWindowMs = config.bot.exitCooldownTicks * config.bot.tickIntervalSec * 1000;
+  const cooldownCutoff = new Date(Date.now() - cooldownWindowMs).toISOString();
+  const lossCutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString(); // 2h
+
+  // Find recent sell orders (exits) to rebuild cooldowns
+  const recentSells = await db
+    .select()
+    .from(orders)
+    .where(
+      and(
+        eq(orders.action, "sell"),
+        eq(orders.status, "filled"),
+        sql`${orders.createdAt} > ${cooldownCutoff}`
+      )
+    );
+
+  for (const sell of recentSells) {
+    const elapsedMs = Date.now() - new Date(sell.createdAt).getTime();
+    const elapsedTicks = Math.floor(elapsedMs / (config.bot.tickIntervalSec * 1000));
+    const remainingTicks = config.bot.exitCooldownTicks - elapsedTicks;
+
+    if (remainingTicks > 0) {
+      cooldownMap.set(sell.ticker, remainingTicks);
+    }
+
+    // Check if this sell was a losing exit (sold for less than avg entry)
+    if (sell.createdAt > lossCutoff) {
+      // Find the most recent buy for this ticker before this sell
+      const [lastBuy] = await db
+        .select()
+        .from(orders)
+        .where(
+          and(
+            eq(orders.ticker, sell.ticker),
+            eq(orders.action, "buy"),
+            eq(orders.status, "filled"),
+            sql`${orders.createdAt} < ${sell.createdAt}`
+          )
+        )
+        .orderBy(sql`${orders.createdAt} DESC`)
+        .limit(1);
+
+      if (lastBuy && sell.limitPrice < lastBuy.limitPrice) {
+        const lossPct = (sell.limitPrice - lastBuy.limitPrice) / lastBuy.limitPrice;
+        recentLossMap.set(sell.ticker, {
+          lossAt: new Date(sell.createdAt).getTime(),
+          lossPct,
+        });
+      }
+    }
+  }
+
+  const cooldowns = [...cooldownMap.entries()].map(([t, r]) => `${t}:${r}`);
+  const losses = [...recentLossMap.keys()];
+  if (cooldowns.length > 0 || losses.length > 0) {
+    log.info(
+      `Restored anti-churn state: ${cooldowns.length} cooldown(s)` +
+      (cooldowns.length > 0 ? ` [${cooldowns.join(", ")}]` : "") +
+      `, ${losses.length} loss flag(s)` +
+      (losses.length > 0 ? ` [${losses.join(", ")}]` : "")
+    );
+  }
+}
+
 /** Record that a ticker was just exited; starts its cooldown timer. */
 export function recordExit(ticker: string, wasLoss?: boolean, lossPct?: number): void {
   const config = getConfig();
@@ -70,6 +147,11 @@ export function getCooldown(ticker: string): number {
 /** Reset all cooldowns (for testing). */
 export function resetCooldowns(): void {
   cooldownMap.clear();
+}
+
+/** Reset restored flag (for testing). */
+export function resetRestoredFlag(): void {
+  stateRestored = false;
 }
 
 export class ExecutionService {
