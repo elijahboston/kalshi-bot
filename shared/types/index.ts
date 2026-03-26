@@ -9,16 +9,24 @@ export type MarketCategory =
 
 /** Kalshi market series prefixes for climate */
 export const CLIMATE_SERIES_PREFIXES = [
-  "KXHIGH",   // Daily high temperature
-  "KXLOW",    // Daily low temperature
-  "KXRAIN",   // Daily precipitation
-  "KXSNOW",   // Daily snowfall
+  "KXHIGH",    // Daily high temperature
+  "KXLOW",     // Daily low temperature
+  "KXRAIN",    // Daily precipitation / monthly rain day count
+  "KXSNOW",    // Daily snowfall
 ] as const;
+
+/**
+ * Some Kalshi series append M to the city suffix for monthly markets.
+ * e.g. rain series for Chicago = KXRAINCHIM (not KXRAINCHI).
+ * This map defines which prefixes use the M-suffixed city codes.
+ */
+const MONTHLY_SERIES_PREFIXES = new Set(["KXRAIN"]);
 
 /** Map series prefix to category */
 export function seriesCategory(seriesTicker: string): MarketCategory {
   if (seriesTicker.startsWith("KXHIGH")) return "high_temp";
   if (seriesTicker.startsWith("KXLOW")) return "low_temp";
+  if (seriesTicker.startsWith("KXRAINM")) return "precip";
   if (seriesTicker.startsWith("KXRAIN")) return "precip";
   if (seriesTicker.startsWith("KXSNOW")) return "snowfall";
   return "high_temp"; // fallback
@@ -40,17 +48,26 @@ const SUFFIX_TO_ICAO: Record<string, string> = {
   SFO: "KSFO",
   MIA: "KMIA",
   AUS: "KAUS",
+  // Monthly rain series use city+M suffix (e.g. CHIM, LAXM)
+  CHIM: "KORD",
+  LAXM: "KLAX",
+  MIAM: "KMIA",
+  DENM: "KDEN",
+  AUSM: "KAUS",
+  NYM: "KNYC",
 };
 
-/** Reverse map: ICAO station code → series suffix */
+/** Reverse map: ICAO station code → base series suffix (excludes M variants) */
 const ICAO_TO_SUFFIX: Record<string, string> = Object.fromEntries(
-  Object.entries(SUFFIX_TO_ICAO).map(([suffix, icao]) => [icao, suffix])
+  Object.entries(SUFFIX_TO_ICAO)
+    .filter(([suffix]) => !suffix.endsWith("M"))
+    .map(([suffix, icao]) => [icao, suffix])
 );
 
 /** Extract station ID from a series ticker like KXHIGHNY → KNYC */
 export function extractStationFromSeries(seriesTicker: string): string | null {
-  // Convention: KXHIGH + station code suffix
-  // KXHIGHNY → NY → KNYC, KXHIGHORD → ORD → KORD, etc.
+  // Convention: KX{PREFIX}{SUFFIX} where suffix maps to ICAO
+  // KXHIGHNY → NY → KNYC, KXRAINCHIM → CHIM → KORD, etc.
   const match = seriesTicker.match(/^KX(?:HIGH|LOW|RAIN|SNOW)(.+?)(?:-|$)/);
   if (!match?.[1]) return null;
   return SUFFIX_TO_ICAO[match[1]] || null;
@@ -70,6 +87,10 @@ export function buildSeriesTickers(
       const suffix = ICAO_TO_SUFFIX[icao];
       if (suffix) {
         tickers.push(`${prefix}${suffix}`);
+        // Also emit monthly variant (e.g. KXRAINCHIM) for prefixes that use it
+        if (MONTHLY_SERIES_PREFIXES.has(prefix)) {
+          tickers.push(`${prefix}${suffix}M`);
+        }
       }
     }
   }

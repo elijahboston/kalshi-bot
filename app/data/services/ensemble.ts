@@ -144,7 +144,7 @@ export class EnsembleService {
       `https://ensemble-api.open-meteo.com/v1/ensemble` +
       `?latitude=${coords.lat}&longitude=${coords.lon}` +
       `&daily=${variable}` +
-      `&models=gfs_seamless,icon_seamless,ecmwf_ifs025` +
+      `&models=gfs_seamless,icon_seamless,ecmwf_ifs025,arpege_seamless,gem_seamless` +
       `&forecast_days=7` +
       `&temperature_unit=celsius` +
       `&precipitation_unit=mm`;

@@ -161,7 +161,7 @@ export function loadConfig(): BotConfig {
         : [],
       enabledStations: env("ENABLED_STATIONS")
         ? env("ENABLED_STATIONS").split(",")
-        : ["KNYC", "KORD", "KLAX", "KDFW", "KIAH"],
+        : ["KNYC", "KORD", "KLAX", "KMIA", "KDEN", "KAUS"],
       exitEdgeThreshold: envNum("EXIT_EDGE_THRESHOLD", 0.03),
       stopLossPct: envNum("STOP_LOSS_PCT", 0.25),
       exitTimeDaysBeforeClose: envNum("EXIT_TIME_DAYS_BEFORE_CLOSE", 0.25),

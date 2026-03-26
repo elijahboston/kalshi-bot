@@ -83,6 +83,32 @@ describe("buildSeriesTickers", () => {
     expect(buildSeriesTickers([], ["KNYC"])).toEqual([]);
     expect(buildSeriesTickers(["KXHIGH"], [])).toEqual([]);
   });
+
+  test("emits monthly variants for KXRAIN prefix", () => {
+    const result = buildSeriesTickers(["KXRAIN"], ["KORD"]);
+    expect(result).toContain("KXRAINCHI");
+    expect(result).toContain("KXRAINCHIM");
+  });
+
+  test("does not emit monthly variants for KXHIGH", () => {
+    const result = buildSeriesTickers(["KXHIGH"], ["KORD"]);
+    expect(result).toEqual(["KXHIGHCHI"]);
+    expect(result).not.toContain("KXHIGHCHIM");
+  });
+});
+
+describe("extractStationFromSeries — monthly rain", () => {
+  test("extracts CHIM → KORD from monthly rain ticker", () => {
+    expect(extractStationFromSeries("KXRAINCHIM")).toBe("KORD");
+  });
+
+  test("extracts LAXM → KLAX from monthly rain ticker", () => {
+    expect(extractStationFromSeries("KXRAINLAXM")).toBe("KLAX");
+  });
+
+  test("maps monthly rain series to precip category", () => {
+    expect(seriesCategory("KXRAINCHIM")).toBe("precip");
+  });
 });
 
 describe("cToF", () => {
