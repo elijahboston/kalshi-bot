@@ -311,9 +311,17 @@ export async function initOrchestrator(): Promise<void> {
         }
 
         if (exitReason) {
+          // Determine if this exit is a loss for re-entry guard purposes
+          const currentSidePrice = side === "yes"
+            ? (market.lastYesPrice ?? 50)
+            : (market.lastNoPrice ?? 50);
+          const liveUnrealized = position.quantity * currentSidePrice - position.costBasis;
+          const lossPct = position.costBasis > 0 ? liveUnrealized / position.costBasis : 0;
+          const isLoss = liveUnrealized < 0;
+
           const exitOrderId = await executionService.executeExit(position, exitReason, market.lastYesPrice ?? 50);
           if (exitOrderId) {
-            recordExit(position.ticker);
+            recordExit(position.ticker, isLoss, lossPct);
           }
         }
       } catch (err) {

@@ -33,7 +33,7 @@ test("loadConfig returns correct trading defaults", () => {
 test("loadConfig returns correct anti-churn defaults", () => {
   const config = loadConfig();
   expect(config.bot.minContractPrice).toBe(15);
-  expect(config.bot.exitCooldownTicks).toBe(3);
+  expect(config.bot.exitCooldownTicks).toBe(15);
   expect(config.bot.maxExposurePerTicker).toBe(500);
   expect(config.bot.minBalanceFloor).toBe(5000);
 });

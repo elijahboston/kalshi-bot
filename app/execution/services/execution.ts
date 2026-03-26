@@ -12,10 +12,33 @@ const cooldownMap = new Map<string, number>();
 /** Tickers to hold until settlement — skip all exit evaluation */
 const holdUntilSettlement = new Set<string>();
 
+/** Track tickers where the last exit was a loss — requires higher edge to re-enter */
+const recentLossMap = new Map<string, { lossAt: number; lossPct: number }>();
+
 /** Record that a ticker was just exited; starts its cooldown timer. */
-export function recordExit(ticker: string): void {
+export function recordExit(ticker: string, wasLoss?: boolean, lossPct?: number): void {
   const config = getConfig();
   cooldownMap.set(ticker, config.bot.exitCooldownTicks);
+  if (wasLoss) {
+    recentLossMap.set(ticker, { lossAt: Date.now(), lossPct: lossPct ?? 0 });
+  }
+}
+
+/** Check if a ticker had a recent loss exit. Returns the loss info or null. */
+export function getRecentLoss(ticker: string): { lossAt: number; lossPct: number } | null {
+  const entry = recentLossMap.get(ticker);
+  if (!entry) return null;
+  // Expire after 2 hours
+  if (Date.now() - entry.lossAt > 2 * 60 * 60_000) {
+    recentLossMap.delete(ticker);
+    return null;
+  }
+  return entry;
+}
+
+/** Reset loss tracking (for testing). */
+export function resetLossTracking(): void {
+  recentLossMap.clear();
 }
 
 /** Mark a ticker to hold until settlement — no exits will be attempted. */
@@ -105,6 +128,22 @@ export class ExecutionService {
     if (remaining > 0) {
       log.info(`Skipping ${signal.ticker}: cooldown (${remaining} tick(s) remaining)`);
       return null;
+    }
+
+    // Loss-based re-entry guard: require 1.5x normal edge after a recent loss exit.
+    // This prevents the buy-exit-rebuy churn loop where the bot keeps re-entering
+    // a position that the market is moving against.
+    const recentLoss = getRecentLoss(signal.ticker);
+    if (recentLoss) {
+      const requiredEdge = signal.edgeThreshold * 1.5;
+      if (signal.edge < requiredEdge) {
+        log.info(
+          `Skipping ${signal.ticker}: recent loss exit, edge ${(signal.edge * 100).toFixed(1)}¢ < ` +
+          `elevated threshold ${(requiredEdge * 100).toFixed(1)}¢ (1.5x after loss)`
+        );
+        return null;
+      }
+      log.info(`${signal.ticker}: allowing re-entry after loss (edge ${(signal.edge * 100).toFixed(1)}¢ >= ${(requiredEdge * 100).toFixed(1)}¢)`);
     }
 
     // Kelly criterion sizing

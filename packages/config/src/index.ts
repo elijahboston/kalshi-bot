@@ -167,7 +167,7 @@ export function loadConfig(): BotConfig {
       exitTimeDaysBeforeClose: envNum("EXIT_TIME_DAYS_BEFORE_CLOSE", 0.25),
       exitTimeMinEdge: envNum("EXIT_TIME_MIN_EDGE", 0.08),
       minContractPrice: envNum("MIN_CONTRACT_PRICE", 15),
-      exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 3),
+      exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 15),
       maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 500),
       minBalanceFloor: envNum("MIN_BALANCE_FLOOR", 5000), // $50 default
       seedCapital: envNum("SEED_CAPITAL", 17556), // $175.56 current balance
