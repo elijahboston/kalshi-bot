@@ -667,7 +667,9 @@ export class ReconciliationService {
         const actualOutcome =
           s.market_result === "yes" || s.market_result === "all_yes" ? 1 : 0;
 
-        // Check if there are bot-attributable orders (signal_id IS NOT NULL)
+        // Check if there are bot-attributable orders (signal_id IS NOT NULL).
+        // Only bot orders count — manual trades imported by syncHistoricalOrders
+        // have signal_id = NULL and must NOT be counted as bot-traded.
         const botOrders = await db
           .select()
           .from(orders)
@@ -679,13 +681,7 @@ export class ReconciliationService {
             )
           );
 
-        // Also check trades table as fallback — trades may exist without
-        // corresponding orders (e.g. from earlier bot versions or imports)
-        const tickerTrades = botOrders.length === 0
-          ? await db.select().from(trades).where(eq(trades.ticker, s.ticker))
-          : [];
-
-        const traded = botOrders.length > 0 || tickerTrades.length > 0;
+        const traded = botOrders.length > 0;
 
         if (!traded) {
           // Still record for calibration but without PnL
@@ -709,26 +705,13 @@ export class ReconciliationService {
           continue;
         }
 
-        // Compute PnL: prefer bot orders (signal_id IS NOT NULL), fall back to trades
-        let realizedPnl: number;
-        if (botOrders.length > 0) {
-          realizedPnl = computePerSidePnl(botOrders, actualOutcome);
-        } else {
-          // Map trades to the format computePerSidePnl expects
-          const tradeRows = tickerTrades.map((t) => ({
-            action: t.action,
-            side: t.side,
-            limitPrice: t.price,
-            filledQuantity: t.quantity,
-          }));
-          realizedPnl = computePerSidePnl(tradeRows, actualOutcome);
-        }
+        // Compute PnL from bot-attributable orders only
+        const realizedPnl = computePerSidePnl(botOrders, actualOutcome);
 
-        // Compute market price from orders or trades
-        const allRows = botOrders.length > 0
-          ? botOrders.map((o) => ({ action: o.action, price: o.limitPrice, qty: o.filledQuantity }))
-          : tickerTrades.map((t) => ({ action: t.action, price: t.price, qty: t.quantity }));
-        const buys = allRows.filter((r) => r.action === "buy");
+        // Compute market price from bot orders
+        const buys = botOrders
+          .filter((o) => o.action === "buy")
+          .map((o) => ({ price: o.limitPrice, qty: o.filledQuantity }));
         const marketPrice = signal?.marketPrice
           ?? (buys.length > 0
             ? buys.reduce((s, r) => s + r.price * r.qty, 0) /
@@ -820,26 +803,12 @@ export class ReconciliationService {
           )
         );
 
-      const tickerTrades = botOrders.length === 0
-        ? await db.select().from(trades).where(eq(trades.ticker, market.ticker))
-        : [];
-
       let realizedPnl: number | null = null;
-      const traded = botOrders.length > 0 || tickerTrades.length > 0;
+      const traded = botOrders.length > 0;
 
       if (traded) {
         const outcome = market.result === "yes" ? 1 : 0;
-        if (botOrders.length > 0) {
-          realizedPnl = computePerSidePnl(botOrders, outcome);
-        } else {
-          const tradeRows = tickerTrades.map((t) => ({
-            action: t.action,
-            side: t.side,
-            limitPrice: t.price,
-            filledQuantity: t.quantity,
-          }));
-          realizedPnl = computePerSidePnl(tradeRows, outcome);
-        }
+        realizedPnl = computePerSidePnl(botOrders, outcome);
       }
 
       const actualOutcome = market.result === "yes" ? 1 : 0;
@@ -1093,14 +1062,14 @@ export class ReconciliationService {
     const db = getDb();
 
     // Find records that are either: traded=1 with pnl=0, or traded=0 but have trades
+    // Only repair traded records with zero PnL — bot orders may have been
+    // repaired (filledQuantity updated) after the calibration was created.
+    // Do NOT use trades table as fallback — it includes manual trades.
     const stale = await db
       .select()
       .from(calibration)
       .where(
-        sql`(${calibration.traded} = 1 AND ${calibration.realizedPnl} = 0)
-         OR (${calibration.traded} = 0 AND EXISTS (
-           SELECT 1 FROM trades WHERE trades.ticker = ${calibration.ticker}
-         ))`
+        sql`${calibration.traded} = 1 AND ${calibration.realizedPnl} = 0`
       );
 
     if (stale.length === 0) return;
@@ -1119,31 +1088,15 @@ export class ReconciliationService {
           )
         );
 
-      const tickerTrades = botOrders.length === 0
-        ? await db.select().from(trades).where(eq(trades.ticker, cal.ticker))
-        : [];
-
-      // Only recompute if there are filled orders or trades
-      const hasFilledQty = botOrders.some((o) => o.filledQuantity > 0) || tickerTrades.length > 0;
+      const hasFilledQty = botOrders.some((o) => o.filledQuantity > 0);
       if (!hasFilledQty) continue;
 
-      let pnl: number;
-      if (botOrders.length > 0) {
-        pnl = computePerSidePnl(botOrders, cal.actualOutcome);
-      } else {
-        const tradeRows = tickerTrades.map((t) => ({
-          action: t.action,
-          side: t.side,
-          limitPrice: t.price,
-          filledQuantity: t.quantity,
-        }));
-        pnl = computePerSidePnl(tradeRows, cal.actualOutcome);
-      }
-      if (pnl === 0 && cal.traded) continue; // Still zero after recompute — nothing to repair
+      const pnl = computePerSidePnl(botOrders, cal.actualOutcome);
+      if (pnl === 0) continue;
 
       await db
         .update(calibration)
-        .set({ realizedPnl: pnl, traded: true })
+        .set({ realizedPnl: pnl })
         .where(eq(calibration.id, cal.id));
       repaired++;
     }
