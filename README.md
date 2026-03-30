@@ -85,6 +85,35 @@ The bot improves automatically via:
 3. **Calibration scoring** — tracks Brier score and bucket-level accuracy continuously
 4. **Manual retrain** — `calibration retrain` forces full recalibration from history
 
+## Automated Log Review
+
+A macOS LaunchAgent runs Claude Code daily at 6:03am to review the last 24 hours of bot logs, identify issues, and auto-fix them.
+
+**What it does:**
+1. Reads `logs/bot.log` (and rotated files) for errors, warnings, and anomalous patterns
+2. Traces issues back to source code and diagnoses root causes
+3. Implements fixes with tests, runs `bun test`, and commits+pushes if everything passes
+4. Does nothing if logs are clean — not every run produces a commit
+
+**LaunchAgent location:** `~/Library/LaunchAgents/com.climatebot.log-review.plist`
+
+**Review output:** `logs/log-review-stdout.log` and `logs/log-review-stderr.log`
+
+**Commands:**
+```bash
+# Test it now
+launchctl kickstart gui/$(id -u)/com.climatebot.log-review
+
+# Check status
+launchctl print gui/$(id -u)/com.climatebot.log-review
+
+# Stop it
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.climatebot.log-review.plist
+
+# Restart it
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.climatebot.log-review.plist
+```
+
 ## Packages
 
 | Package | Description |
