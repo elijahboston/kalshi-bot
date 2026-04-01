@@ -190,4 +190,31 @@ describe("KalshiClient.request() retry logic", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("retries on 401 header_timestamp_expired and succeeds", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: { code: "header_timestamp_expired", message: "header timestamp expired" } }),
+          { status: 401 }
+        ));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ balance: 200 }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      const result = await client.getBalance();
+      expect(result).toEqual({ balance: 200 });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

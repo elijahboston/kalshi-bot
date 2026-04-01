@@ -65,6 +65,17 @@ export class KalshiClient {
         return res.json() as T;
       }
 
+      // Retry transient timestamp-expired auth errors (clock skew)
+      if (res.status === 401 && attempt < MAX_RETRIES) {
+        const text = await res.text();
+        if (text.includes("header_timestamp_expired")) {
+          const delay = BASE_DELAY_MS * 2 ** attempt;
+          await Bun.sleep(delay);
+          continue;
+        }
+        throw new Error(`Kalshi ${method} ${path}: ${res.status} ${text}`);
+      }
+
       if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
         const retryAfter = res.headers.get("Retry-After");
         const delay = retryAfter
