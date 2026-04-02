@@ -50,7 +50,8 @@ export class ProbabilityEstimator {
     market: Market,
     ensembleValues: number[]
   ): Promise<EstimateResult> {
-    if (!market.stationId || market.bracketLow == null || market.bracketHigh == null) {
+    const isTail = market.marketType === "upper_tail" || market.marketType === "lower_tail";
+    if (!market.stationId || market.bracketLow == null || (!isTail && market.bracketHigh == null)) {
       throw new Error(`Market ${market.ticker} missing station/bracket data`);
     }
 
@@ -78,10 +79,20 @@ export class ProbabilityEstimator {
       correctedValues = correctedValues.map((v) => Math.max(0, v));
     }
 
-    // Step 3: Count members in bracket
-    const membersInBracket = correctedValues.filter(
-      (v) => v >= market.bracketLow! && v < market.bracketHigh!
-    ).length;
+    // Step 3: Count members matching this market's condition
+    let membersInBracket: number;
+    if (market.marketType === "upper_tail") {
+      // YES = temp > threshold
+      membersInBracket = correctedValues.filter((v) => v > market.bracketLow!).length;
+    } else if (market.marketType === "lower_tail") {
+      // YES = temp < threshold
+      membersInBracket = correctedValues.filter((v) => v < market.bracketLow!).length;
+    } else {
+      // Standard bracket: bracketLow <= temp < bracketHigh
+      membersInBracket = correctedValues.filter(
+        (v) => v >= market.bracketLow! && v < market.bracketHigh!
+      ).length;
+    }
 
     const rawMean = mean(ensembleValues);
     const rawStd = std(ensembleValues);
@@ -99,6 +110,12 @@ export class ProbabilityEstimator {
     } else if (corrStd === 0) {
       // Zero spread — CDF is undefined, fall back to counting
       cdfProb = countingProb;
+    } else if (market.marketType === "upper_tail") {
+      // P(temp > threshold) = 1 - CDF(threshold)
+      cdfProb = 1 - normalCdf(market.bracketLow!, corrMean, corrStd);
+    } else if (market.marketType === "lower_tail") {
+      // P(temp < threshold) = CDF(threshold)
+      cdfProb = normalCdf(market.bracketLow!, corrMean, corrStd);
     } else {
       cdfProb =
         normalCdf(market.bracketHigh!, corrMean, corrStd) -
@@ -133,7 +150,7 @@ export class ProbabilityEstimator {
       targetDate: market.targetDate || "unknown",
       forecastHorizon,
       bracketLow: market.bracketLow,
-      bracketHigh: market.bracketHigh,
+      bracketHigh: market.bracketHigh ?? market.bracketLow!, // Tails use threshold as both
       rawEnsembleStats: { mean: rawMean, std: rawStd, count: ensembleValues.length },
       biasCorrection: biasCorrection
         ? { meanBias: biasCorrection.meanBias, sampleSize: biasCorrection.sampleSize }

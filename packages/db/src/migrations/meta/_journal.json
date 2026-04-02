@@ -15,6 +15,13 @@
       "when": 1774310400000,
       "tag": "0001_add_bias_category",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1775000000000,
+      "tag": "0002_add_market_type",
+      "breakpoints": true
     }
   ]
 }

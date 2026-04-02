@@ -9,6 +9,7 @@ describe("parseTicker", () => {
       eventTicker: "KXHIGHNY-25FEB19",
       targetDate: "2025-02-19",
       bracketLow: 37,
+      isThreshold: false,
       stationId: "KNYC",
       category: "high_temp",
     });
@@ -21,6 +22,7 @@ describe("parseTicker", () => {
       eventTicker: "KXLOWCHI-25MAR05",
       targetDate: "2025-03-05",
       bracketLow: 20,
+      isThreshold: false,
       stationId: "KORD",
       category: "low_temp",
     });
@@ -33,6 +35,7 @@ describe("parseTicker", () => {
       eventTicker: "KXRAINMIA-25JUN15",
       targetDate: "2025-06-15",
       bracketLow: 1,
+      isThreshold: false,
       stationId: "KMIA",
       category: "precip",
     });
@@ -45,6 +48,7 @@ describe("parseTicker", () => {
       eventTicker: "KXSNOWPHL-25DEC25",
       targetDate: "2025-12-25",
       bracketLow: 5,
+      isThreshold: false,
       stationId: "KPHL",
       category: "snowfall",
     });
@@ -54,12 +58,14 @@ describe("parseTicker", () => {
     const result = parseTicker("KXHIGHNY-25FEB19-B51.5");
     expect(result).not.toBeNull();
     expect(result!.bracketLow).toBe(51.5);
+    expect(result!.isThreshold).toBe(false);
   });
 
-  test("parses top-of-bracket (T57)", () => {
+  test("parses threshold ticker (T57)", () => {
     const result = parseTicker("KXHIGHNY-25FEB19-T57");
     expect(result).not.toBeNull();
     expect(result!.bracketLow).toBe(57);
+    expect(result!.isThreshold).toBe(true);
   });
 
   test("returns null for fewer than 3 parts", () => {

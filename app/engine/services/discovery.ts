@@ -38,9 +38,10 @@ export function parseTicker(ticker: string) {
 
   const targetDate = `${year}-${month}-${day}`;
 
-  // Parse bracket: B37, B51.5, T57, etc.
-  const bracketMatch = bracketStr.match(/^[BT]([\d.]+)$/);
-  const bracketLow = bracketMatch ? Number(bracketMatch[1]) : null;
+  // Parse bracket: B37, B51.5 (bracket) or T57 (threshold/tail)
+  const bracketMatch = bracketStr.match(/^([BT])([\d.]+)$/);
+  const bracketLow = bracketMatch ? Number(bracketMatch[2]) : null;
+  const isThreshold = bracketMatch?.[1] === "T";
 
   const stationId = extractStationFromSeries(seriesTicker);
   const category = seriesCategory(seriesTicker);
@@ -50,6 +51,7 @@ export function parseTicker(ticker: string) {
     eventTicker: `${seriesTicker}-${dateStr}`,
     targetDate,
     bracketLow,
+    isThreshold,
     stationId,
     category,
   };
@@ -152,6 +154,22 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
           })
           .where(eq(markets.ticker, km.ticker));
       } else {
+        // Determine market type and bracket bounds
+        let marketType: "bracket" | "upper_tail" | "lower_tail" = "bracket";
+        let bracketHigh = parsed.bracketLow != null ? parsed.bracketLow + 1 : null;
+
+        if (parsed.isThreshold) {
+          // Threshold markets are tails — parse direction from title
+          // ">X°" = upper_tail (YES = temp > X), "<X°" = lower_tail (YES = temp < X)
+          if (km.title.includes(">")) {
+            marketType = "upper_tail";
+            bracketHigh = null; // No upper bound for upper tail
+          } else if (km.title.includes("<")) {
+            marketType = "lower_tail";
+            bracketHigh = null; // bracketLow is the threshold, no meaningful bracketHigh
+          }
+        }
+
         // Insert new market
         await db.insert(markets).values({
           ticker: km.ticker,
@@ -162,7 +180,8 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
           stationId: parsed.stationId,
           targetDate: parsed.targetDate,
           bracketLow: parsed.bracketLow,
-          bracketHigh: parsed.bracketLow != null ? parsed.bracketLow + 1 : null,
+          bracketHigh,
+          marketType,
           status: km.status,
           closeTime: km.close_time,
           lastYesPrice: yesPrice,

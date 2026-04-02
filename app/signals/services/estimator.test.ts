@@ -229,6 +229,118 @@ describe("getHistoricalHitRate", () => {
   });
 });
 
+function makeUpperTailMarket(overrides: Partial<any> = {}) {
+  return {
+    ticker: "KXHIGHNY-26APR01-T79",
+    stationId: "KNYC",
+    category: "high_temp",
+    bracketLow: 79,
+    bracketHigh: null,
+    marketType: "upper_tail",
+    targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    ...overrides,
+  } as any;
+}
+
+function makeLowerTailMarket(overrides: Partial<any> = {}) {
+  return {
+    ticker: "KXHIGHNY-26MAR17-T56",
+    stationId: "KNYC",
+    category: "high_temp",
+    bracketLow: 56,
+    bracketHigh: null,
+    marketType: "lower_tail",
+    targetDate: new Date(Date.now() + 86400_000).toISOString().slice(0, 10),
+    ...overrides,
+  } as any;
+}
+
+describe("ProbabilityEstimator — threshold (tail) markets", () => {
+  test("upper_tail: P(temp > threshold) via CDF", async () => {
+    const estimator = new ProbabilityEstimator();
+    // mean=80, std≈2 → P(temp > 79) should be around 0.69
+    const ensemble = [77, 78, 79, 79, 80, 80, 80, 81, 82, 83];
+
+    const result = await estimator.estimate(makeUpperTailMarket(), ensemble);
+
+    // Counting: 6/10 members > 79
+    expect(result.reasoning.membersInBracket).toBe(6);
+    expect(result.reasoning.countingProbability).toBe(0.6);
+    // CDF: P(temp > 79) = 1 - normalCdf(79, mean, std)
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.4);
+    expect(result.reasoning.cdfProbability).toBeLessThan(0.9);
+    expect(result.probability).toBeGreaterThan(0.4);
+  });
+
+  test("lower_tail: P(temp < threshold) via CDF", async () => {
+    const estimator = new ProbabilityEstimator();
+    // mean=59, std≈2.3 → P(temp < 56) should be ~10%
+    // This is the T56 scenario that caused the $460 loss
+    const ensemble = [55, 57, 58, 58, 59, 59, 60, 60, 61, 63];
+
+    const result = await estimator.estimate(makeLowerTailMarket(), ensemble);
+
+    // Counting: 1/10 members < 56
+    expect(result.reasoning.membersInBracket).toBe(1);
+    expect(result.reasoning.countingProbability).toBe(0.1);
+    // CDF: P(temp < 56) = normalCdf(56, mean, std)
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.02);
+    expect(result.reasoning.cdfProbability).toBeLessThan(0.3);
+  });
+
+  test("upper_tail: ensemble well below threshold → near 0", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [60, 61, 62, 63, 64];
+
+    const result = await estimator.estimate(makeUpperTailMarket(), ensemble);
+
+    // All members below 79 → P(temp > 79) ≈ 0
+    expect(result.reasoning.countingProbability).toBe(0);
+    expect(result.probability).toBeCloseTo(0, 2);
+  });
+
+  test("lower_tail: ensemble well above threshold → near 0", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [70, 71, 72, 73, 74];
+
+    const result = await estimator.estimate(makeLowerTailMarket(), ensemble);
+
+    // All members above 56 → P(temp < 56) ≈ 0
+    expect(result.reasoning.countingProbability).toBe(0);
+    expect(result.probability).toBeCloseTo(0, 2);
+  });
+
+  test("upper_tail: ensemble well above threshold → near 1", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [85, 86, 87, 88, 89];
+
+    const result = await estimator.estimate(makeUpperTailMarket(), ensemble);
+
+    // All members above 79 → P(temp > 79) ≈ 1
+    expect(result.reasoning.countingProbability).toBe(1);
+    expect(result.probability).toBeCloseTo(1, 2);
+  });
+
+  test("tail market does not require bracketHigh", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeUpperTailMarket({ bracketHigh: null });
+    const ensemble = [77, 78, 79, 80, 81];
+
+    // Should not throw despite bracketHigh being null
+    const result = await estimator.estimate(market, ensemble);
+    expect(result.probability).toBeGreaterThan(0);
+  });
+
+  test("bracket market still requires bracketHigh", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeMarket();
+    market.bracketHigh = null;
+    market.marketType = "bracket";
+
+    expect(estimator.estimate(market, [1, 2, 3])).rejects.toThrow("missing station/bracket data");
+  });
+});
+
 function makePrecipMarket(overrides: Partial<any> = {}) {
   return {
     ticker: "KXRAINNY-26MAR21-T0.1",

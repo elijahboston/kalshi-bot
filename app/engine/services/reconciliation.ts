@@ -531,8 +531,22 @@ export class ReconciliationService {
         const parsed = parseOrderFields(ko);
 
         if (existing.length > 0) {
-          // Repair orders stuck with filledQuantity=0 despite being executed
+          // Repair signalId if missing — cross-reference signals table
           const ex = existing[0]!;
+          if (!ex.signalId) {
+            const [matchedSignal] = await db
+              .select({ id: signals.id })
+              .from(signals)
+              .where(and(eq(signals.orderId, ko.order_id), eq(signals.acted, true)))
+              .limit(1);
+            if (matchedSignal) {
+              await db
+                .update(orders)
+                .set({ signalId: matchedSignal.id, updatedAt: now() })
+                .where(eq(orders.orderId, ko.order_id));
+            }
+          }
+          // Repair orders stuck with filledQuantity=0 despite being executed
           if (ex.filledQuantity === 0 && ko.status === "executed") {
             const filled = parsed.fillCount || parsed.initialCount;
             if (filled > 0) {
@@ -592,6 +606,13 @@ export class ReconciliationService {
           continue;
         }
 
+        // Cross-reference signals table to recover signalId for bot orders
+        const [matchedSignal] = await db
+          .select({ id: signals.id })
+          .from(signals)
+          .where(and(eq(signals.orderId, ko.order_id), eq(signals.acted, true)))
+          .limit(1);
+
         await db.insert(orders).values({
           orderId: ko.order_id,
           ticker: ko.ticker,
@@ -602,6 +623,7 @@ export class ReconciliationService {
           filledQuantity: filled,
           status,
           dryRun: false,
+          signalId: matchedSignal?.id ?? null,
           createdAt: timestamp,
           updatedAt: timestamp,
         });
@@ -648,7 +670,15 @@ export class ReconciliationService {
           .where(eq(calibration.ticker, s.ticker))
           .limit(1);
 
-        if (existing.length > 0) continue;
+        if (existing.length > 0) {
+          // Even if calibration exists, backfill market result if missing
+          const [mkt] = await db.select().from(markets).where(eq(markets.ticker, s.ticker)).limit(1);
+          if (mkt && !mkt.result) {
+            const res = s.market_result === "all_yes" ? "yes" : s.market_result === "all_no" ? "no" : s.market_result;
+            await db.update(markets).set({ result: res, status: "finalized", updatedAt: now() }).where(eq(markets.ticker, s.ticker));
+          }
+          continue;
+        }
 
         // Look up market for metadata
         const [market] = await db
@@ -656,6 +686,12 @@ export class ReconciliationService {
           .from(markets)
           .where(eq(markets.ticker, s.ticker))
           .limit(1);
+
+        // Backfill market result if missing
+        if (market && !market.result) {
+          const res = s.market_result === "all_yes" ? "yes" : s.market_result === "all_no" ? "no" : s.market_result;
+          await db.update(markets).set({ result: res, status: "finalized", updatedAt: now() }).where(eq(markets.ticker, s.ticker));
+        }
 
         // Look up signal if the bot generated one
         const [signal] = await db
@@ -744,6 +780,12 @@ export class ReconciliationService {
           calibrationError: Math.abs(predictedProb - actualOutcome),
           brierScore: (predictedProb - actualOutcome) ** 2,
         });
+
+        // Backfill actual observed value and recompute station bias
+        if (market?.targetDate && market?.stationId) {
+          await this.backfillActualValue(market);
+          await this.recomputeStationBias(market.stationId);
+        }
 
         imported++;
       }

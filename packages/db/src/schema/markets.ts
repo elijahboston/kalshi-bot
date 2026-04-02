@@ -23,6 +23,8 @@ export const markets = sqliteTable("markets", {
   bracketLow: real("bracket_low"),
   /** Upper bound of the bracket (e.g., 37 for "36° to 37°") */
   bracketHigh: real("bracket_high"),
+  /** Market type: "bracket" (e.g. 36-37°), "upper_tail" (>X°), or "lower_tail" (<X°) */
+  marketType: text("market_type").notNull().default("bracket"),
   /** "open", "closed", "settled" */
   status: text("status").notNull().default("open"),
   /** Market close time (ISO 8601) */
