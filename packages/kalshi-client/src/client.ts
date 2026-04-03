@@ -52,17 +52,35 @@ export class KalshiClient {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const authHeaders = this.buildAuthHeaders(method, fullPath);
 
-      const res = await fetch(url.toString(), {
-        method,
-        headers: {
-          ...authHeaders,
-          "Content-Type": "application/json",
-        },
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      let res: Response;
+      try {
+        res = await fetch(url.toString(), {
+          method,
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        // Network errors (timeout, connection refused, DNS failure)
+        if (attempt < MAX_RETRIES) {
+          await Bun.sleep(BASE_DELAY_MS * 2 ** attempt);
+          continue;
+        }
+        throw err;
+      }
 
       if (res.ok) {
-        return res.json() as T;
+        try {
+          return (await res.json()) as T;
+        } catch {
+          if (attempt < MAX_RETRIES) {
+            await Bun.sleep(BASE_DELAY_MS * 2 ** attempt);
+            continue;
+          }
+          throw new Error(`Failed to parse JSON`);
+        }
       }
 
       // Retry transient timestamp-expired auth errors (clock skew)
@@ -76,7 +94,7 @@ export class KalshiClient {
         throw new Error(`Kalshi ${method} ${path}: ${res.status} ${text}`);
       }
 
-      if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+      if ((res.status === 429 || res.status === 503 || res.status === 504) && attempt < MAX_RETRIES) {
         const retryAfter = res.headers.get("Retry-After");
         const delay = retryAfter
           ? Number(retryAfter) * 1000
@@ -86,7 +104,7 @@ export class KalshiClient {
       }
 
       const text = await res.text();
-      if (res.status === 429 || res.status === 503) {
+      if (res.status === 429 || res.status === 503 || res.status === 504) {
         throw new Error(
           `Kalshi ${method} ${path}: ${res.status} after ${MAX_RETRIES} retries: ${text}`
         );

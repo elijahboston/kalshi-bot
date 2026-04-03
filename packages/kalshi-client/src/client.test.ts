@@ -191,6 +191,141 @@ describe("KalshiClient.request() retry logic", () => {
     }
   });
 
+  test("retries on 504 gateway timeout and succeeds", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: { code: "context_deadline_exceeded" } }),
+          { status: 504 }
+        ));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ balance: 400 }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      const result = await client.getBalance();
+      expect(result).toEqual({ balance: 400 });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("throws after exhausting retries on 504", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response("gateway timeout", { status: 504 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      await expect(client.getBalance()).rejects.toThrow("after 3 retries");
+      expect(fetchCalls).toBe(4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("retries on network error (timeout) and succeeds", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return Promise.reject(new Error("The operation timed out."));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ balance: 150 }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      const result = await client.getBalance();
+      expect(result).toEqual({ balance: 150 });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("throws after exhausting retries on network error", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      return Promise.reject(new Error("The operation timed out."));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      await expect(client.getBalance()).rejects.toThrow("timed out");
+      expect(fetchCalls).toBe(4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("retries on JSON parse error and succeeds", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return Promise.resolve(new Response("not json{{{", { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ balance: 250 }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      const result = await client.getBalance();
+      expect(result).toEqual({ balance: 250 });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("throws after exhausting retries on JSON parse error", async () => {
+    const mockFetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response("not json{{{", { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    try {
+      const client = new KalshiClient({
+        apiKey: "test",
+        apiSecret: "test",
+        baseUrl: "https://api.test.kalshi.com/trade-api/v2",
+      });
+      await expect(client.getBalance()).rejects.toThrow("Failed to parse JSON");
+      expect(fetchCalls).toBe(4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("retries on 401 header_timestamp_expired and succeeds", async () => {
     const mockFetch = mock(() => {
       fetchCalls++;
