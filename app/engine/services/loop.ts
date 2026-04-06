@@ -22,6 +22,7 @@ let loopTimer: ReturnType<typeof setInterval> | null = null;
 /** The function that runs each tick. Injected by the orchestrator. */
 type TickFn = () => Promise<void>;
 let tickFn: TickFn | null = null;
+let ticking = false;
 
 export function registerTick(fn: TickFn): void {
   tickFn = fn;
@@ -29,6 +30,11 @@ export function registerTick(fn: TickFn): void {
 
 async function runTick(): Promise<void> {
   if (!state.running || !tickFn) return;
+  if (ticking) {
+    log.debug("Skipping tick — previous tick still running");
+    return;
+  }
+  ticking = true;
 
   const tickStart = Bun.nanoseconds();
   state.tickCount++;
@@ -51,6 +57,8 @@ async function runTick(): Promise<void> {
       message: err instanceof Error ? err.message : String(err),
       error: err,
     });
+  } finally {
+    ticking = false;
   }
 
   const elapsedMs = (Bun.nanoseconds() - tickStart) / 1_000_000;
@@ -101,4 +109,12 @@ export function stopLoop(): void {
 
 export function getLoopState(): LoopState {
   return { ...state };
+}
+
+/** @internal — reset module state for tests */
+export function _resetForTesting(): void {
+  stopLoop();
+  ticking = false;
+  tickFn = null;
+  state = { running: false, tickCount: 0, startedAt: 0, lastTickAt: "" };
 }
