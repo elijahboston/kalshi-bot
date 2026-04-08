@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bus } from "../events";
+import { bus, createLogger } from "../events";
 import { startLogWriter } from "./log-writer";
 
 const TEST_DIR = join(import.meta.dir, "__test_logs__");
@@ -181,6 +181,21 @@ describe("startLogWriter", () => {
     expect(readFileSync(TEST_LOG + ".3", "utf-8")).toBe("backup-2\n");
     // No .4 should exist
     expect(existsSync(TEST_LOG + ".4")).toBe(false);
+  });
+
+  test("serializes Error objects via createLogger", () => {
+    const unsub = startLogWriter({ logPath: TEST_LOG });
+    const log = createLogger("test");
+
+    log.error("something broke", new Error("connection refused"));
+
+    unsub();
+
+    const content = readFileSync(TEST_LOG, "utf-8");
+    const entry = JSON.parse(content.trim());
+    expect(entry.data.message).toBe("connection refused");
+    expect(entry.data.name).toBe("Error");
+    expect(typeof entry.data.stack).toBe("string");
   });
 
   test("writes valid JSON on each line", () => {

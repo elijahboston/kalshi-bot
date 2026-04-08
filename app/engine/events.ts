@@ -145,7 +145,9 @@ export function createLogger(module: string) {
       level,
       module,
       message,
-      data,
+      data: data instanceof Error
+        ? { message: data.message, stack: data.stack, name: data.name }
+        : data,
       timestamp: new Date().toISOString(),
     };
     bus.emit("log", entry);
