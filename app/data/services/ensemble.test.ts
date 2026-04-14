@@ -438,6 +438,228 @@ describe("EnsembleService", () => {
     });
   });
 
+  describe("fetchHrrr", () => {
+    test("fetches HRRR hourly data and extracts daily max for high_temp", async () => {
+      const service = new EnsembleService();
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("hrrr_conus")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            hourly: {
+              time: [
+                "2026-02-23T06:00", "2026-02-23T12:00", "2026-02-23T18:00",
+                "2026-02-24T06:00",
+              ],
+              temperature_2m: [10, 20, 25, 15], // Celsius
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.fetchHrrr("KNYC", "2026-02-23", "high_temp");
+
+      expect(values).toHaveLength(1);
+      // Max of [10, 20, 25] (Feb 23 only) = 25°C = 77°F
+      expect(values[0]).toBe(77);
+
+      globalThis.fetch = originalFetch;
+    });
+
+    test("fetches HRRR min for low_temp", async () => {
+      const service = new EnsembleService();
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("hrrr_conus")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            hourly: {
+              time: [
+                "2026-02-23T06:00", "2026-02-23T12:00", "2026-02-23T18:00",
+              ],
+              temperature_2m: [5, 10, 15],
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.fetchHrrr("KNYC", "2026-02-23", "low_temp");
+
+      expect(values).toHaveLength(1);
+      // Min of [5, 10, 15] = 5°C = 41°F
+      expect(values[0]).toBe(41);
+
+      globalThis.fetch = originalFetch;
+    });
+
+    test("sums hourly precip for daily total", async () => {
+      const service = new EnsembleService();
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("hrrr_conus")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            hourly: {
+              time: ["2026-02-23T06:00", "2026-02-23T12:00", "2026-02-23T18:00"],
+              precipitation: [5.08, 7.62, 12.7], // mm
+            },
+          }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.fetchHrrr("KNYC", "2026-02-23", "precip");
+
+      expect(values).toHaveLength(1);
+      // Sum = 25.4mm = 1.0 inch
+      expect(values[0]).toBeCloseTo(1.0, 5);
+
+      globalThis.fetch = originalFetch;
+    });
+
+    test("returns empty for unknown station", async () => {
+      const service = new EnsembleService();
+      const values = await service.fetchHrrr("KXYZ", "2026-02-23", "high_temp");
+      expect(values).toHaveLength(0);
+    });
+
+    test("returns empty when target date not in hourly data", async () => {
+      const service = new EnsembleService();
+
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({
+          hourly: {
+            time: ["2026-02-24T06:00"],
+            temperature_2m: [20],
+          },
+        }), { status: 200 }))
+      ) as any;
+
+      const values = await service.fetchHrrr("KNYC", "2026-02-23", "high_temp");
+      expect(values).toHaveLength(0);
+
+      globalThis.fetch = originalFetch;
+    });
+  });
+
+  describe("blendMembers", () => {
+    test("heavily weights HRRR at short horizons", () => {
+      const service = new EnsembleService();
+      const tagged = [
+        { value: 70, model: "gfs" },
+        { value: 71, model: "gfs" },
+        { value: 72, model: "ecmwf" },
+        { value: 73, model: "ecmwf" },
+      ];
+      const hrrr = [75];
+
+      const blended = service.blendMembers(tagged, hrrr, 3); // 3h horizon → "0-6" bucket
+
+      // HRRR should dominate: 70% weight vs 30% for others
+      const hrrrCount = blended.filter(v => v === 75).length;
+      const totalCount = blended.length;
+      expect(hrrrCount / totalCount).toBeGreaterThan(0.4); // HRRR is majority
+    });
+
+    test("zero HRRR weight at long horizons", () => {
+      const service = new EnsembleService();
+      const tagged = [
+        { value: 70, model: "gfs" },
+        { value: 72, model: "ecmwf" },
+      ];
+      const hrrr = [75];
+
+      const blended = service.blendMembers(tagged, hrrr, 100); // 100h → "72+" bucket
+
+      // HRRR weight is 0 at long horizons
+      const hrrrCount = blended.filter(v => v === 75).length;
+      expect(hrrrCount).toBe(0);
+    });
+
+    test("returns raw values when no weight info", () => {
+      const service = new EnsembleService();
+      const tagged = [{ value: 70, model: "gfs" }];
+      const hrrr = [75];
+
+      const blended = service.blendMembers(tagged, hrrr, 10); // 10h → "6-18"
+      expect(blended.length).toBeGreaterThan(1);
+      expect(blended).toContain(70);
+      expect(blended).toContain(75);
+    });
+  });
+
+  describe("applyBlending", () => {
+    test("adds HRRR duplicates to ensemble based on horizon", () => {
+      const service = new EnsembleService();
+      const ensemble = Array.from({ length: 30 }, () => 70);
+      const hrrr = [75];
+
+      const blended = service.applyBlending(ensemble, "ensemble", hrrr, 3); // 0-6h: 70% HRRR
+
+      // Should have more members than original
+      expect(blended.length).toBeGreaterThan(30);
+      // HRRR values should be present
+      expect(blended.filter(v => v === 75).length).toBeGreaterThan(0);
+    });
+
+    test("does not add HRRR at long horizons", () => {
+      const service = new EnsembleService();
+      const ensemble = [70, 71, 72];
+      const hrrr = [75];
+
+      const blended = service.applyBlending(ensemble, "ensemble", hrrr, 100); // 72+: 0% HRRR
+
+      expect(blended).toEqual([70, 71, 72]);
+    });
+
+    test("returns ensemble unchanged when no HRRR values", () => {
+      const service = new EnsembleService();
+      const ensemble = [70, 71, 72];
+
+      const blended = service.applyBlending(ensemble, "ensemble", [], 3);
+
+      expect(blended).toEqual(ensemble);
+    });
+  });
+
+  describe("getEnsembleValues with HRRR integration", () => {
+    test("fetches HRRR when horizon < 48h", async () => {
+      const service = new EnsembleService();
+      let hrrrCalled = false;
+
+      globalThis.fetch = mock((url: string) => {
+        if (url.includes("ensemble-api")) {
+          const daily: Record<string, any> = {
+            time: ["2026-02-23"],
+            temperature_2m_max_member01_ncep_gefs_seamless: [20],
+            temperature_2m_max_member02_ecmwf_ifs025: [21],
+          };
+          return Promise.resolve(new Response(JSON.stringify({ daily }), { status: 200 }));
+        }
+        if (url.includes("hrrr_conus")) {
+          hrrrCalled = true;
+          return Promise.resolve(new Response(JSON.stringify({
+            hourly: {
+              time: ["2026-02-23T12:00"],
+              temperature_2m: [22],
+            },
+          }), { status: 200 }));
+        }
+        if (url.includes("tomorrow.io")) {
+          return Promise.resolve(new Response("", { status: 404 }));
+        }
+        return Promise.resolve(new Response("", { status: 500 }));
+      }) as any;
+
+      const values = await service.getEnsembleValues("KNYC", "2026-02-23", "high_temp", 10);
+
+      expect(hrrrCalled).toBe(true);
+      // Should have both ensemble and HRRR values (blended)
+      expect(values.length).toBeGreaterThan(2);
+
+      globalThis.fetch = originalFetch;
+    });
+  });
+
   describe("URL construction", () => {
     test("requests all three models in URL", async () => {
       const service = new EnsembleService();

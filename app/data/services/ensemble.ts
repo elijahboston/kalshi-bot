@@ -38,33 +38,92 @@ const CATEGORY_TO_TOMORROW: Record<string, string> = {
 };
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const HRRR_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (matches HRRR run frequency)
+
+/** Map market category to Open-Meteo hourly variable name (for HRRR) */
+const CATEGORY_TO_HOURLY: Record<string, string> = {
+  high_temp: "temperature_2m",
+  low_temp: "temperature_2m",
+  precip: "precipitation",
+  snowfall: "snowfall",
+};
+
+/**
+ * Model weight profiles by forecast horizon bucket.
+ * Keys are model group identifiers parsed from Open-Meteo member keys.
+ * Values are relative weights (will be normalized).
+ */
+const MODEL_WEIGHTS: Record<string, Record<string, number>> = {
+  // < 6h: HRRR dominates
+  "0-6": { hrrr: 70, gfs: 15, ecmwf: 15, icon: 0, gem: 0, arpege: 0, other: 0 },
+  // 6-18h: HRRR still strong, ensembles gain
+  "6-18": { hrrr: 40, gfs: 30, ecmwf: 30, icon: 0, gem: 0, arpege: 0, other: 0 },
+  // 18h-3d: ensemble models dominate
+  "18-72": { hrrr: 0, gfs: 35, ecmwf: 35, icon: 15, gem: 7, arpege: 8, other: 0 },
+  // 3d+: equal weights
+  "72+": { hrrr: 0, gfs: 20, ecmwf: 20, icon: 20, gem: 20, arpege: 20, other: 0 },
+};
+
+/** Classify an Open-Meteo member key to a model group */
+function classifyModel(memberKey: string): string {
+  const key = memberKey.toLowerCase();
+  if (key.includes("gfs") || key.includes("ncep") || key.includes("gefs")) return "gfs";
+  if (key.includes("ecmwf") || key.includes("ifs")) return "ecmwf";
+  if (key.includes("icon")) return "icon";
+  if (key.includes("gem")) return "gem";
+  if (key.includes("arpege")) return "arpege";
+  return "other";
+}
+
+/** Get the horizon bucket key for MODEL_WEIGHTS */
+function getHorizonBucket(horizonHours: number): string {
+  if (horizonHours < 6) return "0-6";
+  if (horizonHours < 18) return "6-18";
+  if (horizonHours < 72) return "18-72";
+  return "72+";
+}
 
 export class EnsembleService {
   /**
    * Get ensemble forecast values for a station/date/category.
    * Returns values in US units (F for temp, inches for precip/snow).
    * Checks DB cache first, falls back to Open-Meteo API.
+   *
+   * @param forecastHorizonHours Hours until market close. When provided,
+   *   enables HRRR ingestion (<48h) and horizon-weighted model blending.
    */
   async getEnsembleValues(
     stationId: string,
     targetDate: string,
-    category: MarketCategory
+    category: MarketCategory,
+    forecastHorizonHours?: number
   ): Promise<number[]> {
     const forecastType = category;
+    const horizonHours = forecastHorizonHours ?? this.estimateHorizonHours(targetDate);
 
-    // Check cache
+    // Check ensemble cache
     const cached = await this.getCached(stationId, targetDate, forecastType);
     if (cached) {
       log.debug(`Cache hit for ${stationId} ${targetDate} ${forecastType}`);
+      // Even with cached ensemble, still fetch fresh HRRR if within range
+      if (horizonHours <= 48) {
+        const hrrrCached = await this.getCached(stationId, targetDate, `${forecastType}_hrrr`, HRRR_CACHE_TTL_MS);
+        if (!hrrrCached) {
+          const blended = await this.blendWithHrrr(cached, stationId, targetDate, category, horizonHours);
+          return blended;
+        }
+        // HRRR also cached — blend cached values
+        return this.applyBlending(cached, "ensemble", hrrrCached, horizonHours);
+      }
       return cached;
     }
 
-    // Fetch from Open-Meteo (primary ensemble source)
-    let values: number[] = [];
+    // Fetch from Open-Meteo (primary ensemble source) with model tagging
+    let taggedMembers: Array<{ value: number; model: string }> = [];
     try {
-      values = await this.fetchOpenMeteo(stationId, targetDate, category);
+      taggedMembers = await this.fetchOpenMeteoTagged(stationId, targetDate, category);
       log.info(
-        `Fetched ${values.length} ensemble members from Open-Meteo for ${stationId} ${targetDate}`
+        `Fetched ${taggedMembers.length} ensemble members from Open-Meteo for ${stationId} ${targetDate}`
       );
     } catch (err) {
       log.warn(
@@ -76,7 +135,9 @@ export class EnsembleService {
     try {
       const tomorrowValues = await this.fetchTomorrowIo(stationId, targetDate, category);
       if (tomorrowValues.length > 0) {
-        values.push(...tomorrowValues);
+        for (const v of tomorrowValues) {
+          taggedMembers.push({ value: v, model: "other" });
+        }
         log.info(
           `Added ${tomorrowValues.length} value(s) from Tomorrow.io for ${stationId} ${targetDate}`
         );
@@ -87,9 +148,30 @@ export class EnsembleService {
       );
     }
 
-    if (values.length > 0) {
-      await this.cacheValues(stationId, targetDate, forecastType, values);
-      return values;
+    // Fetch HRRR if within range
+    let hrrrValues: number[] = [];
+    if (horizonHours <= 48) {
+      try {
+        hrrrValues = await this.fetchHrrr(stationId, targetDate, category);
+        if (hrrrValues.length > 0) {
+          log.info(
+            `Fetched ${hrrrValues.length} HRRR value(s) for ${stationId} ${targetDate} (horizon=${horizonHours.toFixed(0)}h)`
+          );
+          // Cache HRRR separately with shorter TTL
+          await this.cacheValues(stationId, targetDate, `${forecastType}_hrrr`, hrrrValues, HRRR_CACHE_TTL_MS);
+        }
+      } catch (err) {
+        log.debug(
+          `HRRR unavailable for ${stationId}: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+
+    if (taggedMembers.length > 0 || hrrrValues.length > 0) {
+      // Apply horizon-weighted blending
+      const blended = this.blendMembers(taggedMembers, hrrrValues, horizonHours);
+      await this.cacheValues(stationId, targetDate, forecastType, blended);
+      return blended;
     }
 
     // All APIs failed — fall back to NWS synthetic
@@ -100,10 +182,11 @@ export class EnsembleService {
   private async getCached(
     stationId: string,
     targetDate: string,
-    forecastType: string
+    forecastType: string,
+    ttlMs: number = CACHE_TTL_MS
   ): Promise<number[] | null> {
     const db = getDb();
-    const cutoff = new Date(Date.now() - CACHE_TTL_MS).toISOString();
+    const cutoff = new Date(Date.now() - ttlMs).toISOString();
 
     const rows = await db
       .select()
@@ -127,6 +210,263 @@ export class EnsembleService {
     } catch {
       return null;
     }
+  }
+
+  /** Estimate horizon in hours from target date (fallback when not provided) */
+  private estimateHorizonHours(targetDate: string): number {
+    const target = new Date(targetDate + "T23:59:00Z"); // close-of-day as proxy
+    return Math.max(0, (target.getTime() - Date.now()) / (1000 * 60 * 60));
+  }
+
+  /**
+   * Fetch HRRR deterministic forecast from Open-Meteo.
+   * HRRR covers 0-48h at 3km resolution, updated hourly.
+   * Returns 1-2 values (one per forecast day within range).
+   */
+  async fetchHrrr(
+    stationId: string,
+    targetDate: string,
+    category: MarketCategory
+  ): Promise<number[]> {
+    const coords = STATION_COORDS[stationId];
+    if (!coords) return [];
+
+    const hourlyVar = CATEGORY_TO_HOURLY[category];
+    if (!hourlyVar) return [];
+
+    // HRRR via Open-Meteo regular forecast API (deterministic model)
+    const url =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${coords.lat}&longitude=${coords.lon}` +
+      `&hourly=${hourlyVar}` +
+      `&models=hrrr_conus` +
+      `&forecast_days=2` +
+      `&temperature_unit=celsius` +
+      `&precipitation_unit=mm`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`HRRR Open-Meteo ${res.status}: ${await res.text()}`);
+    }
+
+    const data = (await res.json()) as {
+      hourly: { time: string[]; [key: string]: (number | null)[] | string[] };
+    };
+
+    const times = data.hourly?.time as string[] | undefined;
+    const vals = data.hourly?.[hourlyVar] as (number | null)[] | undefined;
+    if (!times || !vals) return [];
+
+    // Filter to hours matching the target date
+    const dayValues: number[] = [];
+    for (let i = 0; i < times.length; i++) {
+      if (times[i].startsWith(targetDate) && vals[i] != null) {
+        dayValues.push(vals[i]!);
+      }
+    }
+
+    if (dayValues.length === 0) return [];
+
+    // Aggregate to daily value matching the category
+    let result: number;
+    switch (category) {
+      case "high_temp":
+        result = this.convertUnits(Math.max(...dayValues), category);
+        break;
+      case "low_temp":
+        result = this.convertUnits(Math.min(...dayValues), category);
+        break;
+      case "precip":
+      case "snowfall":
+        // Sum hourly accumulation for the day
+        result = this.convertUnits(
+          dayValues.reduce((a, b) => a + b, 0),
+          category
+        );
+        break;
+      default:
+        result = this.convertUnits(dayValues[0], category);
+    }
+
+    return [result];
+  }
+
+  /**
+   * Fetch Open-Meteo ensemble members with model source tagging.
+   * Same as fetchOpenMeteo but returns tagged values for blending.
+   */
+  private async fetchOpenMeteoTagged(
+    stationId: string,
+    targetDate: string,
+    category: MarketCategory
+  ): Promise<Array<{ value: number; model: string }>> {
+    const coords = STATION_COORDS[stationId];
+    if (!coords) throw new Error(`Unknown station: ${stationId}`);
+
+    const variable = CATEGORY_TO_VARIABLE[category];
+    if (!variable) throw new Error(`Unknown category: ${category}`);
+
+    const url =
+      `https://ensemble-api.open-meteo.com/v1/ensemble` +
+      `?latitude=${coords.lat}&longitude=${coords.lon}` +
+      `&daily=${variable}` +
+      `&models=gfs_seamless,icon_seamless,ecmwf_ifs025,arpege_seamless,gem_seamless` +
+      `&forecast_days=7` +
+      `&temperature_unit=celsius` +
+      `&precipitation_unit=mm`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Open-Meteo ${res.status}: ${await res.text()}`);
+    }
+
+    const data = (await res.json()) as {
+      daily: Record<string, (number | null)[]>;
+    };
+
+    const dates = data.daily.time as unknown as string[];
+    const dateIdx = dates?.indexOf(targetDate);
+    if (dateIdx === undefined || dateIdx === -1) {
+      throw new Error(
+        `Target date ${targetDate} not in forecast range (available: ${dates?.join(", ")})`
+      );
+    }
+
+    const memberPattern = new RegExp(`^${variable}_member\\d+`);
+    const tagged: Array<{ value: number; model: string }> = [];
+
+    for (const [key, arr] of Object.entries(data.daily)) {
+      if (!memberPattern.test(key)) continue;
+      const val = (arr as (number | null)[])[dateIdx];
+      if (val == null) continue;
+      tagged.push({
+        value: this.convertUnits(val, category),
+        model: classifyModel(key),
+      });
+    }
+
+    if (tagged.length === 0) {
+      throw new Error(`No ensemble members found for ${variable} at ${targetDate}`);
+    }
+
+    return tagged;
+  }
+
+  /**
+   * Apply horizon-weighted blending to tagged ensemble members + HRRR values.
+   * Duplicates members proportionally based on model weights for the given horizon.
+   */
+  blendMembers(
+    taggedMembers: Array<{ value: number; model: string }>,
+    hrrrValues: number[],
+    horizonHours: number
+  ): number[] {
+    const bucket = getHorizonBucket(horizonHours);
+    const weights = MODEL_WEIGHTS[bucket];
+
+    // Count members per model group
+    const modelCounts = new Map<string, number>();
+    for (const m of taggedMembers) {
+      modelCounts.set(m.model, (modelCounts.get(m.model) || 0) + 1);
+    }
+
+    // Compute total weight of models that actually have members
+    let totalWeight = 0;
+    for (const [model, count] of modelCounts) {
+      if (count > 0) totalWeight += (weights[model] ?? weights.other ?? 0);
+    }
+    if (hrrrValues.length > 0) totalWeight += weights.hrrr;
+
+    if (totalWeight === 0) {
+      // No weighting info — return raw values
+      return [...taggedMembers.map((m) => m.value), ...hrrrValues];
+    }
+
+    const result: number[] = [];
+
+    // Add ensemble members weighted by model
+    for (const m of taggedMembers) {
+      const modelWeight = weights[m.model] ?? weights.other ?? 0;
+      const count = modelCounts.get(m.model) || 1;
+      // Each member contributes: (modelWeight / totalWeight) * targetPoolSize / count
+      // Simplified: just include each member once (blending preserves distribution)
+      // The weighting happens via duplication
+      const targetMembers = Math.max(1, Math.round((modelWeight / totalWeight) * 100));
+      const duplication = Math.max(1, Math.round(targetMembers / count));
+      for (let i = 0; i < duplication; i++) {
+        result.push(m.value);
+      }
+    }
+
+    // Add HRRR values with appropriate weighting
+    if (hrrrValues.length > 0 && weights.hrrr > 0) {
+      const hrrrTarget = Math.max(1, Math.round((weights.hrrr / totalWeight) * 100));
+      const hrrrDup = Math.max(1, Math.round(hrrrTarget / hrrrValues.length));
+      for (const v of hrrrValues) {
+        for (let i = 0; i < hrrrDup; i++) {
+          result.push(v);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Blend existing cached ensemble values with freshly-fetched HRRR.
+   */
+  private async blendWithHrrr(
+    cachedEnsemble: number[],
+    stationId: string,
+    targetDate: string,
+    category: MarketCategory,
+    horizonHours: number
+  ): Promise<number[]> {
+    let hrrrValues: number[] = [];
+    try {
+      hrrrValues = await this.fetchHrrr(stationId, targetDate, category);
+      if (hrrrValues.length > 0) {
+        await this.cacheValues(stationId, targetDate, `${category}_hrrr`, hrrrValues, HRRR_CACHE_TTL_MS);
+      }
+    } catch (err) {
+      log.debug(`HRRR fetch failed during blend: ${err instanceof Error ? err.message : err}`);
+    }
+    return this.applyBlending(cachedEnsemble, "ensemble", hrrrValues, horizonHours);
+  }
+
+  /**
+   * Apply blending between ensemble values and HRRR values based on horizon.
+   */
+  applyBlending(
+    ensembleValues: number[],
+    _source: string,
+    hrrrValues: number[],
+    horizonHours: number
+  ): number[] {
+    if (hrrrValues.length === 0) return ensembleValues;
+
+    const bucket = getHorizonBucket(horizonHours);
+    const weights = MODEL_WEIGHTS[bucket];
+    const hrrrWeight = weights.hrrr;
+    const ensembleWeight = 100 - hrrrWeight;
+
+    if (hrrrWeight === 0) return ensembleValues;
+
+    const result = [...ensembleValues];
+
+    // Duplicate HRRR values to achieve target weight ratio
+    const hrrrTarget = Math.max(
+      1,
+      Math.round((hrrrWeight / ensembleWeight) * ensembleValues.length)
+    );
+    const hrrrDup = Math.max(1, Math.round(hrrrTarget / hrrrValues.length));
+    for (const v of hrrrValues) {
+      for (let i = 0; i < hrrrDup; i++) {
+        result.push(v);
+      }
+    }
+
+    return result;
   }
 
   private async fetchOpenMeteo(
@@ -296,7 +636,8 @@ export class EnsembleService {
     stationId: string,
     targetDate: string,
     forecastType: string,
-    values: number[]
+    values: number[],
+    _ttlMs: number = CACHE_TTL_MS
   ): Promise<void> {
     const db = getDb();
     const mean = values.reduce((a, b) => a + b, 0) / values.length;

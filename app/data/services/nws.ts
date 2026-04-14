@@ -118,4 +118,32 @@ export class NwsService {
 
     return data.features.map((f) => f.properties);
   }
+
+  /**
+   * Get the latest temperature observation for a station.
+   * Returns the most recent non-null temperature reading in Fahrenheit,
+   * or null if no recent observation is available.
+   */
+  async getLatestObservation(
+    stationId: string
+  ): Promise<{ tempF: number; timestamp: string } | null> {
+    try {
+      const observations = await this.getObservations(stationId, 6);
+
+      for (const obs of observations) {
+        if (obs.temperature?.value != null) {
+          // NWS returns Celsius — convert to Fahrenheit
+          const tempF = obs.temperature.value * 9 / 5 + 32;
+          return { tempF, timestamp: obs.timestamp };
+        }
+      }
+
+      return null;
+    } catch (err) {
+      log.debug(
+        `Failed to get latest observation for ${stationId}: ${err instanceof Error ? err.message : err}`
+      );
+      return null;
+    }
+  }
 }

@@ -16,6 +16,13 @@ export interface EstimateResult {
   reasoning: ReasoningTrace;
 }
 
+export interface ObservationAdjustment {
+  /** Latest observed temperature in F */
+  observedTemp: number;
+  /** Timestamp of observation */
+  observedAt: string;
+}
+
 export interface ReasoningTrace {
   stationId: string;
   targetDate: string;
@@ -28,6 +35,12 @@ export interface ReasoningTrace {
   biasCorrection: { meanBias: number; sampleSize: number } | null;
   /** Corrected ensemble stats */
   correctedEnsembleStats: { mean: number; std: number };
+  /** Sigma used for CDF: empirical (from station_bias) or ensemble spread */
+  sigmaSource: "empirical" | "ensemble";
+  /** The sigma value used for CDF computation */
+  sigmaUsed: number;
+  /** Same-day observation adjustment applied */
+  observationAdjustment: { observedTemp: number; sigmaBefore: number; sigmaAfter: number; meanShift: number } | null;
   /** How many members fall in the bracket */
   membersInBracket: number;
   /** CDF-fitted probability for the bracket */
@@ -43,12 +56,18 @@ export class ProbabilityEstimator {
    * Estimate the probability that a market resolves YES.
    *
    * For temperature markets: uses normal CDF fitted to ensemble distribution.
+   * Uses empirical sigma (std of historical forecast errors) when available,
+   * falling back to ensemble spread when sample size < 10.
+   *
    * For precip/snow markets: uses empirical CDF (direct counting) since
    * precipitation distributions are zero-inflated and skewed, not Gaussian.
+   *
+   * @param observation Optional same-day observation to tighten sigma
    */
   async estimate(
     market: Market,
-    ensembleValues: number[]
+    ensembleValues: number[],
+    observation?: ObservationAdjustment
   ): Promise<EstimateResult> {
     const isTail = market.marketType === "upper_tail" || market.marketType === "lower_tail";
     if (!market.stationId || market.bracketLow == null || (!isTail && market.bracketHigh == null)) {
@@ -82,13 +101,10 @@ export class ProbabilityEstimator {
     // Step 3: Count members matching this market's condition
     let membersInBracket: number;
     if (market.marketType === "upper_tail") {
-      // YES = temp > threshold
       membersInBracket = correctedValues.filter((v) => v > market.bracketLow!).length;
     } else if (market.marketType === "lower_tail") {
-      // YES = temp < threshold
       membersInBracket = correctedValues.filter((v) => v < market.bracketLow!).length;
     } else {
-      // Standard bracket: bracketLow <= temp < bracketHigh
       membersInBracket = correctedValues.filter(
         (v) => v >= market.bracketLow! && v < market.bracketHigh!
       ).length;
@@ -96,50 +112,93 @@ export class ProbabilityEstimator {
 
     const rawMean = mean(ensembleValues);
     const rawStd = std(ensembleValues);
-    const corrMean = mean(correctedValues);
+    let corrMean = mean(correctedValues);
     const corrStd = std(correctedValues);
 
     const countingProb = membersInBracket / correctedValues.length;
 
+    // Step 3.5: Determine sigma for CDF computation
+    // Prefer empirical sigma (std of historical forecast errors) over ensemble spread.
+    // Empirical sigma is typically 1.0-1.5F for day-1 temps vs 2.6F ensemble spread.
+    let sigmaSource: "empirical" | "ensemble" = "ensemble";
+    let sigmaUsed = corrStd;
+    let obsAdj: ReasoningTrace["observationAdjustment"] = null;
+
+    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize >= 10) {
+      // Use stdBias as empirical sigma — this is the std of (forecast - actual),
+      // which represents true forecast error, not model disagreement
+      const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
+      if (empiricalSigma != null && empiricalSigma > 0) {
+        sigmaUsed = empiricalSigma;
+        sigmaSource = "empirical";
+        log.debug(
+          `${market.ticker}: using empirical sigma=${empiricalSigma.toFixed(2)}F ` +
+          `(vs ensemble spread=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
+        );
+      }
+    }
+
+    // Step 3.6: Apply same-day observation adjustment (high_temp only)
+    if (observation && market.category === "high_temp" && forecastHorizon <= 1) {
+      const sigmaBefore = sigmaUsed;
+      const divergence = Math.abs(observation.observedTemp - corrMean);
+
+      if (divergence <= 3) {
+        // Observation confirms forecast — tighten sigma by 50%
+        sigmaUsed = sigmaUsed * 0.5;
+      } else {
+        // Observation diverges — shift mean toward observation-based estimate
+        // Use regression: adjustedMean = 0.7 * forecastMean + 0.3 * observationBasedHigh
+        // For morning obs, afternoon high ≈ observedTemp + typical diurnal range offset
+        const diurnalOffset = 10; // rough F offset from morning to afternoon high
+        const obsBased = observation.observedTemp + diurnalOffset;
+        corrMean = 0.7 * corrMean + 0.3 * obsBased;
+        sigmaUsed = sigmaUsed * 0.7; // still tighten somewhat
+      }
+
+      obsAdj = {
+        observedTemp: observation.observedTemp,
+        sigmaBefore,
+        sigmaAfter: sigmaUsed,
+        meanShift: corrMean - mean(correctedValues),
+      };
+
+      log.debug(
+        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F, ` +
+        `sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, mean shift=${obsAdj.meanShift.toFixed(2)}`
+      );
+    }
+
     // CDF-fitted probability: use normal CDF for temperature, empirical for precip/snow
     let cdfProb: number;
     if (isPrecipCategory) {
-      // Precip/snow: empirical CDF only — normal distribution is wrong for
-      // zero-inflated, right-skewed precipitation data
       cdfProb = countingProb;
-    } else if (corrStd === 0) {
-      // Zero spread — CDF is undefined, fall back to counting
+    } else if (sigmaUsed === 0) {
       cdfProb = countingProb;
     } else if (market.marketType === "upper_tail") {
-      // P(temp > threshold) = 1 - CDF(threshold)
-      cdfProb = 1 - normalCdf(market.bracketLow!, corrMean, corrStd);
+      cdfProb = 1 - normalCdf(market.bracketLow!, corrMean, sigmaUsed);
     } else if (market.marketType === "lower_tail") {
-      // P(temp < threshold) = CDF(threshold)
-      cdfProb = normalCdf(market.bracketLow!, corrMean, corrStd);
+      cdfProb = normalCdf(market.bracketLow!, corrMean, sigmaUsed);
     } else {
       cdfProb =
-        normalCdf(market.bracketHigh!, corrMean, corrStd) -
-        normalCdf(market.bracketLow!, corrMean, corrStd);
+        normalCdf(market.bracketHigh!, corrMean, sigmaUsed) -
+        normalCdf(market.bracketLow!, corrMean, sigmaUsed);
     }
 
     // Blend counting and CDF based on ensemble size
-    // For precip/snow, always use counting (cdfProb === countingProb)
     const countingWeight = isPrecipCategory
       ? 1.0
       : Math.min(1, correctedValues.length / 200);
     const probability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
 
     // Step 4: Compute confidence
-    // Higher confidence when: more ensemble members, smaller spread, more bias data
-    // For precip/snow, use relative spread (CoV) since absolute spread in inches is small
-
     const spreadNorm = isPrecipCategory
-      ? (corrMean > 0 ? corrStd / corrMean : corrStd) // Coefficient of variation
-      : corrStd;
+      ? (corrMean > 0 ? corrStd / corrMean : corrStd)
+      : sigmaUsed; // Use sigmaUsed (may be empirical) for confidence
     const spreadDivisor = isPrecipCategory ? 2 : 10;
     const spreadFactor = Math.max(0, 1 - spreadNorm / spreadDivisor);
     const biasFactor = biasCorrection
-      ? Math.min(1, biasCorrection.sampleSize / 30) // More data → more confident
+      ? Math.min(1, biasCorrection.sampleSize / 30)
       : 0.5;
     const ensembleFactor = Math.min(1, ensembleValues.length / 120);
 
@@ -150,12 +209,15 @@ export class ProbabilityEstimator {
       targetDate: market.targetDate || "unknown",
       forecastHorizon,
       bracketLow: market.bracketLow,
-      bracketHigh: market.bracketHigh ?? market.bracketLow!, // Tails use threshold as both
+      bracketHigh: market.bracketHigh ?? market.bracketLow!,
       rawEnsembleStats: { mean: rawMean, std: rawStd, count: ensembleValues.length },
       biasCorrection: biasCorrection
         ? { meanBias: biasCorrection.meanBias, sampleSize: biasCorrection.sampleSize }
         : null,
       correctedEnsembleStats: { mean: corrMean, std: corrStd },
+      sigmaSource,
+      sigmaUsed,
+      observationAdjustment: obsAdj,
       membersInBracket,
       cdfProbability: cdfProb,
       countingProbability: countingProb,
@@ -169,7 +231,8 @@ export class ProbabilityEstimator {
 
     log.debug(
       `${market.ticker}: P=${probability.toFixed(3)} (counting=${countingProb.toFixed(3)}, cdf=${cdfProb.toFixed(3)}), ` +
-      `conf=${confidence.toFixed(2)}, ${membersInBracket}/${correctedValues.length} members in bracket`
+      `conf=${confidence.toFixed(2)}, sigma=${sigmaUsed.toFixed(2)} (${sigmaSource}), ` +
+      `${membersInBracket}/${correctedValues.length} members in bracket`
     );
 
     return { probability, confidence, ensembleSize: ensembleValues.length, reasoning };

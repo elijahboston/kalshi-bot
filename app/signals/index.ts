@@ -10,5 +10,5 @@
  */
 
 export { ProbabilityEstimator } from "./services/estimator";
-export type { EstimateResult, ReasoningTrace } from "./services/estimator";
+export type { EstimateResult, ReasoningTrace, ObservationAdjustment } from "./services/estimator";
 export { getEffectiveThreshold } from "./services/adaptive-threshold";

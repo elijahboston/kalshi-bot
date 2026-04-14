@@ -6,9 +6,9 @@ import { bus, createLogger } from "../events";
 import { registerTick, startLoop, stopLoop, getLoopState } from "./loop";
 import { discoverMarkets } from "./discovery";
 import { startFeed, stopFeed, subscribeToTickers } from "./feed";
-import { EnsembleService } from "@kcb/data";
+import { EnsembleService, NwsService } from "@kcb/data";
 import { ProbabilityEstimator, getEffectiveThreshold } from "@kcb/signals";
-import type { EstimateResult } from "@kcb/signals";
+import type { EstimateResult, ObservationAdjustment } from "@kcb/signals";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld, restoreAntiChurnState } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
 import { uuid, now, seriesCategory } from "@kcb/shared";
@@ -33,6 +33,7 @@ export async function initOrchestrator(): Promise<void> {
   const feed = new KalshiFeed();
   const ensembleService = new EnsembleService();
   const estimator = new ProbabilityEstimator();
+  const nwsService = new NwsService();
   const executionService = new ExecutionService(kalshi);
   const reconciliationService = new ReconciliationService(kalshi);
 
@@ -92,18 +93,47 @@ export async function initOrchestrator(): Promise<void> {
 
     const estimates: Array<{ market: Market; estimate: EstimateResult }> = [];
 
+    // Cache same-day observations per station to avoid redundant NWS calls
+    const observationCache = new Map<string, ObservationAdjustment | null>();
+
     for (const market of activeMarkets) {
       if (!market.stationId || !market.category) continue;
       if (market.bracketLow == null || market.bracketHigh == null) continue;
 
       try {
+        // Compute forecast horizon in hours for HRRR/blending
+        const forecastHorizonHours = market.closeTime
+          ? Math.max(0, (new Date(market.closeTime).getTime() - Date.now()) / (1000 * 60 * 60))
+          : market.targetDate
+            ? Math.max(0, (new Date(market.targetDate + "T23:59:00Z").getTime() - Date.now()) / (1000 * 60 * 60))
+            : undefined;
+
         const category = market.category as Parameters<typeof ensembleService.getEnsembleValues>[2];
         const ensembleValues = await ensembleService.getEnsembleValues(
           market.stationId,
           market.targetDate!,
-          category
+          category,
+          forecastHorizonHours
         );
-        const estimate = await estimator.estimate(market, ensembleValues);
+
+        // Fetch same-day observation for temperature markets (improvement #4)
+        let observation: ObservationAdjustment | undefined;
+        if (
+          market.category === "high_temp" &&
+          forecastHorizonHours != null &&
+          forecastHorizonHours <= 24
+        ) {
+          if (!observationCache.has(market.stationId)) {
+            const obs = await nwsService.getLatestObservation(market.stationId);
+            observationCache.set(
+              market.stationId,
+              obs ? { observedTemp: obs.tempF, observedAt: obs.timestamp } : null
+            );
+          }
+          observation = observationCache.get(market.stationId) ?? undefined;
+        }
+
+        const estimate = await estimator.estimate(market, ensembleValues, observation);
         estimates.push({ market, estimate });
       } catch (err) {
         log.warn(
@@ -169,11 +199,34 @@ export async function initOrchestrator(): Promise<void> {
       );
 
       // Determine recommendation
-      let recommendation: "buy_yes" | "buy_no" | "skip" = "skip";
+      let recommendation: "buy_yes" | "buy_no" | "scout" | "skip" = "skip";
       let skipReason: string | null = null;
+
+      // Sniper mode: gate entry based on forecast horizon
+      const sniperHorizon = config.bot.sniperHorizonHours;
+      let forecastHorizonHours: number | undefined;
+      if (market.closeTime) {
+        forecastHorizonHours = Math.max(
+          0,
+          (new Date(market.closeTime).getTime() - Date.now()) / (1000 * 60 * 60)
+        );
+      } else if (market.targetDate) {
+        forecastHorizonHours = Math.max(
+          0,
+          (new Date(market.targetDate + "T23:59:00Z").getTime() - Date.now()) / (1000 * 60 * 60)
+        );
+      }
+
+      const inSniperWindow =
+        sniperHorizon === 0 || // disabled
+        forecastHorizonHours == null ||
+        forecastHorizonHours <= sniperHorizon;
 
       if (!side || edge <= 0) {
         skipReason = "no edge";
+      } else if (!inSniperWindow) {
+        recommendation = "scout";
+        skipReason = `scout mode (${forecastHorizonHours!.toFixed(1)}h > ${sniperHorizon}h sniper window)`;
       } else if (edge < edgeThreshold) {
         skipReason = `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢`;
       } else if (estimate.confidence < config.bot.minConfidence) {
@@ -210,7 +263,7 @@ export async function initOrchestrator(): Promise<void> {
         createdAt: now(),
       });
 
-      if (recommendation !== "skip" && side) {
+      if (recommendation !== "skip" && recommendation !== "scout" && side) {
         actionableSignals.push({
           id: signalId,
           ticker: market.ticker,

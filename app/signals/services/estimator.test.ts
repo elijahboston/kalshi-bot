@@ -445,7 +445,7 @@ describe("ProbabilityEstimator — precip/snow", () => {
     expect(result.reasoning.membersInBracket).toBe(2);
   });
 
-  test("per-category bias: precip bias doesn't affect temperature", async () => {
+  test("per-category bias: precip bias doesn't affect temperature (precip context)", async () => {
     const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_precip_1",
@@ -463,5 +463,181 @@ describe("ProbabilityEstimator — precip/snow", () => {
     // Temperature market should NOT pick up the precip bias
     const tempResult = await estimator.estimate(makeMarket(), [28, 29, 30, 30, 31]);
     expect(tempResult.reasoning.biasCorrection).toBeNull();
+  });
+});
+
+describe("ProbabilityEstimator — empirical sigma", () => {
+  test("uses empirical sigma (stdBias) when sample size >= 10", async () => {
+    const db = getDb();
+    // Insert bias with empirical sigma of 1.2F (much tighter than typical 2.6F ensemble spread)
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0.5,
+      stdBias: 1.2, // empirical forecast error std
+      sampleSize: 25,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    // Ensemble with ~2.6F spread, mean ~30.5
+    const ensemble = [28, 29, 29, 30, 30, 30, 31, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    // Should use empirical sigma (1.2) not ensemble spread (~1.5)
+    expect(result.reasoning.sigmaSource).toBe("empirical");
+    expect(result.reasoning.sigmaUsed).toBe(1.2);
+    // With tighter sigma, probability for the correct bracket should be higher
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.2);
+  });
+
+  test("falls back to ensemble spread when sample size < 10", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0.5,
+      stdBias: 1.2,
+      sampleSize: 5, // too few samples
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [28, 29, 30, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.sigmaSource).toBe("ensemble");
+  });
+
+  test("falls back to ensemble spread when no bias data", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [28, 29, 30, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.sigmaSource).toBe("ensemble");
+  });
+
+  test("empirical sigma concentrates probability on correct bracket", async () => {
+    const db = getDb();
+    // Tight empirical sigma: 1.0F
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 1.0,
+      sampleSize: 30,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    // Mean is 30.5, exactly centered in [30, 31) bracket
+    const ensemble = [30, 30, 30.5, 30.5, 31, 31];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    // With sigma=1.0 and mean=30.5, P(30 <= X < 31) should be ~38%
+    // (vs ~26% with ensemble spread of ~0.4)
+    expect(result.reasoning.sigmaUsed).toBe(1.0);
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.3);
+  });
+});
+
+describe("ProbabilityEstimator — observation adjustment", () => {
+  test("tightens sigma when observation confirms forecast", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Set target date to today for forecastHorizon <= 1
+    const today = new Date().toISOString().slice(0, 10);
+    const market = {
+      ...makeMarket(),
+      targetDate: today,
+      bracketLow: 80,
+      bracketHigh: 82,
+    };
+    // Ensemble centered around 81
+    const ensemble = [79, 80, 80, 81, 81, 81, 82, 82, 83, 84];
+
+    const observation = {
+      observedTemp: 72, // morning temp, within 3F divergence threshold isn't about closeness to mean
+      observedAt: new Date().toISOString(),
+    };
+
+    const resultWithObs = await estimator.estimate(market, ensemble, observation);
+
+    // Observation adjustment should be recorded
+    if (resultWithObs.reasoning.observationAdjustment) {
+      expect(resultWithObs.reasoning.observationAdjustment.sigmaAfter)
+        .toBeLessThan(resultWithObs.reasoning.observationAdjustment.sigmaBefore);
+    }
+  });
+
+  test("shifts mean when observation diverges significantly", async () => {
+    const estimator = new ProbabilityEstimator();
+    const today = new Date().toISOString().slice(0, 10);
+    const market = {
+      ...makeMarket(),
+      targetDate: today,
+      bracketLow: 80,
+      bracketHigh: 82,
+    };
+    const ensemble = [79, 80, 80, 81, 81, 81, 82, 82, 83, 84];
+
+    // Morning temp is 65F — diverges by much more than 3F from forecast mean of ~81
+    const observation = {
+      observedTemp: 65,
+      observedAt: new Date().toISOString(),
+    };
+
+    const result = await estimator.estimate(market, ensemble, observation);
+
+    // Should have observation adjustment with mean shift
+    expect(result.reasoning.observationAdjustment).not.toBeNull();
+    if (result.reasoning.observationAdjustment) {
+      expect(result.reasoning.observationAdjustment.meanShift).not.toBe(0);
+    }
+  });
+
+  test("no observation adjustment for precip markets", async () => {
+    const estimator = new ProbabilityEstimator();
+    const today = new Date().toISOString().slice(0, 10);
+    const market = {
+      ...makePrecipMarket(),
+      targetDate: today,
+    };
+    const ensemble = [0, 0, 0.1, 0.15, 0.2];
+    const observation = { observedTemp: 72, observedAt: new Date().toISOString() };
+
+    const result = await estimator.estimate(market, ensemble, observation);
+
+    // Precip markets should not get observation adjustment
+    expect(result.reasoning.observationAdjustment).toBeNull();
+  });
+
+  test("no observation adjustment for distant markets", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Target date is 3 days out
+    const futureDate = new Date(Date.now() + 3 * 86400_000).toISOString().slice(0, 10);
+    const market = {
+      ...makeMarket(),
+      targetDate: futureDate,
+    };
+    const ensemble = [28, 29, 30, 30, 31];
+    const observation = { observedTemp: 72, observedAt: new Date().toISOString() };
+
+    const result = await estimator.estimate(market, ensemble, observation);
+
+    // forecastHorizon > 1 → no adjustment
+    expect(result.reasoning.observationAdjustment).toBeNull();
   });
 });

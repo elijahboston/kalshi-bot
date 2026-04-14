@@ -1091,7 +1091,7 @@ export class ReconciliationService {
     }
 
     log.debug(
-      `Updated station bias for ${stationId}: ${byHorizon.size} horizon(s)`
+      `Updated station bias for ${stationId}: ${byKey.size} horizon(s)`
     );
   }
 

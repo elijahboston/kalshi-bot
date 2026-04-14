@@ -52,6 +52,8 @@ export interface BotConfig {
     seedCapital: number;
     /** Fraction of profits to reserve (0-1). e.g. 0.5 = keep 50% of winnings */
     profitReservePct: number;
+    /** Hours before market close when sniper mode activates (0 = disabled) */
+    sniperHorizonHours: number;
   };
 
   /** Calibration parameters */
@@ -134,6 +136,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   seed_capital: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.seedCapital = n; },
   profit_reserve_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.profitReservePct = n; },
   enabled_stations: (c, v) => { c.bot.enabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
+  sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sniperHorizonHours = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -172,6 +175,7 @@ export function loadConfig(): BotConfig {
       minBalanceFloor: envNum("MIN_BALANCE_FLOOR", 5000), // $50 default
       seedCapital: envNum("SEED_CAPITAL", 17556), // $175.56 current balance
       profitReservePct: envNum("PROFIT_RESERVE_PCT", 0.5), // keep 50% of profits
+      sniperHorizonHours: envNum("SNIPER_HORIZON_HOURS", 12), // enter positions within 12h of close
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),
