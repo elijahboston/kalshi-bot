@@ -329,15 +329,146 @@ The current charts are:
 
 ---
 
+## 12. Replace TUI Table Rendering with ink-table
+
+**Why:** Tables are rendered two different ways — Ink `<Box width={N}>` column layouts in views, and `padEnd()`/`padStart()` string formatting in REPL commands. Both are fragile, hard to maintain, and break when data exceeds column widths. The `ink-table` library (`https://github.com/maticzav/ink-table`) provides auto-sized columns, box-drawing borders, and custom cell renderers as a proper Ink React component.
+
+**Install:** Already installed (`ink-table` is in dependencies).
+
+### Tables to replace
+
+There are **9 tables** across views and REPL commands:
+
+#### Ink Box-based tables (views)
+
+| Location | Table | Columns | Current approach |
+|----------|-------|---------|-----------------|
+| `app/cli/src/views/markets.tsx` | Market list | TICKER(28), DATE(10), STATUS(8), PRICE(8), EST(8), EDGE(8), CONF(8) | `<Box width={N}>` per column, `"─".repeat(80)` separator |
+| `app/cli/src/views/performance.tsx` | Recent resolutions | TICKER(30), PREDICTED(10), ACTUAL(8), EDGE(8), PnL(10) | `<Box width={N}>` per column |
+| `app/cli/src/views/performance.tsx` | Order history | TIME(10), TICKER(28), SIDE(6), QTY(5), PRICE(7), STATUS(9), KELLY(7), DRY(5) | `<Box width={N}>` per column |
+
+#### String-based tables (REPL commands)
+
+| Location | Command | Columns | Current approach |
+|----------|---------|---------|-----------------|
+| `app/cli/src/commands/markets.ts` | `markets` / `ls` | TYPE(6), TICKER(30), PRICE(6), STATUS(10), CLOSES(var) | `padEnd()`/`padStart()` |
+| `app/cli/src/commands/positions.ts` | `positions` | TYPE(6), TICKER(30), SIDE(6), QTY(5), AVG(6), P&L(8) | `padEnd()`/`padStart()` |
+| `app/cli/src/commands/positions.ts` | `orders` | ORDER(12), TICKER(25), SIDE(5), QTY(4), PRICE(6), STATUS(10) | `padEnd()`/`padStart()` |
+| `app/cli/src/commands/calibration.ts` | `calibration detail` | TICKER(28), PRED(6), MKT(6), ACTUAL(7), EDGE(7), P&L(8) | `padEnd()`/`padStart()` |
+| `app/cli/src/commands/calibration.ts` | `calibration bias` | STATION(8), HORIZON(8), BIAS(10), STD(8), N(6) | `padEnd()`/`padStart()` |
+| `app/cli/src/commands/backtest.ts` | `backtest` | DATE(12), BRACKET(10), EST P(7), ACTUAL(7), BRIER(8), KELLY(7), P&L(8) | `padEnd()`/`padStart()` |
+
+### Migration approach
+
+**ink-table** takes a `data` prop (array of row objects with scalar values) and auto-sizes columns. Customization is via `header`, `cell`, and `skeleton` render props.
+
+#### View tables (markets.tsx, performance.tsx)
+
+These are already React components — replace the `<Box width={N}>` column pattern directly:
+
+```tsx
+import Table from "ink-table";
+
+// Before: manual Box grid with hardcoded widths
+<Box><Box width={28}><Text>{ticker}</Text></Box><Box width={8}><Text>{price}</Text></Box>...</Box>
+
+// After: ink-table with data array
+<Table
+  data={markets.map(m => ({
+    ticker: m.ticker,
+    date: m.targetDate ?? "—",
+    status: m.status,
+    price: m.lastYesPrice != null ? `${m.lastYesPrice}c` : "—",
+    est: signal ? `${(signal.estimatedProb * 100).toFixed(0)}¢` : "—",
+    edge: signal ? `${(signal.edge * 100).toFixed(1)}¢` : "—",
+    conf: signal ? `${(signal.confidence * 100).toFixed(0)}%` : "—",
+  }))}
+  columns={["ticker", "date", "status", "price", "est", "edge", "conf"]}
+  cell={({ children }) => <Text>{children}</Text>}
+/>
+```
+
+For **conditional cell coloring** (e.g., green/red PnL, status colors), use a custom `cell` renderer that inspects the value:
+
+```tsx
+cell={({ children }) => {
+  const val = String(children);
+  // Color P&L values
+  if (val.startsWith("+$")) return <Text color="green">{children}</Text>;
+  if (val.startsWith("-$")) return <Text color="red">{children}</Text>;
+  // Color status
+  if (val === "open" || val === "filled") return <Text color="green">{children}</Text>;
+  return <Text>{children}</Text>;
+}}
+```
+
+Delete the `"─".repeat(N)` separator rows — ink-table draws its own box-drawing borders.
+
+#### REPL command tables (markets.ts, positions.ts, calibration.ts, backtest.ts)
+
+These commands currently return plain strings. Two options:
+
+**Option A (recommended):** Convert commands to return React elements instead of strings, and render them with `ink`'s `render()` in the REPL output. This gives full ink-table support.
+
+The REPL view (`app/cli/src/views/repl.tsx`) currently renders command output as `<Text>{output}</Text>`. Change it to support JSX returns:
+```tsx
+// If command returns a React element, render it directly
+// If command returns a string, wrap in <Text>
+{typeof output === "string" ? <Text>{output}</Text> : output}
+```
+
+Then commands can return `<Table data={...} />` directly.
+
+**Option B (simpler):** Keep commands as string-returning functions but build a `renderTable()` utility that formats data into aligned columns using ink-table's approach internally. Less ideal since it doesn't use the actual library.
+
+**Recommendation:** Go with Option A. The REPL change is small and unlocks ink-table everywhere.
+
+#### Specific per-table migration notes
+
+1. **markets.tsx** — The market list table has signal data overlaid via `signalMap` state. Pre-merge market + signal data into the row objects before passing to `<Table>`.
+
+2. **performance.tsx (resolutions)** — The `ACTUAL` column shows "YES"/"NO" with conditional coloring. Format in the data transform, color in the cell renderer.
+
+3. **performance.tsx (orders)** — The `DRY` column shows "DRY" in yellow or "—" in gray. Use a cell renderer that checks for the "DRY" string.
+
+4. **positions.ts** — The `TYPE` column maps category to short labels (HIGH, LOW, RAIN, SNOW). Do this mapping in the data transform before passing to Table.
+
+5. **calibration.ts (bias)** — Small table (typically 5-10 rows). Straightforward migration.
+
+6. **backtest.ts** — The largest table by column count (7). Some cells have conditional formatting (P&L sign colors). Use a cell renderer.
+
+### What to delete
+
+- All `"─".repeat(N)` and `"-".repeat(N)` separator lines
+- All `padEnd()`/`padStart()` column formatting in REPL commands
+- The manual `<Box width={N}>` header + data row patterns in views
+- Any column width constants that were hardcoded
+
+### What to keep
+
+- Data fetching and transformation logic in each command/view
+- Category label mapping (`high_temp` → `HIGH`, etc.)
+- Color decision logic (move into cell renderers)
+- `formatDayLabel()`, `formatDuration()` utilities
+
+### Testing
+
+- View tests: use Ink's `render()` test helper, assert table renders without errors
+- REPL command tests: update to handle JSX returns if going with Option A
+- Snapshot tests are a good fit here — ink-table output is deterministic for given data
+
+---
+
 ## Implementation Order
 
 These are ordered by user impact and dependency:
 
 1. **Replace chart infrastructure** (#11) — do this first, unblocks new charts in later items
-2. **Sniper/scout visibility** (#1, #7) — most urgent, bot looks broken without it
-3. **Explain command updates** (#3, #4, #5) — immediate debugging value
-4. **Hours-to-close column** (#2) — quick win, informs all other features
-5. **WebSocket type updates** (#10) — required for GUI changes
-6. **Forecast accuracy tracking** (#8) — validates the improvements are working, uses new chart components
-7. **Bracket probability comparison** (#6) — deepens market understanding
-8. **GUI station HRRR visualization** (#9) — polish
+2. **Replace table infrastructure** (#12) — do alongside #11, both are foundational
+3. **Sniper/scout visibility** (#1, #7) — most urgent, bot looks broken without it
+4. **Explain command updates** (#3, #4, #5) — immediate debugging value
+5. **Hours-to-close column** (#2) — quick win, informs all other features
+6. **WebSocket type updates** (#10) — required for GUI changes
+7. **Forecast accuracy tracking** (#8) — validates the improvements are working, uses new chart components
+8. **Bracket probability comparison** (#6) — deepens market understanding
+9. **GUI station HRRR visualization** (#9) — polish
