@@ -15,10 +15,10 @@
     "@pppp606/ink-chart": "^0.2.5",
     "ink": "^5.1.0",
     "ink-text-input": "^6.0.0",
-    "react": "^18.3.0",
-    "simple-ascii-chart": "^5.3.1"
+    "react": "^18.3.0"
   },
   "devDependencies": {
-    "@types/react": "^18.3.0"
+    "@types/react": "^18.3.0",
+    "ink-testing-library": "^4.0.0"
   }
 }

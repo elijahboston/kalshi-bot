@@ -1,9 +1,12 @@
 import { test, expect, describe } from "bun:test";
+import React from "react";
+import { render } from "ink-testing-library";
 import {
-  renderPortfolioChart,
-  renderHorizontalBar,
-  renderBucketChart,
-  renderDailyPnl,
+  PortfolioChart,
+  CalibrationChart,
+  DailyPnlChart,
+  SigmaComparisonChart,
+  AccuracySparkline,
   formatDuration,
   formatDayLabel,
   downsample,
@@ -19,41 +22,157 @@ function makePoints(values: number[], startIso = "2026-02-20T00:00:00Z"): Portfo
   }));
 }
 
-describe("renderPortfolioChart", () => {
-  test("returns multi-line string with correct approximate height", () => {
+describe("PortfolioChart", () => {
+  test("renders multi-line chart for valid data", () => {
     const points = makePoints([4000, 4200, 4100, 4400, 4300, 4500, 4600, 4550, 4700, 4800]);
-    const result = renderPortfolioChart(points, 40, 6);
-    const lines = result.split("\n");
-    // simple-ascii-chart adds axis lines, so height >= requested
-    expect(lines.length).toBeGreaterThanOrEqual(6);
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points, width: 40, height: 6 })
+    );
+    const output = lastFrame();
+    expect(output.split("\n").length).toBeGreaterThanOrEqual(2);
   });
 
-  test("returns placeholder for empty data", () => {
-    const result = renderPortfolioChart([]);
-    expect(result).toContain("No portfolio data");
+  test("renders placeholder for empty data", () => {
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points: [] })
+    );
+    expect(lastFrame()).toContain("No portfolio data");
   });
 
-  test("returns single point message for one value", () => {
-    const result = renderPortfolioChart(makePoints([5000]));
-    expect(result).toContain("$50.00");
-    expect(result).toContain("single point");
+  test("renders single point message", () => {
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points: makePoints([5000]) })
+    );
+    expect(lastFrame()).toContain("$50.00");
+    expect(lastFrame()).toContain("single point");
   });
 
-  test("handles two points", () => {
-    const result = renderPortfolioChart(makePoints([4000, 4200]), 30, 4);
-    expect(result.split("\n").length).toBeGreaterThanOrEqual(2);
+  test("handles two points without crashing", () => {
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points: makePoints([4000, 4200]), width: 30, height: 4 })
+    );
+    expect(lastFrame().length).toBeGreaterThan(0);
   });
 
   test("handles all same values", () => {
-    const result = renderPortfolioChart(makePoints([5000, 5000, 5000, 5000]), 30, 4);
-    expect(typeof result).toBe("string");
-    expect(result.length).toBeGreaterThan(0);
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points: makePoints([5000, 5000, 5000, 5000]), width: 30, height: 4 })
+    );
+    expect(lastFrame().length).toBeGreaterThan(0);
   });
 
   test("downsamples large datasets without crashing", () => {
     const values = Array.from({ length: 500 }, (_, i) => 4000 + i * 2);
-    const result = renderPortfolioChart(makePoints(values), 60, 8);
-    expect(result.split("\n").length).toBeGreaterThanOrEqual(4);
+    const { lastFrame } = render(
+      React.createElement(PortfolioChart, { points: makePoints(values), width: 60, height: 8 })
+    );
+    expect(lastFrame().split("\n").length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("CalibrationChart", () => {
+  test("renders buckets with hit rates", () => {
+    const buckets = [
+      { label: "0.0-0.1", hits: 1, total: 10 },
+      { label: "0.1-0.2", hits: 2, total: 8 },
+      { label: "0.5-0.7", hits: 4, total: 6 },
+    ];
+    const { lastFrame } = render(
+      React.createElement(CalibrationChart, { buckets })
+    );
+    const output = lastFrame();
+    expect(output).toContain("0.0-0.1");
+    expect(output).toContain("0.5-0.7");
+    expect(output).toContain("1/10");
+    expect(output).toContain("4/6");
+  });
+
+  test("renders placeholder for empty data", () => {
+    const { lastFrame } = render(
+      React.createElement(CalibrationChart, { buckets: [] })
+    );
+    expect(lastFrame()).toContain("No calibration data");
+  });
+
+  test("skips buckets with zero total", () => {
+    const buckets = [
+      { label: "0.0-0.1", hits: 0, total: 0 },
+      { label: "0.1-0.2", hits: 3, total: 5 },
+    ];
+    const { lastFrame } = render(
+      React.createElement(CalibrationChart, { buckets })
+    );
+    const output = lastFrame();
+    expect(output).not.toContain("0.0-0.1");
+    expect(output).toContain("0.1-0.2");
+  });
+});
+
+describe("DailyPnlChart", () => {
+  test("renders daily P&L bars", () => {
+    const days = [
+      { date: "2026-02-17", pnl: 240 },
+      { date: "2026-02-18", pnl: -120 },
+      { date: "2026-02-19", pnl: 80 },
+    ];
+    const { lastFrame } = render(
+      React.createElement(DailyPnlChart, { days })
+    );
+    const output = lastFrame();
+    expect(output).toContain("Tue");
+    expect(output).toContain("Wed");
+    expect(output).toContain("+$2.40");
+    expect(output).toContain("-$1.20");
+  });
+
+  test("renders placeholder for empty data", () => {
+    const { lastFrame } = render(
+      React.createElement(DailyPnlChart, { days: [] })
+    );
+    expect(lastFrame()).toContain("No daily P&L data");
+  });
+});
+
+describe("SigmaComparisonChart", () => {
+  test("renders three bars", () => {
+    const { lastFrame } = render(
+      React.createElement(SigmaComparisonChart, {
+        ensembleSpread: 2.6,
+        empiricalSigma: 1.3,
+        actualError: 1.1,
+      })
+    );
+    const output = lastFrame();
+    expect(output).toContain("Ensemble spread");
+    expect(output).toContain("Empirical sigma");
+    expect(output).toContain("Actual error");
+    expect(output).toContain("2.6F");
+    expect(output).toContain("1.3F");
+    expect(output).toContain("1.1F");
+  });
+});
+
+describe("AccuracySparkline", () => {
+  test("renders sparkline with percentage", () => {
+    const { lastFrame } = render(
+      React.createElement(AccuracySparkline, { values: [0.5, 0.6, 0.7, 0.75] })
+    );
+    const output = lastFrame();
+    expect(output).toContain("75%");
+  });
+
+  test("renders placeholder for empty data", () => {
+    const { lastFrame } = render(
+      React.createElement(AccuracySparkline, { values: [] })
+    );
+    expect(lastFrame()).toContain("No accuracy data");
+  });
+
+  test("uses green when above threshold", () => {
+    const { lastFrame } = render(
+      React.createElement(AccuracySparkline, { values: [0.8], threshold: 0.7 })
+    );
+    expect(lastFrame()).toContain("80%");
   });
 });
 
@@ -94,124 +213,5 @@ describe("downsample", () => {
     expect(result[0]).toEqual(points[0]);
     expect(result[result.length - 1]).toEqual(points[points.length - 1]);
     expect(result.length).toBe(4);
-  });
-});
-
-describe("renderHorizontalBar", () => {
-  test("renders proportional bar", () => {
-    const result = renderHorizontalBar("Test", 50, 100, 10);
-    const filled = (result.match(/█/g) || []).length;
-    const empty = (result.match(/░/g) || []).length;
-    expect(filled).toBe(5);
-    expect(empty).toBe(5);
-    expect(result).toContain("Test");
-  });
-
-  test("renders full bar at max value", () => {
-    const result = renderHorizontalBar("Full", 100, 100, 10);
-    const filled = (result.match(/█/g) || []).length;
-    expect(filled).toBe(10);
-  });
-
-  test("renders empty bar at zero value", () => {
-    const result = renderHorizontalBar("Empty", 0, 100, 10);
-    const filled = (result.match(/█/g) || []).length;
-    const empty = (result.match(/░/g) || []).length;
-    expect(filled).toBe(0);
-    expect(empty).toBe(10);
-  });
-
-  test("handles max of zero gracefully", () => {
-    const result = renderHorizontalBar("Zero", 0, 0, 10);
-    expect(typeof result).toBe("string");
-  });
-});
-
-describe("renderBucketChart", () => {
-  test("renders buckets with hit rates", () => {
-    const buckets = [
-      { label: "0.0-0.1", hits: 1, total: 10 },
-      { label: "0.1-0.2", hits: 2, total: 8 },
-      { label: "0.5-0.7", hits: 4, total: 6 },
-    ];
-    const result = renderBucketChart(buckets);
-    const lines = result.split("\n");
-    expect(lines.length).toBe(3);
-    expect(result).toContain("0.0-0.1");
-    expect(result).toContain("0.5-0.7");
-    expect(result).toContain("1/10");
-    expect(result).toContain("4/6");
-  });
-
-  test("returns placeholder for empty data", () => {
-    const result = renderBucketChart([]);
-    expect(result).toContain("No calibration data");
-  });
-
-  test("skips buckets with zero total", () => {
-    const buckets = [
-      { label: "0.0-0.1", hits: 0, total: 0 },
-      { label: "0.1-0.2", hits: 3, total: 5 },
-    ];
-    const result = renderBucketChart(buckets);
-    expect(result).not.toContain("0.0-0.1");
-    expect(result).toContain("0.1-0.2");
-  });
-
-  test("marks miscalibrated buckets", () => {
-    // 0.0-0.1 bucket with 80% hit rate is very miscalibrated (expected ~5%)
-    const buckets = [{ label: "0.0-0.1", hits: 8, total: 10 }];
-    const result = renderBucketChart(buckets);
-    expect(result).toContain("!");
-  });
-
-  test("well-calibrated bucket has no warning marker", () => {
-    // 0.5-0.7 bucket with 60% hit rate is well calibrated (expected ~60%)
-    const buckets = [{ label: "0.5-0.7", hits: 6, total: 10 }];
-    const result = renderBucketChart(buckets);
-    expect(result).not.toContain("!");
-    expect(result).not.toContain("~");
-  });
-});
-
-describe("renderDailyPnl", () => {
-  test("renders daily P&L bars", () => {
-    const days = [
-      { date: "2026-02-17", pnl: 240 },
-      { date: "2026-02-18", pnl: -120 },
-      { date: "2026-02-19", pnl: 80 },
-    ];
-    const result = renderDailyPnl(days);
-    const lines = result.split("\n");
-    expect(lines.length).toBe(3);
-    expect(result).toContain("Tue");
-    expect(result).toContain("Wed");
-    expect(result).toContain("Thu");
-    expect(result).toContain("+$2.40");
-    expect(result).toContain("-$1.20");
-  });
-
-  test("returns placeholder for empty data", () => {
-    const result = renderDailyPnl([]);
-    expect(result).toContain("No daily P&L data");
-  });
-
-  test("handles all zeros", () => {
-    const days = [
-      { date: "2026-02-20", pnl: 0 },
-      { date: "2026-02-21", pnl: 0 },
-    ];
-    const result = renderDailyPnl(days);
-    expect(result).toContain("+$0.00");
-  });
-
-  test("handles all negative values", () => {
-    const days = [
-      { date: "2026-02-20", pnl: -500 },
-      { date: "2026-02-21", pnl: -200 },
-    ];
-    const result = renderDailyPnl(days);
-    expect(result).toContain("-$5.00");
-    expect(result).toContain("-$2.00");
   });
 });

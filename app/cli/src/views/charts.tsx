@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import plot from "simple-ascii-chart";
+import { LineGraph } from "@pppp606/ink-chart";
 
 // ═══════════════════════════════════════════════════════════
 // Data interfaces (unchanged — these are the data contracts)
@@ -92,25 +92,21 @@ export function PortfolioChart({
   }
 
   const sampled = downsample(points, width);
-  const t0 = new Date(sampled[0]!.recordedAt).getTime();
+  const values = sampled.map((p) => p.portfolio / 100);
 
-  const chartPoints: [number, number][] = sampled.map((p) => {
-    const hoursElapsed = (new Date(p.recordedAt).getTime() - t0) / 3_600_000;
-    return [hoursElapsed, p.portfolio / 100];
-  });
+  // Build y-axis labels: min and max dollar values
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const yLabels = min === max ? [`$${min.toFixed(0)}`] : [`$${min.toFixed(0)}`, `$${max.toFixed(0)}`];
 
-  const chartStr = plot(chartPoints, {
-    width,
-    height,
-    color: "ansiGreen",
-    hideXAxis: true,
-    formatter: (value, { axis }) => {
-      if (axis === "y") return `$${value.toFixed(0)}`;
-      return value;
-    },
-  });
-
-  return <Text color="green">{chartStr}</Text>;
+  return (
+    <LineGraph
+      data={[{ values, color: "green" }]}
+      width={width}
+      height={height}
+      yLabels={yLabels}
+    />
+  );
 }
 
 /** Expected midpoints per calibration bucket label */
@@ -273,99 +269,3 @@ export function AccuracySparkline({
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-// Legacy string-returning functions (for backward compat)
-// ═══════════════════════════════════════════════════════════
-
-export function renderPortfolioChart(
-  points: PortfolioPoint[],
-  width = 60,
-  height = 8,
-): string {
-  if (points.length === 0) return "  No portfolio data yet.";
-  if (points.length === 1) {
-    return `  $${(points[0]!.portfolio / 100).toFixed(2)} (single point)`;
-  }
-
-  const sampled = downsample(points, width);
-  const t0 = new Date(sampled[0]!.recordedAt).getTime();
-  const chartPoints: [number, number][] = sampled.map((p) => {
-    const hoursElapsed = (new Date(p.recordedAt).getTime() - t0) / 3_600_000;
-    return [hoursElapsed, p.portfolio / 100];
-  });
-
-  return plot(chartPoints, {
-    width,
-    height,
-    color: "ansiGreen",
-    hideXAxis: true,
-    formatter: (value, { axis }) => {
-      if (axis === "y") return `$${value.toFixed(0)}`;
-      return value;
-    },
-  });
-}
-
-export function renderBucketChart(buckets: BucketData[]): string {
-  if (buckets.length === 0) return "  No calibration data yet.";
-
-  const lines: string[] = [];
-  const barWidth = 30;
-
-  for (const b of buckets) {
-    if (b.total === 0) continue;
-
-    const hitRate = b.hits / b.total;
-    const filled = Math.round(hitRate * barWidth);
-    const empty = barWidth - filled;
-    const bar = "\u2588".repeat(filled) + "\u2591".repeat(empty);
-
-    const expected = BUCKET_MIDPOINTS[b.label] ?? 0.5;
-    const calibError = Math.abs(hitRate - expected);
-    const indicator = calibError > 0.15 ? "!" : calibError > 0.10 ? "~" : " ";
-
-    const pct = `${(hitRate * 100).toFixed(0)}%`.padStart(4);
-    const counts = `${b.hits}/${b.total}`.padStart(5);
-
-    lines.push(`  ${b.label}  ${bar}  ${counts} ${pct} ${indicator}`);
-  }
-
-  return lines.length > 0 ? lines.join("\n") : "  No calibration data yet.";
-}
-
-export function renderDailyPnl(days: DailyPnlEntry[]): string {
-  if (days.length === 0) return "  No daily P&L data yet.";
-
-  const maxAbs = Math.max(...days.map((d) => Math.abs(d.pnl)), 1);
-  const barWidth = 30;
-  const lines: string[] = [];
-
-  for (const d of days) {
-    const dayLabel = formatDayLabel(d.date);
-    const absVal = Math.abs(d.pnl);
-    const filled = Math.round((absVal / maxAbs) * barWidth);
-    const empty = barWidth - filled;
-    const bar = "\u2588".repeat(filled) + "\u2591".repeat(empty);
-    const sign = d.pnl >= 0 ? "+" : "-";
-    const amount = `${sign}$${(absVal / 100).toFixed(2)}`;
-
-    lines.push(`  ${dayLabel}  ${bar}  ${amount.padStart(8)}`);
-  }
-
-  return lines.join("\n");
-}
-
-export function renderHorizontalBar(
-  label: string,
-  value: number,
-  max: number,
-  barWidth = 20,
-): string {
-  const absMax = Math.abs(max) || 1;
-  const absValue = Math.abs(value);
-  const filled = Math.round((absValue / absMax) * barWidth);
-  const empty = barWidth - filled;
-
-  const bar = "\u2588".repeat(filled) + "\u2591".repeat(empty);
-  return `${label}  ${bar}`;
-}
