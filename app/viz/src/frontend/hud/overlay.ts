@@ -9,7 +9,7 @@ import { categoryFromTicker, categoryLabel } from "../lib/category";
 let balance: BalanceData | null = null;
 let positionCount = 0;
 let botStatus: BotStatusData | null = null;
-const feedItems: string[] = [];
+const feedItems: { text: string; cssClass: string }[] = [];
 const MAX_FEED = 10;
 
 export function initHud(): void {
@@ -32,6 +32,13 @@ export function initHud(): void {
       <div class="legend-item"><span class="legend-dot" style="background:#0cc;box-shadow:0 0 6px #0cc"></span> Idle</div>
       <div class="legend-item"><span class="legend-dot" style="background:#0f8;box-shadow:0 0 6px #0f8"></span> Active Position</div>
       <div class="legend-item"><span class="legend-dot" style="background:#fc0;box-shadow:0 0 6px #fc0"></span> Signal Detected</div>
+    </div>
+    <div id="sniper-mode">
+      <span class="mode-badge" id="mode-badge"></span>
+      <span class="mode-detail" id="mode-detail"></span>
+    </div>
+    <div id="sniper-countdown" style="display:none">
+      <span id="sniper-next" class="stat-value"></span>
     </div>
     <div id="feed">
       <h3>Activity</h3>
@@ -72,11 +79,31 @@ export function handleHudMessage(msg: WsMessage): void {
     case "bot:status":
       botStatus = msg.data;
       updateBotStatus();
+      updateSniperMode();
       addFeedItem(
         `Tick #${msg.data.tickCount} complete${msg.data.dryRun ? " [DRY]" : ""}`,
         "tick"
       );
       break;
+
+    case "signal:scout": {
+      const sCat = categoryLabel(categoryFromTicker(msg.data.ticker));
+      addFeedItem(
+        `[SCOUT] [${sCat}] ${msg.data.ticker} edge ${(msg.data.edge * 100).toFixed(1)}% (${msg.data.forecastHorizonHours.toFixed(1)}h)`,
+        "scout"
+      );
+      break;
+    }
+
+    case "forecast:fetched": {
+      if (msg.data.hrrrValue != null) {
+        addFeedItem(
+          `HRRR ${msg.data.stationId}: ${msg.data.hrrrValue.toFixed(1)}F (wt ${(msg.data.hrrrWeight * 100).toFixed(0)}%)`,
+          "hrrr"
+        );
+      }
+      break;
+    }
 
     case "signal:new": {
       const cat = categoryLabel(categoryFromTicker(msg.data.ticker));
@@ -153,8 +180,42 @@ function updateBotStatus(): void {
   }
 }
 
+function updateSniperMode(): void {
+  const badge = document.getElementById("mode-badge");
+  const detail = document.getElementById("mode-detail");
+  if (!badge || !detail || !botStatus) return;
+
+  const inSniper = (botStatus.marketsInSniperWindow ?? 0) > 0;
+  const sniperHours = botStatus.sniperHorizonHours ?? 0;
+
+  if (sniperHours <= 0) {
+    badge.textContent = "";
+    detail.textContent = "";
+    return;
+  }
+
+  badge.textContent = inSniper ? "SNIPER" : "SCOUT";
+  badge.className = `mode-badge ${inSniper ? "sniper" : "scout"}`;
+  detail.textContent = `${sniperHours}h window`;
+
+  // Update countdown
+  const countdownEl = document.getElementById("sniper-countdown");
+  const nextEl = document.getElementById("sniper-next");
+  if (countdownEl && nextEl) {
+    if (!inSniper && (botStatus.marketsInScoutMode ?? 0) > 0) {
+      countdownEl.style.display = "";
+      nextEl.textContent = `${botStatus.marketsInScoutMode} markets in scout`;
+    } else if (inSniper) {
+      countdownEl.style.display = "";
+      nextEl.textContent = `${botStatus.marketsInSniperWindow} in sniper window`;
+    } else {
+      countdownEl.style.display = "none";
+    }
+  }
+}
+
 function addFeedItem(text: string, cssClass: string): void {
-  feedItems.unshift(text);
+  feedItems.unshift({ text, cssClass });
   if (feedItems.length > MAX_FEED) feedItems.pop();
 
   const list = document.getElementById("feed-list");
@@ -170,7 +231,7 @@ function addFeedItem(text: string, cssClass: string): void {
   list.innerHTML = feedItems
     .map(
       (item, i) =>
-        `<div class="feed-item ${i === 0 ? cssClass : ""}"><span class="time">${now}</span>${item}</div>`
+        `<div class="feed-item ${item.cssClass}"><span class="time">${now}</span>${item.text}</div>`
     )
     .join("");
 }

@@ -3,6 +3,7 @@
 export type WsMessage =
   | { type: "snapshot"; data: SnapshotData }
   | { type: "signal:new"; data: SignalData }
+  | { type: "signal:scout"; data: ScoutSignalData }
   | { type: "order:placed"; data: OrderData }
   | { type: "order:update"; data: OrderUpdateData }
   | { type: "position:update"; data: PositionData }
@@ -10,6 +11,7 @@ export type WsMessage =
   | { type: "market:discovered"; data: MarketDiscoveredData }
   | { type: "market:resolved"; data: MarketResolvedData }
   | { type: "bot:status"; data: BotStatusData }
+  | { type: "forecast:fetched"; data: ForecastFetchedData }
   | { type: "log"; data: LogData };
 
 export type SnapshotData = {
@@ -25,9 +27,26 @@ export type SignalData = {
   side: "yes" | "no";
   edge: number;
   confidence: number;
-  recommendation: "buy_yes" | "buy_no" | "skip";
+  recommendation: "buy_yes" | "buy_no" | "scout" | "skip";
   estimatedProb: number;
   marketPrice: number;
+  forecastHorizonHours?: number;
+  sigmaSource?: "empirical" | "ensemble";
+  sigmaUsed?: number;
+  hrrrActive?: boolean;
+  observationTemp?: number;
+};
+
+export type ScoutSignalData = {
+  id: string;
+  ticker: string;
+  side: "yes" | "no";
+  edge: number;
+  confidence: number;
+  estimatedProb: number;
+  marketPrice: number;
+  forecastHorizonHours: number;
+  sigmaSource?: "empirical" | "ensemble";
 };
 
 export type OrderData = {
@@ -80,6 +99,21 @@ export type BotStatusData = {
   lastTick: string;
   tickCount: number;
   uptime: number;
+  sniperHorizonHours?: number;
+  marketsInSniperWindow?: number;
+  marketsInScoutMode?: number;
+};
+
+export type ForecastFetchedData = {
+  stationId: string;
+  sources: {
+    openMeteo: number;
+    hrrr: number;
+    tomorrowIo: number;
+  };
+  hrrrValue?: number;
+  horizonBucket: string;
+  hrrrWeight: number;
 };
 
 export type LogData = {
@@ -135,4 +169,7 @@ export type PerformanceData = {
     edge: number;
     realizedPnl: number | null;
   }[];
+  bracketAccuracy?: number;
+  avgSigmaUsed?: number;
+  hrrrCoverage?: number;
 };

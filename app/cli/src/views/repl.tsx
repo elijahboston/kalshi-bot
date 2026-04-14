@@ -1,12 +1,13 @@
 import React, { useState, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import { executeCommand, parseCommand } from "../commands";
+import { executeCommand, parseCommand, type CommandResult } from "../commands";
 
 interface OutputLine {
   id: number;
   type: "input" | "output" | "error";
   text: string;
+  jsx?: React.ReactElement;
 }
 
 let lineId = 0;
@@ -19,10 +20,16 @@ export function Repl({ onExit }: { onExit: () => void }) {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const addOutput = useCallback(
-    (text: string, type: "output" | "error" = "output") => {
-      setHistory((prev) =>
-        [...prev, { id: ++lineId, type, text }].slice(-100)
-      );
+    (result: CommandResult, type: "output" | "error" = "output") => {
+      if (typeof result === "string") {
+        setHistory((prev) =>
+          [...prev, { id: ++lineId, type, text: result }].slice(-100)
+        );
+      } else {
+        setHistory((prev) =>
+          [...prev, { id: ++lineId, type, text: "", jsx: result }].slice(-100)
+        );
+      }
     },
     []
   );
@@ -91,20 +98,24 @@ export function Repl({ onExit }: { onExit: () => void }) {
 
       {/* Scrollable output */}
       <Box flexDirection="column" flexGrow={1}>
-        {history.slice(-20).map((line) => (
-          <Text
-            key={line.id}
-            color={
-              line.type === "error"
-                ? "red"
-                : line.type === "input"
-                  ? "cyan"
-                  : undefined
-            }
-          >
-            {line.text}
-          </Text>
-        ))}
+        {history.slice(-20).map((line) =>
+          line.jsx ? (
+            <Box key={line.id}>{line.jsx}</Box>
+          ) : (
+            <Text
+              key={line.id}
+              color={
+                line.type === "error"
+                  ? "red"
+                  : line.type === "input"
+                    ? "cyan"
+                    : undefined
+              }
+            >
+              {line.text}
+            </Text>
+          )
+        )}
       </Box>
 
       {/* Input prompt */}

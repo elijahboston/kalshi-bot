@@ -463,12 +463,12 @@ Then commands can return `<Table data={...} />` directly.
 
 These are ordered by user impact and dependency:
 
-1. **Replace chart infrastructure** (#11) — do this first, unblocks new charts in later items
-2. **Replace table infrastructure** (#12) — do alongside #11, both are foundational
-3. **Sniper/scout visibility** (#1, #7) — most urgent, bot looks broken without it
-4. **Explain command updates** (#3, #4, #5) — immediate debugging value
-5. **Hours-to-close column** (#2) — quick win, informs all other features
-6. **WebSocket type updates** (#10) — required for GUI changes
-7. **Forecast accuracy tracking** (#8) — validates the improvements are working, uses new chart components
-8. **Bracket probability comparison** (#6) — deepens market understanding
-9. **GUI station HRRR visualization** (#9) — polish
+1. [x] **Replace chart infrastructure** (#11) — charts.ts → charts.tsx with React components (PortfolioChart, CalibrationChart, DailyPnlChart, SigmaComparisonChart, AccuracySparkline). Used ink-chart's ervy bar chart wrapper where applicable; kept simple-ascii-chart for portfolio line chart wrapped in React component.
+2. [x] **Replace table infrastructure** (#12) — built custom `Table` component in `components/table.tsx` (ink-table CJS was incompatible with Bun ESM). Updated REPL to support JSX returns via `CommandResult` union type. Converted all 9 tables across views and REPL commands.
+3. [x] **Sniper/scout visibility** (#1, #7) — status bar shows SNIPER/SCOUT mode badge + sniper horizon. Dashboard shows sniper countdown timer with sorted market list. Activity view shows scout signal counts and yellow scout events. Dashboard signals show SCOUT label with hours-to-close.
+4. [x] **Explain command updates** (#3, #4, #5) — added SIGMA section (source, sigma used, ensemble spread), OBSERVATION ADJUSTMENT section (observed temp, divergence, sigma/mean shifts), and DATA SOURCES section (ensemble breakdown, HRRR value/weight, Tomorrow.io) to explain command. Also shows forecast horizon in hours with sniper/scout label.
+5. [x] **Hours-to-close column** (#2) — markets view shows `closeIn` column with hours-to-close, color-coded: red (<6h), yellow (6-12h), gray (>12h). Also added `our P` vs `mkt P` columns and sigma indicator (E/S).
+6. [x] **WebSocket type updates** (#10) — added `signal:scout`, `forecast:fetched` bus events. Extended SignalData with forecastHorizonHours, sigmaSource, sigmaUsed, hrrrActive, observationTemp. Extended BotStatusData with sniperHorizonHours, marketsInSniperWindow, marketsInScoutMode. Added ScoutSignalData and ForecastFetchedData types. Updated ws-bridge to forward new events.
+7. [x] **Forecast accuracy tracking** (#8) — performance view shows bracket accuracy (top-1 correct %), accuracy trend sparkline, and sigma comparison chart (when data available). New AccuracySparkline and SigmaComparisonChart components.
+8. [x] **Bracket probability comparison** (#6) — markets view shows `our P` and `mkt P` columns with strong conviction (>50%) highlighted in bold green.
+9. [x] **GUI station HRRR visualization** (#9) — stations have HRRR inner ring that pulses blue when active, bright cyan when HRRR + observation both active. Weather layer draws subtle 3km grid overlay around HRRR-active stations. Overlay shows sniper/scout mode badge and scout signals in amber. Station detail shows observation vs forecast and hours-to-close per position. Performance HUD shows bracket accuracy metric.

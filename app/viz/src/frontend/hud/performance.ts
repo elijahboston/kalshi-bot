@@ -87,6 +87,11 @@ function renderStats(): void {
   const eqLabel = document.getElementById("equity-current");
   if (eqLabel) eqLabel.textContent = `$${(d.portfolio / 100).toFixed(2)}`;
 
+  const accuracyStr = d.bracketAccuracy != null
+    ? `${(d.bracketAccuracy * 100).toFixed(1)}%`
+    : "--";
+  const accuracyClass = d.bracketAccuracy != null && d.bracketAccuracy >= 0.5 ? "positive" : "";
+
   el.innerHTML = `
     <div class="stat-row"><span class="stat-label">Cash</span><span class="stat-value">$${(d.cash / 100).toFixed(2)}</span></div>
     <div class="stat-row"><span class="stat-label">Portfolio</span><span class="stat-value">$${(d.portfolio / 100).toFixed(2)}</span></div>
@@ -94,6 +99,7 @@ function renderStats(): void {
     <div class="stat-row"><span class="stat-label">Realized</span><span class="stat-value ${realClass}">${d.realizedPnl >= 0 ? "+" : ""}$${(d.realizedPnl / 100).toFixed(2)}</span></div>
     <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value">${(d.winRate * 100).toFixed(1)}%</span></div>
     <div class="stat-row"><span class="stat-label">Brier Score</span><span class="stat-value">${d.brierScore.toFixed(3)}</span></div>
+    <div class="stat-row"><span class="stat-label">Accuracy</span><span class="stat-value ${accuracyClass}">${accuracyStr}</span></div>
     <div class="stat-row"><span class="stat-label">Orders</span><span class="stat-value">${d.orderCount}</span></div>
     <div class="stat-row"><span class="stat-label">Positions</span><span class="stat-value">${d.positionCount}</span></div>
   `;

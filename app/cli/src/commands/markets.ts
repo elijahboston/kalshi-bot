@@ -1,6 +1,11 @@
+import React from "react";
+import { Text } from "ink";
+import Table from "../components/table";
 import { getDb, markets, eq, desc } from "@kcb/db";
 import { getConfig } from "@kcb/config";
-import type { CommandDef } from "./index";
+import type { CommandDef, CommandResult } from "./index";
+
+const CAT: Record<string, string> = { high_temp: "HIGH", low_temp: "LOW", precip: "RAIN", snowfall: "SNOW" };
 
 export const marketsCommands: CommandDef[] = [
   {
@@ -8,7 +13,7 @@ export const marketsCommands: CommandDef[] = [
     aliases: ["ls", "list"],
     description: "List tracked markets",
     usage: "markets [--status open|closed|settled]",
-    handler: async (args) => {
+    handler: async (args): Promise<CommandResult> => {
       const db = getDb();
       const statusFilter = args.find((a) => !a.startsWith("-"));
 
@@ -35,29 +40,33 @@ export const marketsCommands: CommandDef[] = [
         return "No markets found. Start the bot to begin discovery.";
       }
 
-      const CAT: Record<string, string> = { high_temp: "HIGH", low_temp: "LOW", precip: "RAIN", snowfall: "SNOW" };
-      const header = "TYPE ".padEnd(6) + "TICKER".padEnd(30) + "PRICE".padStart(6) + "  STATUS".padEnd(10) + "  CLOSES";
-      const lines = rows.map((r) => {
-        const cat = (CAT[r.category] ?? r.category).padEnd(5);
-        const price = r.lastYesPrice != null ? `${r.lastYesPrice}¢` : "—";
-        const closes = r.closeTime
+      const data = rows.map((r) => ({
+        type: CAT[r.category] ?? r.category,
+        ticker: r.ticker,
+        price: r.lastYesPrice != null ? `${r.lastYesPrice}¢` : "—",
+        status: r.status,
+        closes: r.closeTime
           ? new Date(r.closeTime).toLocaleString("en-US", {
               month: "short",
               day: "numeric",
               hour: "2-digit",
               minute: "2-digit",
             })
-          : "—";
-        return (
-          cat + " " +
-          r.ticker.padEnd(30) +
-          price.padStart(6) +
-          `  ${r.status}`.padEnd(10) +
-          `  ${closes}`
-        );
-      });
+          : "—",
+      }));
 
-      return [header, "─".repeat(60), ...lines].join("\n");
+      return React.createElement(Table, {
+        data,
+        columns: ["type", "ticker", "price", "status", "closes"],
+        cell: ({ children, column }: { children: React.ReactNode; column: string }) => {
+          const val = String(children);
+          if (column === "status") {
+            const color = val === "open" ? "green" : val === "closed" ? "yellow" : "gray";
+            return React.createElement(Text, { color }, children);
+          }
+          return React.createElement(Text, null, children);
+        },
+      });
     },
   },
   {

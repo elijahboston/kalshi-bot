@@ -5,6 +5,8 @@ import {
   renderBucketChart,
   renderDailyPnl,
   formatDuration,
+  formatDayLabel,
+  downsample,
   type PortfolioPoint,
 } from "./charts";
 
@@ -44,7 +46,6 @@ describe("renderPortfolioChart", () => {
 
   test("handles all same values", () => {
     const result = renderPortfolioChart(makePoints([5000, 5000, 5000, 5000]), 30, 4);
-    // Should not crash, returns a valid string
     expect(typeof result).toBe("string");
     expect(result.length).toBeGreaterThan(0);
   });
@@ -71,6 +72,28 @@ describe("formatDuration", () => {
 
   test("formats zero", () => {
     expect(formatDuration(0)).toBe("0m");
+  });
+});
+
+describe("formatDayLabel", () => {
+  test("formats ISO date string to short day label", () => {
+    const result = formatDayLabel("2026-02-17");
+    expect(result).toBe("Tue 02/17");
+  });
+});
+
+describe("downsample", () => {
+  test("returns all points when count is within limit", () => {
+    const points = makePoints([1, 2, 3]);
+    expect(downsample(points, 5)).toEqual(points);
+  });
+
+  test("preserves first and last points", () => {
+    const points = makePoints([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const result = downsample(points, 4);
+    expect(result[0]).toEqual(points[0]);
+    expect(result[result.length - 1]).toEqual(points[points.length - 1]);
+    expect(result.length).toBe(4);
   });
 });
 

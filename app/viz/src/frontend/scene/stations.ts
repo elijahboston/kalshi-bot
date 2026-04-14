@@ -8,6 +8,7 @@ export type StationMesh = {
   group: THREE.Group;
   basePlane: THREE.Mesh;
   outerRing: THREE.Mesh;
+  hrrrRing: THREE.Mesh;
   column: THREE.Mesh;
   columnGlow: THREE.Mesh;
   tipSprite: THREE.Sprite;
@@ -15,6 +16,8 @@ export type StationMesh = {
   labelCanvas: HTMLCanvasElement;
   labelTexture: THREE.CanvasTexture;
   state: "idle" | "active" | "signal";
+  hrrrActive: boolean;
+  observationActive: boolean;
   pulseT: number;
   temp: number | undefined;
   targetColumnH: number;
@@ -142,6 +145,21 @@ export function createStations(
     outerRing.position.y = 0.006;
     group.add(outerRing);
 
+    // ── HRRR inner ring (hidden by default, lights up blue when HRRR active) ──
+    const hrrrRingGeo = new THREE.RingGeometry(0.10, 0.12, 32);
+    const hrrrRingMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(0x0088ff),
+      transparent: true,
+      opacity: 0.0, // hidden initially
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const hrrrRing = new THREE.Mesh(hrrrRingGeo, hrrrRingMat);
+    hrrrRing.rotation.x = -Math.PI / 2;
+    hrrrRing.position.y = 0.007;
+    group.add(hrrrRing);
+
     // ── Data column (thin beam) ──
     const colGeo = new THREE.CylinderGeometry(0.008, 0.008, 1.0, 6);
     const colMat = new THREE.MeshBasicMaterial({ color: initColor });
@@ -198,6 +216,7 @@ export function createStations(
       group,
       basePlane,
       outerRing,
+      hrrrRing,
       column,
       columnGlow,
       tipSprite,
@@ -205,6 +224,8 @@ export function createStations(
       labelCanvas,
       labelTexture,
       state: station.activeMarkets > 0 ? "active" : "idle",
+      hrrrActive: false,
+      observationActive: false,
       pulseT: 0,
       temp: undefined,
       targetColumnH: columnH,
@@ -248,6 +269,20 @@ export function setStationState(
   if (state === "signal") {
     s.pulseT = 1;
   }
+}
+
+/** Set whether HRRR data is active for a station */
+export function setStationHrrr(stationId: string, active: boolean): void {
+  const s = stationMeshes.find((m) => m.id === stationId);
+  if (!s) return;
+  s.hrrrActive = active;
+}
+
+/** Set whether observation data is active for a station */
+export function setStationObservation(stationId: string, active: boolean): void {
+  const s = stationMeshes.find((m) => m.id === stationId);
+  if (!s) return;
+  s.observationActive = active;
 }
 
 /** Call each frame — animates columns, pulses, breathing */
@@ -297,6 +332,22 @@ export function updateStations(delta: number): void {
       // Subtle idle breathing on outer ring
       const breath = Math.sin(now * 1.5 + s.position.x * 10) * 0.08;
       (s.outerRing.material as THREE.MeshBasicMaterial).opacity = 0.3 + breath;
+    }
+
+    // HRRR ring animation
+    const hrrrMat = s.hrrrRing.material as THREE.MeshBasicMaterial;
+    if (s.hrrrActive) {
+      // Slow pulse when HRRR active
+      const hrrrPulse = Math.sin(now * 2.0 + s.position.x * 5) * 0.15 + 0.35;
+      hrrrMat.opacity = hrrrPulse;
+      // Brighter cyan when both HRRR + observation are active
+      if (s.observationActive) {
+        hrrrMat.color.setHex(0x00ddff); // bright cyan
+      } else {
+        hrrrMat.color.setHex(0x0088ff); // blue
+      }
+    } else {
+      hrrrMat.opacity = 0; // hidden
     }
   }
 }

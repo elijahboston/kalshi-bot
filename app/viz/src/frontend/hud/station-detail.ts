@@ -19,6 +19,10 @@ export function initStationDetail(
     </div>
     <div class="sd-weather" id="sd-weather">—</div>
     <div class="sd-section">
+      <h4>OBSERVATION</h4>
+      <div id="sd-observation" class="sd-content">—</div>
+    </div>
+    <div class="sd-section">
       <h4>POSITIONS</h4>
       <div id="sd-positions" class="sd-content">No positions</div>
     </div>
@@ -99,6 +103,17 @@ async function showStationDetail(stationId: string): Promise<void> {
       ${condStr ? `<span class="sd-condition">${condStr}</span>` : ""}
     `;
 
+    // Observation vs Forecast
+    const obsEl = document.getElementById("sd-observation")!;
+    if (data.observation != null && data.forecastMean != null) {
+      obsEl.innerHTML = `
+        <span>Observed: <strong>${data.observation.toFixed(1)}°F</strong></span>
+        <span class="muted"> | Forecast: ${data.forecastMean.toFixed(1)}°F</span>
+      `;
+    } else {
+      obsEl.innerHTML = '<span class="muted">No observation data</span>';
+    }
+
     // Positions
     const posEl = document.getElementById("sd-positions")!;
     if (data.positions.length === 0) {
@@ -112,10 +127,24 @@ async function showStationDetail(stationId: string): Promise<void> {
             p.unrealizedPnl != null
               ? `${p.unrealizedPnl >= 0 ? "+" : ""}${(p.unrealizedPnl / 100).toFixed(2)}`
               : "";
+          // Hours to close
+          let closeStr = "";
+          if (p.closeTime || p.targetDate) {
+            const closeMs = p.closeTime
+              ? new Date(p.closeTime).getTime()
+              : new Date(p.targetDate + "T23:59:00Z").getTime();
+            const hoursLeft = (closeMs - Date.now()) / 3_600_000;
+            if (hoursLeft > 0) {
+              closeStr = hoursLeft < 24
+                ? `<span class="muted">${hoursLeft.toFixed(1)}h</span>`
+                : `<span class="muted">${(hoursLeft / 24).toFixed(1)}d</span>`;
+            }
+          }
           return `<div class="sd-row">
             ${categoryBadge(categoryFromTicker(p.ticker))}
             <span class="sd-ticker">${shortenTicker(p.ticker)}</span>
             <span>${p.quantity}x ${p.side.toUpperCase()}</span>
+            ${closeStr}
             <span class="stat-value ${pnlClass}">${pnlStr}</span>
           </div>`;
         })

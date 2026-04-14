@@ -1,3 +1,4 @@
+import React from "react";
 import { botCommands } from "./bot";
 import { marketsCommands } from "./markets";
 import { positionsCommands } from "./positions";
@@ -6,12 +7,14 @@ import { calibrationCommands } from "./calibration";
 import { explainCommands } from "./explain";
 import { backtestCommands } from "./backtest";
 
+export type CommandResult = string | React.ReactElement;
+
 export interface CommandDef {
   name: string;
   aliases?: string[];
   description: string;
   usage?: string;
-  handler: (args: string[]) => Promise<string>;
+  handler: (args: string[]) => Promise<CommandResult>;
 }
 
 const commandGroups: Record<string, CommandDef[]> = {
@@ -43,7 +46,7 @@ export function parseCommand(input: string): { command: string; args: string[] }
   return { command, args };
 }
 
-export async function executeCommand(command: string, args: string[]): Promise<string> {
+export async function executeCommand(command: string, args: string[]): Promise<CommandResult> {
   if (command === "help") {
     return formatHelp();
   }

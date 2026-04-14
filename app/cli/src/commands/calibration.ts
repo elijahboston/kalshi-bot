@@ -1,7 +1,10 @@
+import React from "react";
+import { Text } from "ink";
+import Table from "../components/table";
 import { getDb, calibration, stationBias, adaptiveThresholds, weatherForecasts, desc, gte, and, eq, sql } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { now } from "@kcb/shared";
-import type { CommandDef } from "./index";
+import type { CommandDef, CommandResult } from "./index";
 
 /** Probability buckets for calibration analysis */
 const BUCKETS = [
@@ -19,7 +22,7 @@ export const calibrationCommands: CommandDef[] = [
     aliases: ["cal"],
     description: "Calibration summary",
     usage: "calibration [summary | detail | retrain]",
-    handler: async (args) => {
+    handler: async (args): Promise<CommandResult> => {
       const subcommand = args[0]?.toLowerCase() || "summary";
 
       if (subcommand === "summary") {
@@ -99,7 +102,7 @@ async function calibrationSummary(): Promise<string> {
   return lines.join("\n");
 }
 
-async function calibrationDetail(seriesTicker?: string): Promise<string> {
+async function calibrationDetail(seriesTicker?: string): Promise<CommandResult> {
   const db = getDb();
   const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
 
@@ -120,30 +123,33 @@ async function calibrationDetail(seriesTicker?: string): Promise<string> {
       : "No calibration data available.";
   }
 
-  const header =
-    "TICKER".padEnd(28) +
-    "PRED".padStart(6) +
-    "MKT".padStart(6) +
-    "ACTUAL".padStart(7) +
-    "EDGE".padStart(7) +
-    "P&L".padStart(8);
+  const data = records.map((r) => ({
+    ticker: r.ticker.slice(0, 27),
+    pred: `${(r.predictedProb * 100).toFixed(0)}%`,
+    mkt: `${(r.marketPrice * 100).toFixed(0)}%`,
+    actual: r.actualOutcome === 1 ? "YES" : "NO",
+    edge: `${(r.edge * 100).toFixed(1)}¢`,
+    "p&l": r.realizedPnl != null ? `$${(r.realizedPnl / 100).toFixed(2)}` : "—",
+  }));
 
-  const lines = records.map((r) => {
-    const pnl = r.realizedPnl != null ? `$${(r.realizedPnl / 100).toFixed(2)}` : "—";
-    return (
-      r.ticker.slice(0, 27).padEnd(28) +
-      `${(r.predictedProb * 100).toFixed(0)}%`.padStart(6) +
-      `${(r.marketPrice * 100).toFixed(0)}%`.padStart(6) +
-      (r.actualOutcome === 1 ? "  YES" : "  NO ").padStart(7) +
-      `${(r.edge * 100).toFixed(1)}¢`.padStart(7) +
-      pnl.padStart(8)
-    );
+  return React.createElement(Table, {
+    data,
+    columns: ["ticker", "pred", "mkt", "actual", "edge", "p&l"],
+    cell: ({ children, column }: { children: React.ReactNode; column: string }) => {
+      const val = String(children);
+      if (column === "actual") {
+        return React.createElement(Text, { color: val === "YES" ? "green" : "red" }, children);
+      }
+      if (column === "p&l" && val !== "—") {
+        const num = parseFloat(val.replace("$", ""));
+        return React.createElement(Text, { color: num >= 0 ? "green" : "red" }, children);
+      }
+      return React.createElement(Text, null, children);
+    },
   });
-
-  return [header, "─".repeat(62), ...lines].join("\n");
 }
 
-async function showBias(stationId?: string): Promise<string> {
+async function showBias(stationId?: string): Promise<CommandResult> {
   const db = getDb();
 
   let rows;
@@ -160,16 +166,18 @@ async function showBias(stationId?: string): Promise<string> {
     return "No station bias data yet. Needs market resolutions.";
   }
 
-  const header = "STATION".padEnd(8) + "HORIZON".padStart(8) + "BIAS (°F)".padStart(10) + "STD".padStart(8) + "N".padStart(6);
-  const lines = rows.map((r) =>
-    r.stationId.padEnd(8) +
-    `${r.forecastHorizonDays}d`.padStart(8) +
-    `${r.meanBias >= 0 ? "+" : ""}${r.meanBias.toFixed(2)}`.padStart(10) +
-    r.stdBias.toFixed(2).padStart(8) +
-    String(r.sampleSize).padStart(6)
-  );
+  const data = rows.map((r) => ({
+    station: r.stationId,
+    horizon: `${r.forecastHorizonDays}d`,
+    "bias (°F)": `${r.meanBias >= 0 ? "+" : ""}${r.meanBias.toFixed(2)}`,
+    std: r.stdBias.toFixed(2),
+    n: String(r.sampleSize),
+  }));
 
-  return [header, "─".repeat(40), ...lines].join("\n");
+  return React.createElement(Table, {
+    data,
+    columns: ["station", "horizon", "bias (°F)", "std", "n"],
+  });
 }
 
 async function retrainCalibration(): Promise<string> {

@@ -26,6 +26,33 @@ export type BotEvents = {
     recommendation: "buy_yes" | "buy_no" | "skip";
     estimatedProb: number;
     marketPrice: number;
+    forecastHorizonHours?: number;
+    sigmaSource?: "empirical" | "ensemble";
+    sigmaUsed?: number;
+    hrrrActive?: boolean;
+    observationTemp?: number;
+  };
+  "signal:scout": {
+    id: string;
+    ticker: string;
+    side: "yes" | "no";
+    edge: number;
+    confidence: number;
+    estimatedProb: number;
+    marketPrice: number;
+    forecastHorizonHours: number;
+    sigmaSource?: "empirical" | "ensemble";
+  };
+  "forecast:fetched": {
+    stationId: string;
+    sources: {
+      openMeteo: number;
+      hrrr: number;
+      tomorrowIo: number;
+    };
+    hrrrValue?: number;
+    horizonBucket: string;
+    hrrrWeight: number;
   };
   "order:placed": {
     orderId: string;

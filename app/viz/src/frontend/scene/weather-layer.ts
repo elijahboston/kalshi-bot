@@ -18,6 +18,7 @@ export type WeatherStation = {
   temp?: number;     // Fahrenheit
   precip?: number;   // mm last hour
   condition?: string; // "clear" | "rain" | "snow" | "cloudy"
+  hrrrActive?: boolean; // Whether HRRR data is active for this station
 };
 
 let canvas: HTMLCanvasElement;
@@ -81,6 +82,13 @@ function drawWeather(): void {
 
   // Temperature gradient field
   drawTemperatureField();
+
+  // HRRR grid overlay — denser grid around stations with active HRRR data
+  for (const s of stations) {
+    if (!s.hrrrActive) continue;
+    const { x, y } = latLngToCanvas(s.lat, s.lon);
+    drawHrrrGrid(x, y);
+  }
 
   // Precipitation indicators
   for (const s of stations) {
@@ -158,6 +166,38 @@ function drawTemperatureField(): void {
   }
 
   ctx.putImageData(imageData, 0, 0);
+}
+
+/** Draw a subtle 3km-like grid around stations with active HRRR data */
+function drawHrrrGrid(cx: number, cy: number): void {
+  const gridSize = 40; // area around station
+  const cellSize = 4;  // ~3km equivalent on canvas
+  ctx.strokeStyle = "rgba(0, 136, 255, 0.06)";
+  ctx.lineWidth = 0.5;
+
+  // Horizontal lines
+  for (let y = cy - gridSize; y <= cy + gridSize; y += cellSize) {
+    ctx.beginPath();
+    ctx.moveTo(cx - gridSize, y);
+    ctx.lineTo(cx + gridSize, y);
+    ctx.stroke();
+  }
+  // Vertical lines
+  for (let x = cx - gridSize; x <= cx + gridSize; x += cellSize) {
+    ctx.beginPath();
+    ctx.moveTo(x, cy - gridSize);
+    ctx.lineTo(x, cy + gridSize);
+    ctx.stroke();
+  }
+
+  // Glow at center
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, gridSize);
+  glow.addColorStop(0, "rgba(0, 136, 255, 0.05)");
+  glow.addColorStop(1, "rgba(0, 136, 255, 0.0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, gridSize, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function drawRain(cx: number, cy: number): void {

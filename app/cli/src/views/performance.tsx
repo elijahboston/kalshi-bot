@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
+import Table from "../components/table";
 import { bus } from "@kcb/engine";
 import {
   getDb,
@@ -15,9 +16,11 @@ import {
   sum,
 } from "@kcb/db";
 import {
-  renderPortfolioChart,
-  renderBucketChart,
-  renderDailyPnl,
+  PortfolioChart,
+  CalibrationChart,
+  DailyPnlChart,
+  SigmaComparisonChart,
+  AccuracySparkline,
   formatDuration,
   type PortfolioPoint,
   type BucketData,
@@ -124,6 +127,15 @@ export function PerformanceView() {
   const [bucketStats, setBucketStats] = useState<BucketData[]>([]);
   const [dailyPnl, setDailyPnl] = useState<DailyPnlEntry[]>([]);
   const [windowedWinRates, setWindowedWinRates] = useState<WindowedWinRate[]>([]);
+  const [forecastAccuracy, setForecastAccuracy] = useState<{
+    bracketAccuracy: number;
+    bracketCorrect: number;
+    bracketTotal: number;
+    avgSigmaUsed: number;
+    avgEnsembleStd: number;
+    avgActualError: number;
+    accuracyHistory: number[];
+  } | null>(null);
 
   const loadData = async () => {
     const db = getDb();
@@ -262,6 +274,51 @@ export function PerformanceView() {
 
     // Load windowed win rates
     setWindowedWinRates(await queryWindowedWinRates(db));
+
+    // Load forecast accuracy (#8)
+    try {
+      const cutoff30d = new Date(Date.now() - 30 * 86400_000).toISOString();
+      const accuracyRecords = await db
+        .select({
+          predictedProb: calibration.predictedProb,
+          actualOutcome: calibration.actualOutcome,
+        })
+        .from(calibration)
+        .where(sql`${calibration.resolvedAt} >= ${cutoff30d}`);
+
+      if (accuracyRecords.length > 0) {
+        // Bracket accuracy: was our top-1 bracket correct?
+        // A correct bracket = predicted prob > 0.5 and actual = YES, or predicted prob < 0.5 and actual = NO
+        const bracketCorrect = accuracyRecords.filter((r) =>
+          (r.predictedProb >= 0.5 && r.actualOutcome === 1) ||
+          (r.predictedProb < 0.5 && r.actualOutcome === 0)
+        ).length;
+
+        // Compute rolling accuracy for sparkline (window of 10)
+        const accHistory: number[] = [];
+        const windowSize = Math.min(10, accuracyRecords.length);
+        for (let i = windowSize; i <= accuracyRecords.length; i++) {
+          const window = accuracyRecords.slice(i - windowSize, i);
+          const correct = window.filter((r) =>
+            (r.predictedProb >= 0.5 && r.actualOutcome === 1) ||
+            (r.predictedProb < 0.5 && r.actualOutcome === 0)
+          ).length;
+          accHistory.push(correct / window.length);
+        }
+
+        setForecastAccuracy({
+          bracketAccuracy: bracketCorrect / accuracyRecords.length,
+          bracketCorrect,
+          bracketTotal: accuracyRecords.length,
+          avgSigmaUsed: 0,    // Would need signal reasoning data
+          avgEnsembleStd: 0,  // Would need signal reasoning data
+          avgActualError: 0,  // Would need weather forecast data
+          accuracyHistory: accHistory,
+        });
+      }
+    } catch {
+      // Forecast accuracy is optional — don't crash if tables are missing
+    }
   };
 
   useEffect(() => {
@@ -344,117 +401,123 @@ export function PerformanceView() {
           )
         : portfolioHistory.length + " snapshots") + ") " + "─".repeat(40)}</Text>
       <Box marginBottom={1}>
-        <Text color="green">{renderPortfolioChart(portfolioHistory, 60, 8)}</Text>
+        <PortfolioChart points={portfolioHistory} width={60} height={8} />
       </Box>
 
       {/* Calibration Buckets */}
       <Text bold color="cyan">{"─── Calibration Buckets " + "─".repeat(56)}</Text>
       <Box marginBottom={1}>
-        <Text>{renderBucketChart(bucketStats)}</Text>
+        <CalibrationChart buckets={bucketStats} />
       </Box>
 
       {/* P&L by Day */}
       <Text bold color="cyan">{"─── P&L by Day " + "─".repeat(65)}</Text>
       <Box marginBottom={1}>
-        <Text>{renderDailyPnl(dailyPnl)}</Text>
+        <DailyPnlChart days={dailyPnl} />
       </Box>
 
       {/* Recent Resolutions */}
       <Text bold color="cyan">{"─── Recent Resolutions " + "─".repeat(57)}</Text>
-      <Box flexDirection="column">
-        <Box gap={2}>
-          <Box width={30}><Text bold color="gray">TICKER</Text></Box>
-          <Box width={10}><Text bold color="gray">PREDICTED</Text></Box>
-          <Box width={8}><Text bold color="gray">ACTUAL</Text></Box>
-          <Box width={8}><Text bold color="gray">EDGE</Text></Box>
-          <Box width={10}><Text bold color="gray">PnL</Text></Box>
-        </Box>
-        {resolutions.length === 0 ? (
-          <Text color="gray">No resolved trades yet.</Text>
-        ) : (
-          resolutions.map((r, i) => {
-            const pnlColor = r.realizedPnl != null && r.realizedPnl > 0 ? "green" : r.realizedPnl != null && r.realizedPnl < 0 ? "red" : "gray";
-            return (
-              <Box key={`${r.ticker}-${i}`} gap={2}>
-                <Box width={30}><Text>{r.ticker}</Text></Box>
-                <Box width={10}>
-                  <Text>{(r.predictedProb * 100).toFixed(0)}%</Text>
-                </Box>
-                <Box width={8}>
-                  <Text>{r.actualOutcome === 1 ? "YES" : "NO"}</Text>
-                </Box>
-                <Box width={8}>
-                  <Text color={r.edge > 0 ? "green" : "red"}>
-                    {r.edge > 0 ? "+" : ""}{(r.edge * 100).toFixed(1)}
-                  </Text>
-                </Box>
-                <Box width={10}>
-                  <Text color={pnlColor}>
-                    {r.realizedPnl != null
-                      ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
-                      : "—"}
-                  </Text>
-                </Box>
-              </Box>
-            );
-          })
-        )}
-      </Box>
+      {resolutions.length === 0 ? (
+        <Text color="gray">No resolved trades yet.</Text>
+      ) : (
+        <Table
+          data={resolutions.map((r) => ({
+            ticker: r.ticker,
+            predicted: `${(r.predictedProb * 100).toFixed(0)}%`,
+            actual: r.actualOutcome === 1 ? "YES" : "NO",
+            edge: `${r.edge > 0 ? "+" : ""}${(r.edge * 100).toFixed(1)}`,
+            pnl: r.realizedPnl != null
+              ? `${r.realizedPnl > 0 ? "+" : ""}$${(r.realizedPnl / 100).toFixed(2)}`
+              : "—",
+          }))}
+          columns={["ticker", "predicted", "actual", "edge", "pnl"]}
+          cell={({ children, column }) => {
+            const val = String(children);
+            if (column === "edge") {
+              return <Text color={val.startsWith("+") ? "green" : "red"}>{children}</Text>;
+            }
+            if (column === "pnl") {
+              const color = val.startsWith("+$") ? "green" : val.startsWith("-$") ? "red" : "gray";
+              return <Text color={color}>{children}</Text>;
+            }
+            if (column === "actual") {
+              return <Text color={val === "YES" ? "green" : "red"}>{children}</Text>;
+            }
+            return <Text>{children}</Text>;
+          }}
+        />
+      )}
 
       <Box marginTop={1} />
 
+      {/* Forecast Accuracy (#8) */}
+      {forecastAccuracy && (
+        <>
+          <Text bold color="cyan">{"─── Forecast Accuracy (last 30 days) " + "─".repeat(43)}</Text>
+          <Box flexDirection="column" marginBottom={1}>
+            <Box gap={2}>
+              <Text>
+                <Text bold color="cyan">Correct bracket (top-1)</Text>{" "}
+                <Text color={forecastAccuracy.bracketAccuracy >= 0.5 ? "green" : "yellow"}>
+                  {(forecastAccuracy.bracketAccuracy * 100).toFixed(1)}%
+                </Text>
+                <Text color="gray"> ({forecastAccuracy.bracketCorrect}/{forecastAccuracy.bracketTotal})</Text>
+              </Text>
+            </Box>
+            {forecastAccuracy.accuracyHistory.length > 2 && (
+              <Box gap={1}>
+                <Text bold color="cyan">Accuracy trend</Text>{" "}
+                <AccuracySparkline values={forecastAccuracy.accuracyHistory} threshold={0.7} />
+              </Box>
+            )}
+            {forecastAccuracy.avgSigmaUsed > 0 && forecastAccuracy.avgEnsembleStd > 0 && (
+              <>
+                <Text bold color="cyan" dimColor>Sigma comparison:</Text>
+                <SigmaComparisonChart
+                  ensembleSpread={forecastAccuracy.avgEnsembleStd}
+                  empiricalSigma={forecastAccuracy.avgSigmaUsed}
+                  actualError={forecastAccuracy.avgActualError}
+                />
+              </>
+            )}
+          </Box>
+        </>
+      )}
+
       {/* Order History (compact) */}
       <Text bold color="cyan">{"─── Order History (" + orderRows.length + ") " + "─".repeat(57)}</Text>
-      <Box flexDirection="column">
-        <Box gap={1}>
-          <Box width={10}><Text bold color="gray">TIME</Text></Box>
-          <Box width={28}><Text bold color="gray">TICKER</Text></Box>
-          <Box width={6}><Text bold color="gray">SIDE</Text></Box>
-          <Box width={5}><Text bold color="gray">QTY</Text></Box>
-          <Box width={7}><Text bold color="gray">PRICE</Text></Box>
-          <Box width={9}><Text bold color="gray">STATUS</Text></Box>
-          <Box width={7}><Text bold color="gray">KELLY</Text></Box>
-          <Box width={5}><Text bold color="gray">DRY</Text></Box>
-        </Box>
-        {orderRows.length === 0 ? (
-          <Text color="gray">No orders yet.</Text>
-        ) : (
-          orderRows.map((o, i) => {
-            const statusColor =
-              o.status === "filled" ? "green" :
-              o.status === "open" ? "yellow" :
-              "gray";
-            return (
-              <Box key={`${o.createdAt}-${i}`} gap={1}>
-                <Box width={10}>
-                  <Text color="gray">{o.createdAt.slice(11, 19)}</Text>
-                </Box>
-                <Box width={28}>
-                  <Text>{o.ticker}</Text>
-                </Box>
-                <Box width={6}>
-                  <Text>{o.side.toUpperCase()}</Text>
-                </Box>
-                <Box width={5}>
-                  <Text>{o.quantity}</Text>
-                </Box>
-                <Box width={7}>
-                  <Text>{o.limitPrice}¢</Text>
-                </Box>
-                <Box width={9}>
-                  <Text color={statusColor}>{o.status}</Text>
-                </Box>
-                <Box width={7}>
-                  <Text>{o.kellyFraction != null ? o.kellyFraction.toFixed(2) : "—"}</Text>
-                </Box>
-                <Box width={5}>
-                  {o.dryRun ? <Text color="yellow">DRY</Text> : <Text color="gray">—</Text>}
-                </Box>
-              </Box>
-            );
-          })
-        )}
-      </Box>
+      {orderRows.length === 0 ? (
+        <Text color="gray">No orders yet.</Text>
+      ) : (
+        <Table
+          data={orderRows.map((o) => ({
+            time: o.createdAt.slice(11, 19),
+            ticker: o.ticker,
+            side: o.side.toUpperCase(),
+            qty: String(o.quantity),
+            price: `${o.limitPrice}¢`,
+            status: o.status,
+            kelly: o.kellyFraction != null ? o.kellyFraction.toFixed(2) : "—",
+            dry: o.dryRun ? "DRY" : "—",
+          }))}
+          columns={["time", "ticker", "side", "qty", "price", "status", "kelly", "dry"]}
+          cell={({ children, column }) => {
+            const val = String(children);
+            if (column === "status") {
+              const color = val === "filled" ? "green" : val === "open" ? "yellow" : "gray";
+              return <Text color={color}>{children}</Text>;
+            }
+            if (column === "dry") {
+              return <Text color={val === "DRY" ? "yellow" : "gray"}>{children}</Text>;
+            }
+            if (column === "time") {
+              return <Text color="gray">{children}</Text>;
+            }
+            return <Text>{children}</Text>;
+          }}
+        />
+      )}
     </Box>
   );
 }

@@ -11,7 +11,7 @@ const MODULE_TO_PHASE: Record<string, string> = {
   evaluation: "Evaluation",
   execution: "Execution",
   reconciliation: "Reconciliation",
-  orchestrator: "Discovery", // orchestrator kicks off with discovery
+  orchestrator: "Discovery",
 };
 
 interface EventEntry {
@@ -25,6 +25,7 @@ interface TickSummary {
   marketsDiscovered: number;
   signalsGenerated: number;
   actionableSignals: number;
+  scoutSignals: number;
   ordersPlaced: number;
   lastDuration: string;
 }
@@ -38,6 +39,7 @@ export function ActivityView() {
     marketsDiscovered: 0,
     signalsGenerated: 0,
     actionableSignals: 0,
+    scoutSignals: 0,
     ordersPlaced: 0,
     lastDuration: "—",
   });
@@ -47,6 +49,7 @@ export function ActivityView() {
     markets: 0,
     signals: 0,
     actionable: 0,
+    scout: 0,
     orders: 0,
   });
 
@@ -59,17 +62,16 @@ export function ActivityView() {
     const unsubs = [
       bus.on("bot:status", (s) => {
         setTickCount(s.tickCount);
-        // Finalize summary for this tick
         setSummary({
           tickCount: s.tickCount,
           marketsDiscovered: counters.current.markets,
           signalsGenerated: counters.current.signals,
           actionableSignals: counters.current.actionable,
+          scoutSignals: counters.current.scout,
           ordersPlaced: counters.current.orders,
           lastDuration: `${(s.uptime % 60).toFixed(1)}s`,
         });
-        // Reset counters for next tick
-        counters.current = { markets: 0, signals: 0, actionable: 0, orders: 0 };
+        counters.current = { markets: 0, signals: 0, actionable: 0, scout: 0, orders: 0 };
       }),
 
       bus.on("log", (l) => {
@@ -90,6 +92,26 @@ export function ActivityView() {
           `Signal ${s.ticker} ${s.recommendation.toUpperCase()} edge=${(s.edge * 100).toFixed(1)}¢`,
           color,
         );
+      }),
+
+      // Scout signals — yellow in the feed
+      bus.on("signal:scout", (s) => {
+        counters.current.signals++;
+        counters.current.scout++;
+        pushEvent(
+          `[SCOUT] ${s.ticker} edge=${(s.edge * 100).toFixed(1)}¢ (${s.forecastHorizonHours.toFixed(1)}h to close)`,
+          "yellow",
+        );
+      }),
+
+      // HRRR / forecast fetched events
+      bus.on("forecast:fetched", (f) => {
+        if (f.hrrrValue != null) {
+          pushEvent(
+            `HRRR ${f.stationId}: ${f.hrrrValue.toFixed(1)}F (weight ${(f.hrrrWeight * 100).toFixed(0)}% at ${f.horizonBucket})`,
+            "cyan",
+          );
+        }
       }),
 
       bus.on("order:placed", (o) => {
@@ -146,7 +168,7 @@ export function ActivityView() {
       {/* Tick Summary */}
       <Box>
         <Text color="white">
-          Tick #{summary.tickCount} | {summary.marketsDiscovered} markets | {summary.signalsGenerated} signals ({summary.actionableSignals} actionable) | {summary.ordersPlaced} orders | {summary.lastDuration}
+          Tick #{summary.tickCount} | {summary.marketsDiscovered} markets | Signals: {summary.actionableSignals} actionable / {summary.scoutSignals} scout / {summary.signalsGenerated} total | {summary.ordersPlaced} orders | {summary.lastDuration}
         </Text>
       </Box>
 

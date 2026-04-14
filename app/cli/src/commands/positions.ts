@@ -1,5 +1,8 @@
+import React from "react";
+import { Text } from "ink";
+import Table from "../components/table";
 import { getDb, positions, trades, orders, markets, desc, eq } from "@kcb/db";
-import type { CommandDef } from "./index";
+import type { CommandDef, CommandResult } from "./index";
 
 const CAT_LABELS: Record<string, string> = {
   high_temp: "HIGH", low_temp: "LOW", precip: "RAIN", snowfall: "SNOW",
@@ -10,7 +13,7 @@ export const positionsCommands: CommandDef[] = [
     name: "positions",
     aliases: ["pos"],
     description: "Show open positions",
-    handler: async () => {
+    handler: async (): Promise<CommandResult> => {
       const db = getDb();
       const rows = await db.select().from(positions).orderBy(desc(positions.updatedAt));
 
@@ -18,28 +21,34 @@ export const positionsCommands: CommandDef[] = [
         return "No open positions.";
       }
 
-      // Look up categories for each position's ticker
-      const db2 = getDb();
-      const allMarkets = await db2.select({ ticker: markets.ticker, category: markets.category }).from(markets);
+      const allMarkets = await db.select({ ticker: markets.ticker, category: markets.category }).from(markets);
       const catMap = new Map(allMarkets.map((m) => [m.ticker, m.category]));
 
-      const header = "TYPE ".padEnd(6) + "TICKER".padEnd(30) + "SIDE".padEnd(6) + "QTY".padStart(5) + "  AVG".padStart(6) + "  P&L".padStart(8);
-      const lines = rows.map((p) => {
+      const data = rows.map((p) => {
         const pnl = p.unrealizedPnl ?? 0;
-        const pnlStr = (pnl >= 0 ? "+" : "") + (pnl / 100).toFixed(2);
         const cat = catMap.get(p.ticker) ?? "?";
-        const catStr = (CAT_LABELS[cat] ?? cat).padEnd(5);
-        return (
-          catStr + " " +
-          p.ticker.padEnd(30) +
-          p.side.toUpperCase().padEnd(6) +
-          String(p.quantity).padStart(5) +
-          `  ${p.avgEntryPrice.toFixed(0)}¢`.padStart(6) +
-          `  ${pnlStr}`.padStart(8)
-        );
+        return {
+          type: CAT_LABELS[cat] ?? cat,
+          ticker: p.ticker,
+          side: p.side.toUpperCase(),
+          qty: String(p.quantity),
+          avg: `${p.avgEntryPrice.toFixed(0)}¢`,
+          "p&l": `${pnl >= 0 ? "+" : ""}${(pnl / 100).toFixed(2)}`,
+        };
       });
 
-      return [header, "─".repeat(55), ...lines].join("\n");
+      return React.createElement(Table, {
+        data,
+        columns: ["type", "ticker", "side", "qty", "avg", "p&l"],
+        cell: ({ children, column }: { children: React.ReactNode; column: string }) => {
+          const val = String(children);
+          if (column === "p&l") {
+            const color = val.startsWith("+") ? "green" : val.startsWith("-") ? "red" : "gray";
+            return React.createElement(Text, { color }, children);
+          }
+          return React.createElement(Text, null, children);
+        },
+      });
     },
   },
   {
@@ -53,7 +62,6 @@ export const positionsCommands: CommandDef[] = [
         return "No trades yet.";
       }
 
-      // Simple PnL calculation — buys are cost, market resolution is revenue
       const totalCost = allTrades
         .filter((t) => t.action === "buy")
         .reduce((sum, t) => sum + t.price * t.quantity, 0);
@@ -68,7 +76,7 @@ export const positionsCommands: CommandDef[] = [
   {
     name: "orders",
     description: "Show recent orders",
-    handler: async (args) => {
+    handler: async (args): Promise<CommandResult> => {
       const db = getDb();
       const status = args[0] || undefined;
 
@@ -88,18 +96,29 @@ export const positionsCommands: CommandDef[] = [
         return "No orders found.";
       }
 
-      const header = "ORDER".padEnd(12) + "TICKER".padEnd(25) + "SIDE".padEnd(5) + "QTY".padStart(4) + " PRICE".padStart(6) + " STATUS".padEnd(10);
-      const lines = rows.map((o) =>
-        o.orderId.slice(0, 10).padEnd(12) +
-        o.ticker.padEnd(25) +
-        `${o.action[0]!.toUpperCase()}${o.side[0]!.toUpperCase()}`.padEnd(5) +
-        String(o.quantity).padStart(4) +
-        `  ${o.limitPrice}¢`.padStart(6) +
-        ` ${o.status}`.padEnd(10) +
-        (o.dryRun ? " [DRY]" : "")
-      );
+      const data = rows.map((o) => ({
+        order: o.orderId.slice(0, 10),
+        ticker: o.ticker,
+        side: `${o.action[0]!.toUpperCase()}${o.side[0]!.toUpperCase()}`,
+        qty: String(o.quantity),
+        price: `${o.limitPrice}¢`,
+        status: o.status + (o.dryRun ? " [DRY]" : ""),
+      }));
 
-      return [header, "─".repeat(65), ...lines].join("\n");
+      return React.createElement(Table, {
+        data,
+        columns: ["order", "ticker", "side", "qty", "price", "status"],
+        cell: ({ children, column }: { children: React.ReactNode; column: string }) => {
+          const val = String(children);
+          if (column === "status") {
+            if (val.includes("filled")) return React.createElement(Text, { color: "green" }, children);
+            if (val.includes("open")) return React.createElement(Text, { color: "yellow" }, children);
+            if (val.includes("[DRY]")) return React.createElement(Text, { color: "yellow" }, children);
+            return React.createElement(Text, { color: "gray" }, children);
+          }
+          return React.createElement(Text, null, children);
+        },
+      });
     },
   },
 ];

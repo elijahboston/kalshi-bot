@@ -1,10 +1,13 @@
+import React from "react";
+import { Text, Box } from "ink";
+import Table from "../components/table";
 import { getDb, weatherForecasts, calibration, and, sql, gte, eq, desc } from "@kcb/db";
 import type { Market } from "@kcb/db";
 import { ProbabilityEstimator } from "@kcb/signals";
 import { computeKelly } from "@kcb/execution";
 import { parseTicker } from "../../../../app/engine/services/discovery";
 import { seriesCategory, extractStationFromSeries } from "@kcb/shared";
-import type { CommandDef } from "./index";
+import type { CommandDef, CommandResult } from "./index";
 
 export const backtestCommands: CommandDef[] = [
   {
@@ -43,7 +46,7 @@ interface BacktestResult {
   simulatedPnl: number;
 }
 
-async function runBacktest(seriesTicker: string, days: number): Promise<string> {
+async function runBacktest(seriesTicker: string, days: number): Promise<CommandResult> {
   const db = getDb();
   const stationId = extractStationFromSeries(seriesTicker);
   const category = seriesCategory(seriesTicker);
@@ -238,7 +241,7 @@ async function runBacktest(seriesTicker: string, days: number): Promise<string> 
   return formatReport(seriesTicker, days, results);
 }
 
-function formatReport(seriesTicker: string, days: number, results: BacktestResult[]): string {
+function formatReport(seriesTicker: string, days: number, results: BacktestResult[]): CommandResult {
   const totalMarkets = results.length;
   const signalsGenerated = results.filter((r) => r.kellyFraction > 0).length;
   const wins = results.filter((r) => {
@@ -251,45 +254,43 @@ function formatReport(seriesTicker: string, days: number, results: BacktestResul
   const brierScore = results.reduce((sum, r) => sum + r.brierContribution, 0) / totalMarkets;
   const totalPnl = results.reduce((sum, r) => sum + r.simulatedPnl, 0);
 
-  const lines = [
-    `=== Backtest: ${seriesTicker} (${days} days) ===`,
-    "",
-    `Markets evaluated:   ${totalMarkets}`,
-    `Signals generated:   ${signalsGenerated}`,
-    `Win rate:            ${signalsGenerated > 0 ? `${(winRate * 100).toFixed(1)}% (${wins}/${signalsGenerated})` : "N/A"}`,
-    `Brier score:         ${brierScore.toFixed(4)} ${brierScore < 0.25 ? "(good)" : brierScore < 0.33 ? "(fair)" : "(poor)"}`,
-    `Simulated P&L:       ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} (Kelly-weighted units)`,
-    "",
-    "Per-day breakdown:",
-    "DATE".padEnd(12) +
-      "BRACKET".padEnd(10) +
-      "EST P".padStart(7) +
-      "ACTUAL".padStart(7) +
-      "BRIER".padStart(8) +
-      "KELLY".padStart(7) +
-      "P&L".padStart(8),
-    "-".repeat(59),
-  ];
-
-  // Show last 20 results
   const shown = results.slice(0, 20);
-  for (const r of shown) {
-    lines.push(
-      r.targetDate.padEnd(12) +
-        `[${r.bracketLow},${r.bracketHigh})`.padEnd(10) +
-        `${(r.probability * 100).toFixed(0)}%`.padStart(7) +
-        (r.actualOutcome === 1 ? "YES" : "NO").padStart(7) +
-        r.brierContribution.toFixed(4).padStart(8) +
-        (r.kellyFraction > 0 ? r.kellyFraction.toFixed(3) : "—").padStart(7) +
-        (r.kellyFraction > 0 ? `${r.simulatedPnl >= 0 ? "+" : ""}${r.simulatedPnl.toFixed(3)}` : "—").padStart(8)
-    );
-  }
+  const tableData = shown.map((r) => ({
+    date: r.targetDate,
+    bracket: `[${r.bracketLow},${r.bracketHigh})`,
+    "est p": `${(r.probability * 100).toFixed(0)}%`,
+    actual: r.actualOutcome === 1 ? "YES" : "NO",
+    brier: r.brierContribution.toFixed(4),
+    kelly: r.kellyFraction > 0 ? r.kellyFraction.toFixed(3) : "—",
+    "p&l": r.kellyFraction > 0 ? `${r.simulatedPnl >= 0 ? "+" : ""}${r.simulatedPnl.toFixed(3)}` : "—",
+  }));
 
-  if (results.length > 20) {
-    lines.push(`  ... and ${results.length - 20} more`);
-  }
-
-  return lines.join("\n");
+  return React.createElement(Box, { flexDirection: "column" },
+    React.createElement(Text, { bold: true }, `=== Backtest: ${seriesTicker} (${days} days) ===`),
+    React.createElement(Text, null, ""),
+    React.createElement(Text, null, `Markets evaluated:   ${totalMarkets}`),
+    React.createElement(Text, null, `Signals generated:   ${signalsGenerated}`),
+    React.createElement(Text, null, `Win rate:            ${signalsGenerated > 0 ? `${(winRate * 100).toFixed(1)}% (${wins}/${signalsGenerated})` : "N/A"}`),
+    React.createElement(Text, null, `Brier score:         ${brierScore.toFixed(4)} ${brierScore < 0.25 ? "(good)" : brierScore < 0.33 ? "(fair)" : "(poor)"}`),
+    React.createElement(Text, null, `Simulated P\&L:       ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} (Kelly-weighted units)`),
+    React.createElement(Text, null, ""),
+    React.createElement(Text, { bold: true }, "Per-day breakdown:"),
+    React.createElement(Table, {
+      data: tableData,
+      columns: ["date", "bracket", "est p", "actual", "brier", "kelly", "p&l"],
+      cell: ({ children, column }: { children: React.ReactNode; column: string }) => {
+        const val = String(children);
+        if (column === "actual") {
+          return React.createElement(Text, { color: val === "YES" ? "green" : "red" }, children);
+        }
+        if (column === "p&l" && val !== "—") {
+          return React.createElement(Text, { color: val.startsWith("+") ? "green" : "red" }, children);
+        }
+        return React.createElement(Text, null, children);
+      },
+    }),
+    results.length > 20 ? React.createElement(Text, { color: "gray" }, `  ... and ${results.length - 20} more`) : null,
+  );
 }
 
 export { runBacktest };

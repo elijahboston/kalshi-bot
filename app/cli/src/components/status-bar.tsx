@@ -8,6 +8,7 @@ export function StatusBar() {
   const [status, setStatus] = useState<BotEvents["bot:status"] | null>(null);
   const [balance, setBalance] = useState<BotEvents["balance:update"] | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [marketsInSniper, setMarketsInSniper] = useState(0);
   const lastTickRef = React.useRef<number>(0);
 
   useEffect(() => {
@@ -15,6 +16,10 @@ export function StatusBar() {
       bus.on("bot:status", (s) => {
         setStatus(s);
         lastTickRef.current = Date.now();
+        // Track sniper window markets from status event
+        if (s.marketsInSniperWindow != null) {
+          setMarketsInSniper(s.marketsInSniperWindow);
+        }
       }),
       bus.on("balance:update", setBalance),
     ];
@@ -38,6 +43,8 @@ export function StatusBar() {
   const cash = balance ? `$${(balance.cash / 100).toFixed(2)}` : "—";
   const portfolio = balance ? `$${(balance.portfolio / 100).toFixed(2)}` : "—";
   const ticks = status?.tickCount ?? 0;
+  const sniperHorizon = config.bot.sniperHorizonHours;
+  const isSniper = marketsInSniper > 0;
   const now = new Date().toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -64,6 +71,19 @@ export function StatusBar() {
           <Text color="yellow" bold>
             DRY-RUN
           </Text>
+        )}
+
+        {/* Sniper/Scout mode indicator */}
+        {sniperHorizon > 0 && (
+          <>
+            <Text color="gray">│</Text>
+            <Text color={isSniper ? "cyan" : "yellow"} bold>
+              {isSniper ? "SNIPER" : "SCOUT"}
+            </Text>
+            <Text color="gray">
+              sniper: {sniperHorizon}h
+            </Text>
+          </>
         )}
 
         <Text color="gray">│</Text>

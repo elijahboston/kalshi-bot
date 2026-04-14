@@ -38,12 +38,14 @@ export function startBridge(): () => void {
     "bot:status",
     "bot:error",
     "signal:new",
+    "signal:scout",
     "order:placed",
     "order:update",
     "position:update",
     "balance:update",
     "market:discovered",
     "market:resolved",
+    "forecast:fetched",
     "log",
   ];
 

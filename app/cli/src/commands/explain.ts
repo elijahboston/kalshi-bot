@@ -85,6 +85,24 @@ async function explainTicker(ticker: string): Promise<string> {
     lines.push("");
   }
 
+  // Forecast horizon in hours
+  if (reasoning) {
+    const horizonHours = reasoning.forecastHorizon * 24; // rough estimate from days
+    let closeTimeMs: number | null = null;
+    if (market?.closeTime) {
+      closeTimeMs = new Date(market.closeTime).getTime();
+    } else if (market?.targetDate) {
+      closeTimeMs = new Date(market.targetDate + "T23:59:00Z").getTime();
+    }
+    const actualHorizonHours = closeTimeMs
+      ? Math.max(0, (closeTimeMs - new Date(signal.createdAt).getTime()) / 3_600_000)
+      : horizonHours;
+
+    const modeLabel = actualHorizonHours <= 12 ? "(sniper window)" : "(scout mode)";
+    lines.push(`  Forecast horizon: ${actualHorizonHours.toFixed(1)}h ${modeLabel}`);
+    lines.push("");
+  }
+
   // Estimate
   lines.push("ESTIMATE");
   lines.push(`  Probability: ${(signal.estimatedProb * 100).toFixed(1)}%`);
@@ -160,6 +178,52 @@ async function explainTicker(ticker: string): Promise<string> {
       lines.push(
         `  Historical hit rate: ${(reasoning.historicalHitRate * 100).toFixed(1)}%`
       );
+    }
+    lines.push("");
+
+    // SIGMA section (#3)
+    lines.push("SIGMA");
+    const sigmaSourceLabel = reasoning.sigmaSource === "empirical"
+      ? `empirical (stdBias from ${reasoning.biasCorrection?.sampleSize ?? "?"} samples)`
+      : `ensemble spread${reasoning.biasCorrection ? ` (insufficient empirical data: n=${reasoning.biasCorrection.sampleSize}, need 10)` : ""}`;
+    lines.push(`  Source:          ${sigmaSourceLabel}`);
+    lines.push(`  Sigma used:      ${reasoning.sigmaUsed.toFixed(1)} deg F`);
+    lines.push(`  Ensemble spread: ${reasoning.correctedEnsembleStats.std.toFixed(1)} deg F`);
+    if (reasoning.sigmaSource === "empirical" && reasoning.biasCorrection) {
+      // Show what ensemble spread would give vs empirical
+      lines.push(`  Empirical sigma: ${reasoning.sigmaUsed.toFixed(1)} deg F`);
+    }
+    lines.push("");
+
+    // OBSERVATION ADJUSTMENT section (#4)
+    if (reasoning.observationAdjustment) {
+      const obs = reasoning.observationAdjustment;
+      lines.push("OBSERVATION ADJUSTMENT");
+      lines.push(`  Observed temp:   ${obs.observedTemp.toFixed(1)}F`);
+      lines.push(`  Forecast mean:   ${reasoning.correctedEnsembleStats.mean.toFixed(1)}F`);
+      const divergence = Math.abs(obs.observedTemp - reasoning.correctedEnsembleStats.mean);
+      lines.push(`  Divergence:      ${divergence.toFixed(1)}F${divergence > 3 ? " (> 3F threshold, shifting mean)" : ""}`);
+      lines.push(`  Sigma before:    ${obs.sigmaBefore.toFixed(1)}F → after: ${obs.sigmaAfter.toFixed(2)}F`);
+      lines.push(`  Mean shift:      ${obs.meanShift >= 0 ? "+" : ""}${obs.meanShift.toFixed(1)}F`);
+    } else {
+      lines.push("OBSERVATION ADJUSTMENT");
+      lines.push("  No same-day observation available");
+    }
+    lines.push("");
+
+    // DATA SOURCES section (#5)
+    lines.push("DATA SOURCES");
+    lines.push(`  Open-Meteo ensemble:  ${reasoning.rawEnsembleStats.count} members`);
+    // Data sources breakdown from reasoning (if available via dataSources field)
+    const ds = (reasoning as any).dataSources;
+    if (ds) {
+      if (ds.hrrr > 0) {
+        lines.push(`  HRRR (3km):           ${ds.hrrrValue?.toFixed(1) ?? "—"}F  (weight: ${(ds.hrrrWeight * 100).toFixed(0)}%, horizon bucket: ${ds.horizonBucket})`);
+      }
+      if (ds.tomorrowIo > 0) {
+        lines.push(`  Tomorrow.io:          ${ds.tomorrowIo} value(s)`);
+      }
+      lines.push(`  Total pool:           ${ds.openMeteo + ds.hrrr + ds.tomorrowIo} members (after blending)`);
     }
     lines.push("");
   }
