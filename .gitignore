@@ -6,6 +6,8 @@ node_modules/
 data/*.db
 data/cache/
 logs/*.log
+logs/bot.log.*
+data/performance-cache.json
 .env
 .env.local
 .key
