@@ -2,7 +2,7 @@
 import { render } from "ink";
 import React from "react";
 import { getConfig } from "@kcb/config";
-import { getDb, runMigrations } from "@kcb/db";
+import { runMigrations } from "@kcb/db";
 import { orchestrator, startLogWriter } from "@kcb/engine";
 import { holdTicker } from "@kcb/execution";
 import { App } from "./app";
@@ -16,9 +16,6 @@ async function main() {
 
   // Ensure DB exists and is migrated
   runMigrations(config.db.path);
-
-  // Initialize the engine (registers tick function, doesn't start yet)
-  await orchestrator.initOrchestrator();
 
   // Hold damaged position until settlement — do not attempt exits
   holdTicker("KXHIGHCHI-26MAR07-B62.5");
@@ -35,14 +32,18 @@ async function main() {
     stopViz = viz.stop;
   }
 
-  // Auto-start the bot loop
-  orchestrator.start();
-
   // Enter alternate screen buffer for a clean fullscreen TUI
   process.stdout.write("\x1b[?1049h");
 
-  // Render the terminal UI
+  // Render the terminal UI immediately — don't block on API calls
   const { waitUntilExit, cleanup } = render(React.createElement(App));
+
+  // Initialize the engine in the background (syncs portfolio from Kalshi)
+  orchestrator.initOrchestrator().then(() => {
+    orchestrator.start();
+  }).catch((err) => {
+    console.error("Orchestrator init failed:", err);
+  });
 
   // Block until the user exits (Ctrl+C or `quit` command)
   await waitUntilExit();
