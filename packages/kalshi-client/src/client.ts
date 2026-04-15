@@ -14,6 +14,7 @@ import type {
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
+const FETCH_TIMEOUT_MS = 30_000;
 
 export class KalshiClient {
   private baseUrl: string;
@@ -61,6 +62,7 @@ export class KalshiClient {
             "Content-Type": "application/json",
           },
           body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
       } catch (err) {
         // Network errors (timeout, connection refused, DNS failure)

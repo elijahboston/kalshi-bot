@@ -16,6 +16,7 @@ export function startFeed(feedInstance: KalshiFeed): void {
   feed.on({
     onConnected() {
       log.info("WebSocket connected");
+      feed!.subscribe(["market_lifecycle_v2"]);
     },
 
     onDisconnected() {
@@ -110,11 +111,8 @@ export function startFeed(feedInstance: KalshiFeed): void {
     },
   });
 
-  // Connect
+  // Connect (lifecycle subscription sent in onConnected above)
   feed.connect();
-
-  // Subscribe to lifecycle globally (no ticker filter needed)
-  feed.subscribe(["market_lifecycle_v2"]);
 
   log.info("Feed service started");
 }

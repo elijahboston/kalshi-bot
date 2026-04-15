@@ -613,7 +613,7 @@ export class ReconciliationService {
           .where(and(eq(signals.orderId, ko.order_id), eq(signals.acted, true)))
           .limit(1);
 
-        await db.insert(orders).values({
+        const result = await db.insert(orders).values({
           orderId: ko.order_id,
           ticker: ko.ticker,
           action: ko.action,
@@ -626,8 +626,8 @@ export class ReconciliationService {
           signalId: matchedSignal?.id ?? null,
           createdAt: timestamp,
           updatedAt: timestamp,
-        });
-        imported++;
+        }).onConflictDoNothing();
+        if (result.changes > 0) imported++;
         } catch (err) {
           log.warn(`Failed to process order ${ko.order_id}: ${err instanceof Error ? err.message : err}`);
         }
