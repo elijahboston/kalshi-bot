@@ -1,0 +1,14 @@
+{
+  "name": "@kcb/api",
+  "private": true,
+  "version": "0.0.1",
+  "main": "index.ts",
+  "types": "index.ts",
+  "dependencies": {
+    "@elysiajs/cors": "^1.4.1",
+    "@kcb/config": "workspace:*",
+    "@kcb/db": "workspace:*",
+    "@kcb/engine": "workspace:*",
+    "elysia": "^1.2"
+  }
+}

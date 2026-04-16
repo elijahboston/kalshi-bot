@@ -7,7 +7,9 @@
   ],
   "scripts": {
     "bot": "bun run app/cli/src/index.tsx",
-    "bot:viz": "bun --watch app/cli/src/index.tsx --viz",
+    "bot:tui": "bun run app/cli/src/index.tsx --tui",
+    "bot:tui:watch": "bun --watch app/cli/src/index.tsx --tui",
+    "bot:viz": "bun --watch app/cli/src/index.tsx --tui --viz",
     "bot:watch": "bun --watch app/cli/src/index.tsx",
     "bot:debug-fetch": "BUN_CONFIG_VERBOSE_FETCH=curl bun run app/cli/src/index.tsx",
     "db:generate": "bun run --filter @kcb/db generate",

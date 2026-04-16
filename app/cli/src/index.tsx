@@ -5,13 +5,16 @@ import { getConfig } from "@kcb/config";
 import { runMigrations } from "@kcb/db";
 import { orchestrator, startLogWriter } from "@kcb/engine";
 import { holdTicker } from "@kcb/execution";
+import { startApiServer } from "@kcb/api";
 import { App } from "./app";
 // Import early to start capturing logs before anything else emits
 import "./log-buffer";
+import { runHeadless } from "./headless";
 
+const tuiFlag = process.argv.includes("--tui");
 const vizFlag = process.argv.includes("--viz");
 
-async function main() {
+async function runTui() {
   const config = getConfig();
 
   // Ensure DB exists and is migrated
@@ -23,12 +26,16 @@ async function main() {
   // Start writing logs to file
   const stopLogWriter = startLogWriter();
 
+  // Start API server alongside the TUI so the web UI can coexist
+  const port = Number(process.env.API_PORT) || 3100;
+  const apiServer = startApiServer(port);
+
   // Start viz server if --viz flag is passed
   let stopViz: (() => void) | null = null;
   if (vizFlag) {
     const { startVizServer } = await import("@kcb/viz/src/server");
-    const port = Number(process.env.VIZ_PORT) || 3456;
-    const viz = startVizServer(port);
+    const vizPort = Number(process.env.VIZ_PORT) || 3456;
+    const viz = startVizServer(vizPort);
     stopViz = viz.stop;
   }
 
@@ -52,9 +59,18 @@ async function main() {
   cleanup();
   process.stdout.write("\x1b[?1049l");
   stopViz?.();
+  apiServer.stop();
   stopLogWriter();
   orchestrator.stop();
   process.exit(0);
+}
+
+async function main() {
+  if (tuiFlag) {
+    await runTui();
+  } else {
+    await runHeadless();
+  }
 }
 
 main().catch((err) => {
