@@ -32,6 +32,16 @@ export function startFeed(feedInstance: KalshiFeed): void {
       });
     },
 
+    onSequenceGap(gap) {
+      // Sequence gaps are routine packet loss — the feed keeps flowing and
+      // the next REST tick refreshes any state we might have missed. Logged
+      // at warn (not error) and not raised as a bot:error to avoid drowning
+      // real failures in noise.
+      log.warn(
+        `Sequence gap on sid ${gap.sid}: expected ${gap.expected}, got ${gap.got} (missed ${gap.missed})`
+      );
+    },
+
     onTicker(msg: WsTickerMsg) {
       const { market_ticker, price, yes_bid, yes_ask, volume, open_interest, ts } = msg.msg;
 

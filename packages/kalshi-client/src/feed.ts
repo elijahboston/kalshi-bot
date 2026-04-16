@@ -17,6 +17,14 @@ export interface KalshiFeedOptions {
   maxReconnectDelay?: number;
 }
 
+export interface SequenceGap {
+  sid: number;
+  expected: number;
+  got: number;
+  /** Number of messages missed (got - expected). Always >= 1. */
+  missed: number;
+}
+
 export interface KalshiFeedEvents {
   onTicker?: (msg: WsTickerMsg) => void;
   onLifecycle?: (msg: WsLifecycleMsg) => void;
@@ -24,6 +32,13 @@ export interface KalshiFeedEvents {
   onConnected?: () => void;
   onDisconnected?: () => void;
   onError?: (err: Error) => void;
+  /**
+   * Called when a sequence gap is detected on a subscription. Gaps are
+   * informational — the feed continues delivering messages. Reported
+   * separately from `onError` so transport failures (which require action)
+   * are not drowned out by routine packet loss.
+   */
+  onSequenceGap?: (gap: SequenceGap) => void;
 }
 
 /**
@@ -234,9 +249,13 @@ export class KalshiFeed {
   private trackSeq(sid: number, seq: number): void {
     const prev = this.seqNumbers.get(sid);
     if (prev !== undefined && seq !== prev + 1) {
-      this.events.onError?.(
-        new Error(`Sequence gap on sid ${sid}: expected ${prev + 1}, got ${seq}`)
-      );
+      const expected = prev + 1;
+      this.events.onSequenceGap?.({
+        sid,
+        expected,
+        got: seq,
+        missed: seq - expected,
+      });
     }
     this.seqNumbers.set(sid, seq);
   }
