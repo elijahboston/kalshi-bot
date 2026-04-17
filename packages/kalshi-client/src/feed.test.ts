@@ -96,4 +96,34 @@ describe("KalshiFeed sequence-gap handling", () => {
     expect(errors).toHaveLength(0);
     expect(gaps).toEqual([{ sid: 2, expected: 2, got: 4, missed: 2 }]);
   });
+
+  test("unrecognized message types with sid/seq do not cause false gaps", () => {
+    const feed = new KalshiFeed();
+    const gaps: SequenceGap[] = [];
+    feed.on({ onSequenceGap: (g) => gaps.push(g) });
+
+    // seq 1: recognized ticker
+    (feed as any).handleMessage(
+      JSON.stringify({
+        type: "ticker",
+        sid: 1,
+        seq: 1,
+        msg: { market_ticker: "T", price: 50, yes_bid: 49, yes_ask: 51, volume: 0, open_interest: 0, ts: 0 },
+      })
+    );
+    // seq 2: unrecognized type (e.g. market_lifecycle v1)
+    (feed as any).handleMessage(
+      JSON.stringify({ type: "market_lifecycle", sid: 1, seq: 2, msg: {} })
+    );
+    // seq 3: recognized ticker — should be contiguous, no gap
+    (feed as any).handleMessage(
+      JSON.stringify({
+        type: "ticker",
+        sid: 1,
+        seq: 3,
+        msg: { market_ticker: "T", price: 51, yes_bid: 50, yes_ask: 52, volume: 0, open_interest: 0, ts: 0 },
+      })
+    );
+    expect(gaps).toHaveLength(0);
+  });
 });

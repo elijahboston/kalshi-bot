@@ -229,19 +229,24 @@ export class KalshiFeed {
       return;
     }
 
+    // Track sequence numbers for any message that carries sid/seq, even
+    // unrecognized types. The server may send message types we don't handle
+    // (e.g. market_lifecycle v1); skipping trackSeq for those causes false
+    // off-by-one gap warnings on the next recognized message.
+    const anyMsg = parsed as Record<string, unknown>;
+    if (typeof anyMsg.sid === "number" && typeof anyMsg.seq === "number") {
+      this.trackSeq(anyMsg.sid, anyMsg.seq);
+    }
+
     // Handle ticker updates
     if (parsed.type === "ticker") {
-      const msg = parsed as WsTickerMsg;
-      this.trackSeq(msg.sid, msg.seq);
-      this.events.onTicker?.(msg);
+      this.events.onTicker?.(parsed as WsTickerMsg);
       return;
     }
 
     // Handle market lifecycle events
     if (parsed.type === "market_lifecycle_v2") {
-      const msg = parsed as WsLifecycleMsg;
-      this.trackSeq(msg.sid, msg.seq);
-      this.events.onLifecycle?.(msg);
+      this.events.onLifecycle?.(parsed as WsLifecycleMsg);
       return;
     }
   }
