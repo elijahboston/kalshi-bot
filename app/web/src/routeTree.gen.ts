@@ -10,7 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SignalsRouteImport } from './routes/signals'
+import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as PositionsRouteImport } from './routes/positions'
+import { Route as OrdersRouteImport } from './routes/orders'
 import { Route as MarketsRouteImport } from './routes/markets'
+import { Route as LogsRouteImport } from './routes/logs'
+import { Route as CalibrationRouteImport } from './routes/calibration'
 import { Route as IndexRouteImport } from './routes/index'
 
 const SignalsRoute = SignalsRouteImport.update({
@@ -18,9 +23,34 @@ const SignalsRoute = SignalsRouteImport.update({
   path: '/signals',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PositionsRoute = PositionsRouteImport.update({
+  id: '/positions',
+  path: '/positions',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OrdersRoute = OrdersRouteImport.update({
+  id: '/orders',
+  path: '/orders',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const MarketsRoute = MarketsRouteImport.update({
   id: '/markets',
   path: '/markets',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LogsRoute = LogsRouteImport.update({
+  id: '/logs',
+  path: '/logs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CalibrationRoute = CalibrationRouteImport.update({
+  id: '/calibration',
+  path: '/calibration',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -31,31 +61,76 @@ const IndexRoute = IndexRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/calibration': typeof CalibrationRoute
+  '/logs': typeof LogsRoute
   '/markets': typeof MarketsRoute
+  '/orders': typeof OrdersRoute
+  '/positions': typeof PositionsRoute
+  '/settings': typeof SettingsRoute
   '/signals': typeof SignalsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/calibration': typeof CalibrationRoute
+  '/logs': typeof LogsRoute
   '/markets': typeof MarketsRoute
+  '/orders': typeof OrdersRoute
+  '/positions': typeof PositionsRoute
+  '/settings': typeof SettingsRoute
   '/signals': typeof SignalsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/calibration': typeof CalibrationRoute
+  '/logs': typeof LogsRoute
   '/markets': typeof MarketsRoute
+  '/orders': typeof OrdersRoute
+  '/positions': typeof PositionsRoute
+  '/settings': typeof SettingsRoute
   '/signals': typeof SignalsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/markets' | '/signals'
+  fullPaths:
+    | '/'
+    | '/calibration'
+    | '/logs'
+    | '/markets'
+    | '/orders'
+    | '/positions'
+    | '/settings'
+    | '/signals'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/markets' | '/signals'
-  id: '__root__' | '/' | '/markets' | '/signals'
+  to:
+    | '/'
+    | '/calibration'
+    | '/logs'
+    | '/markets'
+    | '/orders'
+    | '/positions'
+    | '/settings'
+    | '/signals'
+  id:
+    | '__root__'
+    | '/'
+    | '/calibration'
+    | '/logs'
+    | '/markets'
+    | '/orders'
+    | '/positions'
+    | '/settings'
+    | '/signals'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CalibrationRoute: typeof CalibrationRoute
+  LogsRoute: typeof LogsRoute
   MarketsRoute: typeof MarketsRoute
+  OrdersRoute: typeof OrdersRoute
+  PositionsRoute: typeof PositionsRoute
+  SettingsRoute: typeof SettingsRoute
   SignalsRoute: typeof SignalsRoute
 }
 
@@ -68,11 +143,46 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignalsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/positions': {
+      id: '/positions'
+      path: '/positions'
+      fullPath: '/positions'
+      preLoaderRoute: typeof PositionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/orders': {
+      id: '/orders'
+      path: '/orders'
+      fullPath: '/orders'
+      preLoaderRoute: typeof OrdersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/markets': {
       id: '/markets'
       path: '/markets'
       fullPath: '/markets'
       preLoaderRoute: typeof MarketsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/logs': {
+      id: '/logs'
+      path: '/logs'
+      fullPath: '/logs'
+      preLoaderRoute: typeof LogsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/calibration': {
+      id: '/calibration'
+      path: '/calibration'
+      fullPath: '/calibration'
+      preLoaderRoute: typeof CalibrationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -87,7 +197,12 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CalibrationRoute: CalibrationRoute,
+  LogsRoute: LogsRoute,
   MarketsRoute: MarketsRoute,
+  OrdersRoute: OrdersRoute,
+  PositionsRoute: PositionsRoute,
+  SettingsRoute: SettingsRoute,
   SignalsRoute: SignalsRoute,
 }
 export const routeTree = rootRouteImport
