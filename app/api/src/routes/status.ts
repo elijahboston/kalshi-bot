@@ -30,6 +30,7 @@ export const statusRoutes = new Elysia({ prefix: "/api" })
         enabledStations: config.bot.enabledStations,
         exitEdgeThreshold: config.bot.exitEdgeThreshold,
         stopLossPct: config.bot.stopLossPct,
+        stopLossMinEdge: config.bot.stopLossMinEdge,
         exitTimeDaysBeforeClose: config.bot.exitTimeDaysBeforeClose,
         exitTimeMinEdge: config.bot.exitTimeMinEdge,
         minContractPrice: config.bot.minContractPrice,

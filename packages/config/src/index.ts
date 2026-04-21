@@ -36,6 +36,8 @@ export interface BotConfig {
     exitEdgeThreshold: number;
     /** Exit when unrealized loss exceeds this fraction of cost basis */
     stopLossPct: number;
+    /** Stop-loss only fires when held-side edge has also compressed below this (0-1) */
+    stopLossMinEdge: number;
     /** Start exit evaluation this many days before market close */
     exitTimeDaysBeforeClose: number;
     /** When inside exit time window, only keep positions with edge above this */
@@ -127,6 +129,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   log_level: (c, v) => { if (["debug","info","warn","error"].includes(v)) c.log.level = v as BotConfig["log"]["level"]; },
   exit_edge_threshold: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitEdgeThreshold = n; },
   stop_loss_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stopLossPct = n; },
+  stop_loss_min_edge: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stopLossMinEdge = n; },
   exit_time_days_before_close: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeDaysBeforeClose = n; },
   exit_time_min_edge: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitTimeMinEdge = n; },
   min_contract_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minContractPrice = n; },
@@ -167,6 +170,7 @@ export function loadConfig(): BotConfig {
         : ["KNYC", "KORD", "KLAX", "KMIA", "KDEN", "KAUS"],
       exitEdgeThreshold: envNum("EXIT_EDGE_THRESHOLD", 0.03),
       stopLossPct: envNum("STOP_LOSS_PCT", 0.25),
+      stopLossMinEdge: envNum("STOP_LOSS_MIN_EDGE", 0.05),
       exitTimeDaysBeforeClose: envNum("EXIT_TIME_DAYS_BEFORE_CLOSE", 0.25),
       exitTimeMinEdge: envNum("EXIT_TIME_MIN_EDGE", 0.08),
       minContractPrice: envNum("MIN_CONTRACT_PRICE", 15),

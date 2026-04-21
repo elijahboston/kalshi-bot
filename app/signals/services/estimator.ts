@@ -138,22 +138,26 @@ export class ProbabilityEstimator {
       }
     }
 
-    // Step 3.6: Apply same-day observation adjustment (high_temp only)
+    // Step 3.6: Apply same-day observation adjustment (high_temp only).
+    // We project the observation to an "implied afternoon high" using a
+    // time-of-day diurnal offset (morning obs imply a higher peak; afternoon
+    // obs imply near-peak). Only then do we compare with the forecast mean.
     if (observation && market.category === "high_temp" && forecastHorizon <= 1) {
       const sigmaBefore = sigmaUsed;
-      const divergence = Math.abs(observation.observedTemp - corrMean);
 
-      if (divergence <= 3) {
-        // Observation confirms forecast — tighten sigma by 50%
-        sigmaUsed = sigmaUsed * 0.5;
+      const obsHour = localHourAtStation(observation.observedAt, market.stationId);
+      const diurnalOffset = estimateDiurnalOffset(obsHour);
+      const impliedHigh = observation.observedTemp + diurnalOffset;
+      const divergence = Math.abs(impliedHigh - corrMean);
+
+      if (divergence <= 2) {
+        // Obs-implied high agrees with forecast — tighten sigma, but not as hard
+        // as before (we are one observation against a 150-member ensemble).
+        sigmaUsed = sigmaUsed * 0.7;
       } else {
-        // Observation diverges — shift mean toward observation-based estimate
-        // Use regression: adjustedMean = 0.7 * forecastMean + 0.3 * observationBasedHigh
-        // For morning obs, afternoon high ≈ observedTemp + typical diurnal range offset
-        const diurnalOffset = 10; // rough F offset from morning to afternoon high
-        const obsBased = observation.observedTemp + diurnalOffset;
-        corrMean = 0.7 * corrMean + 0.3 * obsBased;
-        sigmaUsed = sigmaUsed * 0.7; // still tighten somewhat
+        // Obs-implied high disagrees — blend forecast mean toward it and tighten mildly.
+        corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
+        sigmaUsed = sigmaUsed * 0.85;
       }
 
       obsAdj = {
@@ -164,8 +168,9 @@ export class ProbabilityEstimator {
       };
 
       log.debug(
-        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F, ` +
-        `sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, mean shift=${obsAdj.meanShift.toFixed(2)}`
+        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F @ ${obsHour}h local, ` +
+        `implied high=${impliedHigh.toFixed(1)}F, sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, ` +
+        `mean shift=${obsAdj.meanShift.toFixed(2)}`
       );
     }
 
@@ -189,7 +194,16 @@ export class ProbabilityEstimator {
     const countingWeight = isPrecipCategory
       ? 1.0
       : Math.min(1, correctedValues.length / 200);
-    const probability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+    const rawProbability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+
+    // Tail-probability floor. Without empirical bias data we can't trust narrow
+    // sigma values, so clamp the returned probability away from 0/1. The raw
+    // cdfProb/countingProb in the reasoning trace are untouched for debugging.
+    const hasEmpirical = biasCorrection != null && biasCorrection.sampleSize >= 10;
+    const floor = isPrecipCategory ? 0 : hasEmpirical ? 0.01 : 0.03;
+    const probability = isPrecipCategory
+      ? rawProbability
+      : Math.min(1 - floor, Math.max(floor, rawProbability));
 
     // Step 4: Compute confidence
     const spreadNorm = isPrecipCategory
@@ -341,4 +355,49 @@ export function erf(x: number): number {
 /** CDF of the normal distribution */
 export function normalCdf(x: number, mu: number, sigma: number): number {
   return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
+}
+
+/** IANA timezone per enabled station. Expand as we enable more stations. */
+const STATION_TZ: Record<string, string> = {
+  KNYC: "America/New_York",
+  KMIA: "America/New_York",
+  KORD: "America/Chicago",
+  KAUS: "America/Chicago",
+  KDEN: "America/Denver",
+  KLAX: "America/Los_Angeles",
+};
+
+/** Extract the local hour-of-day (0–23) at the given station from an ISO timestamp. */
+export function localHourAtStation(iso: string, stationId: string | null): number {
+  const tz = (stationId && STATION_TZ[stationId]) || "America/New_York";
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "numeric",
+    hourCycle: "h23",
+  });
+  const parts = fmt.formatToParts(new Date(iso));
+  const hourPart = parts.find((p) => p.type === "hour");
+  return hourPart ? Number(hourPart.value) : 12;
+}
+
+/**
+ * Estimate the offset between an observation at `localHour` and the day's afternoon
+ * high, in °F. Peak heating is ~3pm local (offset ≈ 0); predawn (~5am) is typically
+ * ~10°F below the afternoon high. Piecewise linear between keypoints — a rough
+ * climatological approximation, intentionally bounded.
+ */
+export function estimateDiurnalOffset(localHour: number): number {
+  const keypoints: Array<[number, number]> = [
+    [0, 8], [3, 10], [6, 10], [9, 7], [12, 3], [15, 0], [18, 2], [21, 5], [24, 8],
+  ];
+  const h = Math.max(0, Math.min(24, localHour));
+  for (let i = 0; i < keypoints.length - 1; i++) {
+    const [h1, o1] = keypoints[i]!;
+    const [h2, o2] = keypoints[i + 1]!;
+    if (h >= h1 && h <= h2) {
+      const t = (h - h1) / (h2 - h1);
+      return o1 + t * (o2 - o1);
+    }
+  }
+  return 8;
 }

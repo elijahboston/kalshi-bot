@@ -17,6 +17,7 @@ const MUTABLE_KEYS: Record<string, { path: string[]; type: "number" | "boolean" 
   "min_balance_floor":    { path: ["bot", "minBalanceFloor"], type: "number" },
   "max_exposure":         { path: ["bot", "maxExposurePerTicker"], type: "number" },
   "stop_loss_pct":        { path: ["bot", "stopLossPct"], type: "number" },
+  "stop_loss_min_edge":   { path: ["bot", "stopLossMinEdge"], type: "number" },
   "seed_capital":         { path: ["bot", "seedCapital"], type: "number" },
   "profit_reserve_pct":   { path: ["bot", "profitReservePct"], type: "number" },
 };

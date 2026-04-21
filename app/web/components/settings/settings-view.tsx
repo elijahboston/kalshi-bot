@@ -104,6 +104,7 @@ export function SettingsView() {
       <SettingSection title="Risk Management">
         <SettingRow label="Max Exposure / Ticker">{fmtMoney(bot.maxExposurePerTicker)}</SettingRow>
         <SettingRow label="Stop Loss">{fmtPct(bot.stopLossPct)}</SettingRow>
+        <SettingRow label="Stop Loss Min Edge">{fmtPct(bot.stopLossMinEdge)}</SettingRow>
         <SettingRow label="Min Balance Floor">{fmtMoney(bot.minBalanceFloor)}</SettingRow>
         <SettingRow label="Seed Capital">{fmtMoney(bot.seedCapital)}</SettingRow>
         <SettingRow label="Profit Reserve">{fmtPct(bot.profitReservePct)}</SettingRow>

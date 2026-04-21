@@ -21,6 +21,7 @@ export interface BotConfig {
     enabledStations: string[]
     exitEdgeThreshold: number
     stopLossPct: number
+    stopLossMinEdge: number
     exitTimeDaysBeforeClose: number
     exitTimeMinEdge: number
     minContractPrice: number

@@ -180,28 +180,33 @@ export class ExecutionService {
       return null;
     }
 
-    // Already have a position in this market?
-    const existing = openPositions.find((p) => p.ticker === signal.ticker);
-    if (existing) {
-      log.info(`Skipping ${signal.ticker}: already have position`);
-      return null;
-    }
-
-    // Already have a resting or recently filled buy order for this ticker?
-    const recentCutoff = new Date(Date.now() - 60 * 60_000).toISOString(); // 1 hour
-    const [existingBuy] = await db
-      .select({ orderId: orders.orderId, status: orders.status })
+    // Authoritative "already hold this ticker?" check against the orders table.
+    // Computes net held quantity as sum(buy.filled) - sum(sell.filled) across all
+    // non-cancelled orders, regardless of age. This is correct even when the
+    // positions table is lagging on reconciliation and whether the last buy was
+    // 5 minutes or 5 hours ago. Covers both resting/partial buys (filled_quantity
+    // may be 0 but any open-side buy still counts as intent to hold).
+    const [netRow] = await db
+      .select({
+        netHeld: sql<number>`COALESCE(SUM(
+          CASE
+            WHEN ${orders.action} = 'buy' THEN
+              CASE WHEN ${orders.status} IN ('open', 'partial') THEN ${orders.quantity}
+                   ELSE ${orders.filledQuantity} END
+            ELSE -${orders.filledQuantity}
+          END
+        ), 0)`,
+      })
       .from(orders)
       .where(
         and(
           eq(orders.ticker, signal.ticker),
-          eq(orders.action, "buy"),
-          sql`(${orders.status} IN ('open', 'partial') OR (${orders.status} = 'filled' AND ${orders.createdAt} > ${recentCutoff}))`
+          sql`${orders.status} IN ('open', 'partial', 'filled')`
         )
-      )
-      .limit(1);
-    if (existingBuy) {
-      log.info(`Skipping ${signal.ticker}: buy order ${existingBuy.orderId} already ${existingBuy.status}`);
+      );
+    const netHeld = Number(netRow?.netHeld ?? 0);
+    if (netHeld > 0) {
+      log.info(`Skipping ${signal.ticker}: already hold ${netHeld} contract(s) per orders table`);
       return null;
     }
 

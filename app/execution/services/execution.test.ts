@@ -267,6 +267,152 @@ describe("executeSignal anti-churn guards", () => {
     expect(orderId).toBeNull();
   });
 
+  test("skips when filled buy from >1h ago with no matching sell (DEN-79.5 second-buy case)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "filled-3h-ago",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 2,
+      filledQuantity: 2,
+      status: "filled",
+      signalId: "sig-first",
+      dryRun: true,
+      createdAt: threeHoursAgo,
+      updatedAt: threeHoursAgo,
+    }).run();
+
+    // positions table is empty (simulating sync lag)
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("allows signal when filled buy has been fully sold (net 0)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "buy-closed-out",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 5,
+      status: "filled",
+      dryRun: true,
+      createdAt: twoHoursAgo,
+      updatedAt: twoHoursAgo,
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-matching",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "sell",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 5,
+      filledQuantity: 5,
+      status: "filled",
+      dryRun: true,
+      createdAt: oneHourAgo,
+      updatedAt: oneHourAgo,
+    }).run();
+
+    // Drain cooldown from the sell
+    for (let i = 0; i < 20; i++) tickCooldowns();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeString();
+  });
+
+  test("skips when filled buy partially sold (net > 0)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "buy-large",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      dryRun: true,
+      createdAt: twoHoursAgo,
+      updatedAt: twoHoursAgo,
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-partial",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "sell",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 3,
+      filledQuantity: 3,
+      status: "filled",
+      dryRun: true,
+      createdAt: oneHourAgo,
+      updatedAt: oneHourAgo,
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("skips when open/partial buy is resting (not yet filled)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "open-buy",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 0,
+      status: "open",
+      dryRun: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("cancelled buys do not count toward netHeld", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "cancelled-buy",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 0,
+      status: "cancelled",
+      dryRun: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeString();
+  });
+
   test("skips when accumulated exposure would exceed limit", async () => {
     const service = new ExecutionService(stubKalshi);
     // Insert an open position to create exposure near the limit
