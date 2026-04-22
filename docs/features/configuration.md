@@ -18,6 +18,8 @@ All config keys and their defaults live in `packages/config/src/index.ts`. Value
 | `bot.maxContractsPerOrder` | `MAX_CONTRACTS_PER_ORDER` | `25` | Order size limit |
 | `bot.enabledStations` | `ENABLED_STATIONS` | `KNYC,KORD,KLAX,KDFW,KIAH` | Stations to track |
 | `bot.sniperHorizonHours` | `SNIPER_HORIZON_HOURS` | `12` | Below this horizon, signals are executable; above, scout-only |
+| `bot.minBetSizeCents` | `MIN_BET_SIZE_CENTS` | `0` | Skip signals whose Kelly-sized spend is below this floor (cents). `0` disables the guard; `500` means no bets under $5 |
+| `bot.historicalPriorWeight` | `HISTORICAL_PRIOR_WEIGHT` | `0` | Weight (0-1) for blending `historicalHitRate` into the estimator's final probability. `0` disables; `0.3` pulls 30% toward observed hit rate. See [post-sharpening-regression.md](../improvements/post-sharpening-regression.md) |
 | `bot.stopLossPct` | `STOP_LOSS_PCT` | `0.25` | Stop-loss trigger |
 | `bot.exitEdgeThreshold` | `EXIT_EDGE_THRESHOLD` | (same as entry) | Edge required to exit on reversal |
 | `bot.exitCooldownTicks` | `EXIT_COOLDOWN_TICKS` | `3` | Ticks between buy/exit/rebuy |
@@ -32,7 +34,7 @@ All config keys and their defaults live in `packages/config/src/index.ts`. Value
 
 Settable via `config set <key> <val>` at runtime (persisted to `runtime_config`):
 
-`dry_run`, `edge_threshold`, `min_confidence`, `max_kelly`, `max_positions`, `max_contracts`, `tick_interval`, `bias_window_days`, `max_calibration_error`, `log_level`, `sniper_horizon_hours`, `stop_loss_pct`, `exit_edge_threshold`, `exit_cooldown_ticks`.
+`dry_run`, `edge_threshold`, `min_confidence`, `max_kelly`, `max_positions`, `max_contracts`, `tick_interval`, `bias_window_days`, `max_calibration_error`, `log_level`, `sniper_horizon_hours`, `stop_loss_pct`, `exit_edge_threshold`, `exit_cooldown_ticks`, `min_bet_size_cents`, `historical_prior_weight`.
 
 ## Typed env var declarations
 

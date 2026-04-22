@@ -287,6 +287,18 @@ export class ExecutionService {
       return null;
     }
 
+    // Minimum bet size filter. When the Kelly- and cap-sized spend falls below
+    // the floor, skip the signal entirely rather than placing a micro-position
+    // that doesn't move the needle. 0 = disabled.
+    const actualSpend = contracts * price;
+    if (config.bot.minBetSizeCents > 0 && actualSpend < config.bot.minBetSizeCents) {
+      log.info(
+        `Skipping ${signal.ticker}: bet ${actualSpend}¢ < min ${config.bot.minBetSizeCents}¢ ` +
+        `(${contracts} × ${price}¢)`
+      );
+      return null;
+    }
+
     log.info(
       `Executing: ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
       `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢)`

@@ -6,20 +6,21 @@ import { test, expect, describe, mock, beforeEach } from "bun:test";
 // and breaks api.test.ts, ws-bridge.test.ts, and performance-query.test.ts.
 // DO NOT mock @kcb/engine or @kcb/kalshi-client — those leak too.
 
+const mockBotConfig = {
+  dryRun: true,
+  maxOpenPositions: 6,
+  maxKellyFraction: 0.025,
+  maxContractsPerOrder: 15,
+  minContractPrice: 15,
+  exitCooldownTicks: 3,
+  maxExposurePerTicker: 500,
+  minBalanceFloor: 0,
+  tickIntervalSec: 120,
+  minBetSizeCents: 0,
+};
+
 mock.module("@kcb/config", () => ({
-  getConfig: () => ({
-    bot: {
-      dryRun: true,
-      maxOpenPositions: 6,
-      maxKellyFraction: 0.025,
-      maxContractsPerOrder: 15,
-      minContractPrice: 15,
-      exitCooldownTicks: 3,
-      maxExposurePerTicker: 500,
-      minBalanceFloor: 0,
-      tickIntervalSec: 120,
-    },
-  }),
+  getConfig: () => ({ bot: mockBotConfig }),
 }));
 
 import { getDb, runMigrations, orders, positions } from "@kcb/db";
@@ -39,6 +40,7 @@ beforeEach(async () => {
   resetCooldowns();
   resetLossTracking();
   resetRestoredFlag();
+  mockBotConfig.minBetSizeCents = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -441,6 +443,37 @@ describe("executeSignal anti-churn guards", () => {
     const orderId = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
     expect(orderId).toStartWith("dry-");
+  });
+});
+
+describe("executeSignal min-bet-size guard", () => {
+  test("default (minBetSizeCents=0) allows micro bets", async () => {
+    const service = new ExecutionService(stubKalshi);
+    // balance=1000, Kelly 2.5% cap → betAmount ~25¢ → 0 contracts at 50¢ would
+    // trip the "0 contracts" skip. Use a higher balance and capped Kelly so we
+    // end up with 1 contract worth ~50¢ (under $5 floor).
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢
+    const orderId = await service.executeSignal(signal, 2000);
+    expect(orderId).toBeString();
+  });
+
+  test("skips when actual spend is below minBetSizeCents", async () => {
+    mockBotConfig.minBetSizeCents = 500; // $5 floor
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢ = 50¢ spend, below 500¢ floor
+    const orderId = await service.executeSignal(signal, 2000);
+    expect(orderId).toBeNull();
+  });
+
+  test("allows when actual spend meets minBetSizeCents exactly", async () => {
+    mockBotConfig.minBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 20000 * 0.025 = 500¢ → 10 contracts @ 50¢ = 500¢ spend, meets floor
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
   });
 });
 

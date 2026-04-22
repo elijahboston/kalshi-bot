@@ -121,6 +121,7 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/forecast-sharpening.md`](improvements/forecast-sharpening.md) | Five changes to close the gap with top bots — **all done**: HRRR ingestion, sniper mode, empirical sigma, same-day observations, horizon-weighted model blending. Includes Monte Carlo ROI simulations. |
 | [`improvements/ui-forecast-sharpening.md`](improvements/ui-forecast-sharpening.md) | 12 UI updates surfacing the forecast-sharpening work (sniper badge, hours-to-close, sigma source, observation adjustments, HRRR status, accuracy tracking, ink-chart + ink-table migrations) — **all done**. |
 | [`improvements/improvements.md`](improvements/improvements.md) | Ranked feature backlog: multi-model blending (done), distribution fitting (done), historical hit-rate prior, stale-order cancellation, per-category bias, position exit logic. |
+| [`improvements/post-sharpening-regression.md`](improvements/post-sharpening-regression.md) | 2026-04-22 diagnostic: post-sharpening "regression" is mostly sample noise; real issue is systemic NO overconfidence (pred<10% bets hit YES 34% of the time) and a dead self-improvement loop (station_bias empty, historicalHitRate computed but never blended). Adds gated `historical_prior_weight` fix. |
 | [`improvements/bun-improvements.md`](improvements/bun-improvements.md) | Bun API migration checklist (UUIDv7, strict SQLite, `bun build --compile`, `Bun.nanoseconds`, `using`, typed `Bun.env`) — **all done**. |
 
 ---

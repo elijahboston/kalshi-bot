@@ -49,6 +49,8 @@ export interface ReasoningTrace {
   countingProbability: number;
   /** Historical verification rate for this bracket */
   historicalHitRate: number | null;
+  /** Historical-prior blend applied (null when weight=0 or hit rate unavailable) */
+  historicalPriorBlend: { weight: number; rawProbability: number; blendedProbability: number } | null;
 }
 
 export class ProbabilityEstimator {
@@ -196,14 +198,37 @@ export class ProbabilityEstimator {
       : Math.min(1, correctedValues.length / 200);
     const rawProbability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
 
+    // Historical-prior blend. When the estimator's ensemble+CDF view conflicts
+    // with observed historical hit rates for the same station/category/bracket,
+    // pull toward the historical rate. Gated by config.bot.historicalPriorWeight
+    // (0 = disabled). Addresses documented systemic over-confidence in NO.
+    const historicalHitRate = await this.getHistoricalHitRate(
+      market.stationId,
+      market.category,
+      market.bracketLow,
+      market.bracketHigh ?? market.bracketLow
+    );
+    const priorWeight = getConfig().bot.historicalPriorWeight;
+    let blendedProbability = rawProbability;
+    let historicalPriorBlend: ReasoningTrace["historicalPriorBlend"] = null;
+    if (priorWeight > 0 && historicalHitRate != null) {
+      const clampedWeight = Math.min(1, Math.max(0, priorWeight));
+      blendedProbability = (1 - clampedWeight) * rawProbability + clampedWeight * historicalHitRate;
+      historicalPriorBlend = {
+        weight: clampedWeight,
+        rawProbability,
+        blendedProbability,
+      };
+    }
+
     // Tail-probability floor. Without empirical bias data we can't trust narrow
     // sigma values, so clamp the returned probability away from 0/1. The raw
     // cdfProb/countingProb in the reasoning trace are untouched for debugging.
     const hasEmpirical = biasCorrection != null && biasCorrection.sampleSize >= 10;
     const floor = isPrecipCategory ? 0 : hasEmpirical ? 0.01 : 0.03;
     const probability = isPrecipCategory
-      ? rawProbability
-      : Math.min(1 - floor, Math.max(floor, rawProbability));
+      ? blendedProbability
+      : Math.min(1 - floor, Math.max(floor, blendedProbability));
 
     // Step 4: Compute confidence
     const spreadNorm = isPrecipCategory
@@ -235,12 +260,8 @@ export class ProbabilityEstimator {
       membersInBracket,
       cdfProbability: cdfProb,
       countingProbability: countingProb,
-      historicalHitRate: await this.getHistoricalHitRate(
-        market.stationId,
-        market.category,
-        market.bracketLow,
-        market.bracketHigh
-      ),
+      historicalHitRate,
+      historicalPriorBlend,
     };
 
     log.debug(

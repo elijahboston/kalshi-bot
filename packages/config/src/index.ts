@@ -56,6 +56,10 @@ export interface BotConfig {
     profitReservePct: number;
     /** Hours before market close when sniper mode activates (0 = disabled) */
     sniperHorizonHours: number;
+    /** Minimum bet size in cents — skip signals whose Kelly-sized bet falls below this (0 = disabled) */
+    minBetSizeCents: number;
+    /** Weight (0-1) for blending historicalHitRate into the estimator's final probability (0 = disabled) */
+    historicalPriorWeight: number;
   };
 
   /** Calibration parameters */
@@ -140,6 +144,8 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   profit_reserve_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.profitReservePct = n; },
   enabled_stations: (c, v) => { c.bot.enabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
   sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sniperHorizonHours = n; },
+  min_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minBetSizeCents = n; },
+  historical_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.historicalPriorWeight = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -180,6 +186,8 @@ export function loadConfig(): BotConfig {
       seedCapital: envNum("SEED_CAPITAL", 17556), // $175.56 current balance
       profitReservePct: envNum("PROFIT_RESERVE_PCT", 0.5), // keep 50% of profits
       sniperHorizonHours: envNum("SNIPER_HORIZON_HOURS", 12), // enter positions within 12h of close
+      minBetSizeCents: envNum("MIN_BET_SIZE_CENTS", 0), // 0 = disabled; 500 = $5 floor
+      historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0), // 0 = disabled; 0.3 suggested ramp value
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

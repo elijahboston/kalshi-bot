@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   mean,
   std,
@@ -9,6 +9,7 @@ import {
   estimateDiurnalOffset,
 } from "./estimator";
 import { runMigrations, getDb, calibration, stationBias } from "@kcb/db";
+import { getConfig } from "@kcb/config";
 
 // Use real in-memory DB — DO NOT mock @kcb/db, it leaks globally
 runMigrations();
@@ -183,6 +184,77 @@ describe("ProbabilityEstimator", () => {
     expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
     // Returned probability is capped at 0.97 without empirical bias data
     expect(result.probability).toBe(0.97);
+  });
+});
+
+describe("ProbabilityEstimator — historical prior blend", () => {
+  const originalWeight = getConfig().bot.historicalPriorWeight;
+
+  afterEach(() => {
+    getConfig().bot.historicalPriorWeight = originalWeight;
+  });
+
+  test("weight=0 leaves probability unchanged even when historical rate exists", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 0;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // far below bracket → raw prob ~0
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBe(0.5);
+    expect(result.reasoning.historicalPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6); // unchanged floor
+  });
+
+  test("weight>0 blends raw probability toward historical hit rate", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 0.3;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw prob near 0
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBe(0.5);
+    expect(result.reasoning.historicalPriorBlend).not.toBeNull();
+    expect(result.reasoning.historicalPriorBlend!.weight).toBe(0.3);
+    // blended = 0.7 * ~0 + 0.3 * 0.5 = ~0.15
+    expect(result.probability).toBeGreaterThan(0.13);
+    expect(result.probability).toBeLessThan(0.17);
+  });
+
+  test("weight>0 but historicalHitRate null → no blend applied", async () => {
+    getConfig().bot.historicalPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBeNull();
+    expect(result.reasoning.historicalPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6);
+  });
+
+  test("weight clamped to [0, 1]", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 2; // nonsense, should clamp to 1
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    // weight=1 → probability equals historical rate (0.5)
+    expect(result.reasoning.historicalPriorBlend!.weight).toBe(1);
+    expect(result.probability).toBeCloseTo(0.5, 6);
   });
 });
 
