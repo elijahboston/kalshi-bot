@@ -63,25 +63,30 @@ Closing this gap is cheap, reversible, data-driven, and uses the table that's cu
 
 ## Remediation
 
-### Accepted fix: gated historical-prior blend
+### Shipped: gated historical-prior blend (commit bce5241, 2026-04-22)
 
-Add `historicalPriorWeight` to `BotConfig.bot` (env `HISTORICAL_PRIOR_WEIGHT`, runtime key `historical_prior_weight`, default `0` = no change). When the knob is > 0 and `historicalHitRate != null`, blend:
+`BotConfig.bot.historicalPriorWeight` (env `HISTORICAL_PRIOR_WEIGHT`, runtime key `historical_prior_weight`, default `0`). When the knob is > 0 and `historicalHitRate != null`:
 
 ```
 blended = (1 - w) * rawProbability + w * historicalHitRate
 probability = clamp(blended, floor, 1 - floor)
 ```
 
-Default `0` preserves current behavior. Recommended initial ramp value `0.25`–`0.4` — large enough to pull `P(YES)=0.04` predictions toward the observed 34% base rate, small enough that the ensemble-driven estimate still dominates when edges are real.
+Runtime config has `historical_prior_weight = 0.3` since 2026-04-22 17:13. Signal traces confirm the blend is active — e.g. KAUS 87.5–88.5 on 2026-04-24 shows `rawProbability=0.108 → blendedProbability=0.186` with `historicalHitRate=0.370`.
 
-Test expectations:
-- `w=0`: probability identical to pre-change.
-- `w=0.3`, historicalHitRate=0.34, rawProbability=0.04: blended = 0.028 + 0.102 = 0.13 (not 0.34; ensemble still dominant).
-- `historicalHitRate=null`: no change regardless of `w`.
+### Shipped: retention-resilient actual-value backfill (2026-04-23)
+
+`backfillActualValue` ([reconciliation.ts](../../app/engine/services/reconciliation.ts)) was only useful when a cached forecast row already existed. With `weather_forecasts` being wiped externally (DB recreations, hand-cleanup, or otherwise), resolved markets produced no (pointForecast, actualValue) pair and `station_bias` stayed at 0 rows indefinitely.
+
+The backfill now has two branches:
+- **Row exists, missing actual:** fill `actual_value` from NWS (unchanged behavior).
+- **No row at all:** pull the most recent `signals.reasoning` trace for the market, extract `correctedEnsembleStats.mean` as `point_forecast` plus `rawEnsembleStats` for ensemble metadata, fetch actual from NWS, and insert a synthesized row with `source='backfilled'`.
+
+This means a single settled market with a cached signal is enough to populate `station_bias` the next time reconciliation runs — no 10+ day data-accumulation wait even if retention continues to break.
 
 ### Deferred
 
-- **Weather_forecasts retention investigation.** Separate task. Without this, `station_bias` stays empty and empirical sigma never activates. But the historical-prior fix is independent.
+- **Root-cause of weather_forecasts wipes.** Still unknown. Direct experiment (manually inserting a row with `target_date='2026-04-20'`) confirmed the cache delete-then-insert logic in `ensemble.ts` is surgical — past-date rows survive tick cycles. The wipes are external (migration run, manual DB work, or the log-review agent). The backfill fix above makes this non-blocking.
 - **Observation-adjustment sigma multiplier.** Already loosened 0.5×→0.7× on Apr 21. Post-loosening data is too thin to tell if further loosening is needed. Revisit after 2 weeks.
 - **Per-category calibration.** All current calibration data is `high_temp`. Before enabling precip/snow trading again, ensure those categories actually produce rows.
 

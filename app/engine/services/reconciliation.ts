@@ -912,8 +912,14 @@ export class ReconciliationService {
 
   /**
    * Try to backfill the actual observed value from NWS observations.
+   *
+   * When cached forecast rows exist, their `actual_value` is filled. When no
+   * row exists (cache evicted, DB reset, retention gap), a synthetic row is
+   * synthesized from the most recent signal's reasoning trace for this market
+   * so the station-bias feedback loop survives any retention issue.
    */
   private async backfillActualValue(market: {
+    ticker?: string;
     stationId: string | null;
     targetDate: string | null;
     category: string;
@@ -922,7 +928,6 @@ export class ReconciliationService {
 
     const db = getDb();
 
-    // Check if we already have actual values
     const forecasts = await db
       .select()
       .from(weatherForecasts)
@@ -933,15 +938,62 @@ export class ReconciliationService {
         )
       );
 
-    const needsBackfill = forecasts.some((f) => f.actualValue == null);
-    if (!needsBackfill) return;
+    const hasAnyRow = forecasts.length > 0;
+    const hasUnfilledRow = forecasts.some((f) => f.actualValue == null);
+    if (hasAnyRow && !hasUnfilledRow) return;
 
+    const actual = await this.fetchNwsActualValue(
+      market.stationId,
+      market.targetDate,
+      market.category
+    );
+    if (actual == null) return;
+
+    if (hasUnfilledRow) {
+      for (const f of forecasts) {
+        if (f.actualValue == null) {
+          await db
+            .update(weatherForecasts)
+            .set({ actualValue: actual })
+            .where(eq(weatherForecasts.id, f.id));
+        }
+      }
+      log.debug(
+        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)}`
+      );
+      return;
+    }
+
+    // No row exists — synthesize one from the signal's reasoning trace so the
+    // (point_forecast, actual_value) pair needed by recomputeStationBias survives.
+    if (!market.ticker) return;
+
+    const synthesized = await this.synthesizeForecastFromSignal(
+      market.ticker,
+      market.stationId,
+      market.targetDate,
+      market.category,
+      actual
+    );
+    if (synthesized) {
+      log.debug(
+        `Synthesized weather_forecast for ${market.stationId} ${market.targetDate} from signal trace: actual=${actual.toFixed(1)}`
+      );
+    }
+  }
+
+  /** Fetch observed value from NWS for a given station/date/category. */
+  private async fetchNwsActualValue(
+    stationId: string,
+    targetDate: string,
+    category: string
+  ): Promise<number | null> {
     try {
       const res = await fetch(
-        `https://api.weather.gov/stations/${market.stationId}/observations?start=${market.targetDate}T00:00:00Z&end=${market.targetDate}T23:59:59Z`,
+        `https://api.weather.gov/stations/${stationId}/observations?start=${targetDate}T00:00:00Z&end=${targetDate}T23:59:59Z`,
         { headers: { "User-Agent": "KalshiClimateBot/1.0" } }
       );
-      if (!res.ok) return;
+      if (!res.ok) return null;
 
       const data = (await res.json()) as {
         features: Array<{
@@ -953,9 +1005,8 @@ export class ReconciliationService {
         }>;
       };
 
-      if (!data.features?.length) return;
+      if (!data.features?.length) return null;
 
-      // Extract max temp observation (in Celsius from NWS)
       let maxTemp: number | null = null;
       let minTemp: number | null = null;
       let totalPrecip = 0;
@@ -963,11 +1014,11 @@ export class ReconciliationService {
       for (const f of data.features) {
         const p = f.properties;
         if (p.maxTemperatureLast24Hours?.value != null) {
-          const valF = p.maxTemperatureLast24Hours.value * 9/5 + 32;
+          const valF = p.maxTemperatureLast24Hours.value * 9 / 5 + 32;
           if (maxTemp == null || valF > maxTemp) maxTemp = valF;
         }
         if (p.minTemperatureLast24Hours?.value != null) {
-          const valF = p.minTemperatureLast24Hours.value * 9/5 + 32;
+          const valF = p.minTemperatureLast24Hours.value * 9 / 5 + 32;
           if (minTemp == null || valF < minTemp) minTemp = valF;
         }
         if (p.precipitationLastHour?.value != null) {
@@ -982,25 +1033,65 @@ export class ReconciliationService {
         snowfall: null, // NWS observations don't reliably report this
       };
 
-      const actual = actualMap[market.category];
-      if (actual == null) return;
-
-      // Update all forecast records for this date/station
-      for (const f of forecasts) {
-        if (f.actualValue == null) {
-          await db
-            .update(weatherForecasts)
-            .set({ actualValue: actual })
-            .where(eq(weatherForecasts.id, f.id));
-        }
-      }
-
-      log.debug(
-        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)}`
-      );
+      return actualMap[category] ?? null;
     } catch {
-      // Non-critical — silently skip
+      return null;
     }
+  }
+
+  /**
+   * Reconstruct a weather_forecasts row from the most recent signal's
+   * reasoning trace for this market. Returns true if a row was inserted.
+   */
+  private async synthesizeForecastFromSignal(
+    ticker: string,
+    stationId: string,
+    targetDate: string,
+    category: string,
+    actual: number
+  ): Promise<boolean> {
+    const db = getDb();
+
+    const [signal] = await db
+      .select()
+      .from(signals)
+      .where(eq(signals.ticker, ticker))
+      .orderBy(sql`${signals.createdAt} DESC`)
+      .limit(1);
+
+    if (!signal?.reasoning) return false;
+
+    let trace: {
+      correctedEnsembleStats?: { mean?: number; std?: number };
+      rawEnsembleStats?: { mean?: number; std?: number; count?: number };
+      forecastHorizon?: number;
+    };
+    try {
+      trace = JSON.parse(signal.reasoning);
+    } catch {
+      return false;
+    }
+
+    const pointForecast = trace.correctedEnsembleStats?.mean;
+    if (pointForecast == null) return false;
+
+    await db.insert(weatherForecasts).values({
+      id: uuid(),
+      stationId,
+      targetDate,
+      source: "backfilled",
+      forecastType: category,
+      forecastHorizon: Math.max(1, trace.forecastHorizon ?? 1),
+      pointForecast,
+      ensembleValues: null,
+      ensembleSize: trace.rawEnsembleStats?.count ?? null,
+      ensembleMean: trace.rawEnsembleStats?.mean ?? null,
+      ensembleStd: trace.rawEnsembleStats?.std ?? null,
+      actualValue: actual,
+      fetchedAt: now(),
+    });
+
+    return true;
   }
 
   /**

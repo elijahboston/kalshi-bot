@@ -278,3 +278,265 @@ describe("trade-based PnL computation", () => {
     expect(pnl).toBe(-165);
   });
 });
+
+// ── backfillActualValue synthesis path ──────────────────────
+// DO NOT mock @kcb/db or @kcb/engine — they leak globally via mock.module
+// and break other test files. Use real in-memory DB + fetch swap.
+import { mock, beforeEach, afterEach } from "bun:test";
+import {
+  runMigrations,
+  getDb,
+  weatherForecasts,
+  signals,
+  markets,
+} from "@kcb/db";
+import { eq } from "drizzle-orm";
+import { ReconciliationService } from "./reconciliation";
+
+runMigrations();
+
+const originalFetch = globalThis.fetch;
+
+function mockNwsResponse(maxTempC: number | null) {
+  globalThis.fetch = mock(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({
+          features: maxTempC == null
+            ? []
+            : [
+                {
+                  properties: {
+                    maxTemperatureLast24Hours: { value: maxTempC },
+                    minTemperatureLast24Hours: { value: null },
+                    precipitationLastHour: { value: null },
+                  },
+                },
+              ],
+        }),
+        { status: 200 }
+      )
+    )
+  ) as typeof fetch;
+}
+
+describe("backfillActualValue — retention-resilient backfill", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(weatherForecasts).run();
+    db.delete(signals).run();
+    db.delete(markets).run();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const ticker = "KXHIGHNY-26APR20-B72.5";
+  const stationId = "KNYC";
+  const targetDate = "2026-04-20";
+  const category = "high_temp";
+
+  function seedSignalWithTrace(overrides: Record<string, unknown> = {}) {
+    const db = getDb();
+    db.insert(signals).values({
+      id: "sig-1",
+      ticker,
+      seriesTicker: "KXHIGHNY",
+      estimatedProb: 0.2,
+      confidence: 0.5,
+      marketPrice: 0.3,
+      edge: -0.1,
+      edgeThreshold: 0.05,
+      recommendation: "skip",
+      reasoning: JSON.stringify({
+        stationId,
+        targetDate,
+        forecastHorizon: 1,
+        rawEnsembleStats: { mean: 71.2, std: 2.5, count: 120 },
+        correctedEnsembleStats: { mean: 72.0, std: 2.5 },
+        ...overrides,
+      }),
+      createdAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+  }
+
+  test("updates existing row's actual_value when one exists without it", async () => {
+    const db = getDb();
+    db.insert(weatherForecasts).values({
+      id: "wf-existing",
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: category,
+      forecastHorizon: 1,
+      pointForecast: 71.5,
+      ensembleValues: "[71,72]",
+      ensembleSize: 2,
+      ensembleMean: 71.5,
+      ensembleStd: 0.5,
+      actualValue: null,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    mockNwsResponse(22.2); // 22.2°C → 72.0°F
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].actualValue).toBeCloseTo(71.96, 1);
+    expect(rows[0].source).toBe("multi_ensemble"); // unchanged
+  });
+
+  test("synthesizes a new row from signal trace when no forecast row exists", async () => {
+    const db = getDb();
+    seedSignalWithTrace();
+
+    mockNwsResponse(22.2); // ≈72°F
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source).toBe("backfilled");
+    expect(rows[0].pointForecast).toBe(72.0); // from correctedEnsembleStats.mean
+    expect(rows[0].ensembleMean).toBe(71.2);
+    expect(rows[0].ensembleStd).toBe(2.5);
+    expect(rows[0].ensembleSize).toBe(120);
+    expect(rows[0].actualValue).toBeCloseTo(71.96, 1);
+    expect(rows[0].forecastType).toBe(category);
+    expect(rows[0].forecastHorizon).toBe(1);
+  });
+
+  test("no-op when row exists with actual_value already filled", async () => {
+    const db = getDb();
+    db.insert(weatherForecasts).values({
+      id: "wf-filled",
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: category,
+      forecastHorizon: 1,
+      pointForecast: 71.5,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: 72.3,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    // Fetch should NOT be called — make any fetch throw to assert this
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as typeof fetch;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].actualValue).toBe(72.3); // unchanged
+  });
+
+  test("no synthesis when signal has no reasoning trace", async () => {
+    const db = getDb();
+    db.insert(signals).values({
+      id: "sig-noreason",
+      ticker,
+      seriesTicker: "KXHIGHNY",
+      estimatedProb: 0.2,
+      confidence: 0.5,
+      marketPrice: 0.3,
+      edge: -0.1,
+      edgeThreshold: 0.05,
+      recommendation: "skip",
+      reasoning: null,
+      createdAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    mockNwsResponse(22.2);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(0);
+  });
+
+  test("no synthesis when ticker is missing", async () => {
+    seedSignalWithTrace();
+    mockNwsResponse(22.2);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      // ticker omitted intentionally
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const db = getDb();
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(0);
+  });
+
+  test("no synthesis when NWS has no observation", async () => {
+    seedSignalWithTrace();
+    mockNwsResponse(null); // empty features
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const db = getDb();
+    const rows = db.select().from(weatherForecasts).all();
+    expect(rows).toHaveLength(0);
+  });
+
+  test("synthesized row has non-null point_forecast and actual_value so recomputeStationBias can use it", async () => {
+    const db = getDb();
+    seedSignalWithTrace();
+    mockNwsResponse(20.0); // 68°F
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({
+      ticker,
+      stationId,
+      targetDate,
+      category,
+    });
+
+    const [row] = db.select().from(weatherForecasts).where(eq(weatherForecasts.stationId, stationId)).all();
+    expect(row).toBeDefined();
+    expect(row.pointForecast).not.toBeNull();
+    expect(row.actualValue).not.toBeNull();
+    // bias residual = pointForecast - actual = 72 - 68 = 4
+    expect(row.pointForecast! - row.actualValue!).toBeCloseTo(4.0, 1);
+  });
+});
