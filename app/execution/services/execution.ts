@@ -247,8 +247,11 @@ export class ExecutionService {
       return null;
     }
 
-    // Compute contracts
-    const betAmount = Math.floor(balance * cappedKelly);
+    // Compute contracts. Flat sizing (when configured) bypasses Kelly's dollar
+    // amount but still requires cappedKelly > 0 above — Kelly gates the EV sign.
+    const betAmount = config.bot.flatBetSizeCents > 0
+      ? config.bot.flatBetSizeCents
+      : Math.floor(balance * cappedKelly);
     const price = side === "yes"
       ? Math.round(signal.marketPrice * 100) // price in cents
       : Math.round((1 - signal.marketPrice) * 100);

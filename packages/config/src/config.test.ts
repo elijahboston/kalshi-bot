@@ -23,18 +23,21 @@ beforeEach(() => {
 
 test("loadConfig returns correct trading defaults", () => {
   const config = loadConfig();
-  expect(config.bot.edgeThreshold).toBe(0.15);
-  expect(config.bot.minConfidence).toBe(0.65);
-  expect(config.bot.maxKellyFraction).toBe(0.025);
+  expect(config.bot.edgeThreshold).toBe(0.20);
+  expect(config.bot.minConfidence).toBe(0.80);
+  expect(config.bot.maxKellyFraction).toBe(0.05);
   expect(config.bot.maxOpenPositions).toBe(6);
   expect(config.bot.maxContractsPerOrder).toBe(15);
+  expect(config.bot.flatBetSizeCents).toBe(500);
+  expect(config.bot.minBetSizeCents).toBe(500);
+  expect(config.bot.historicalPriorWeight).toBe(0.3);
 });
 
 test("loadConfig returns correct anti-churn defaults", () => {
   const config = loadConfig();
   expect(config.bot.minContractPrice).toBe(15);
   expect(config.bot.exitCooldownTicks).toBe(15);
-  expect(config.bot.maxExposurePerTicker).toBe(500);
+  expect(config.bot.maxExposurePerTicker).toBe(1000);
   expect(config.bot.minBalanceFloor).toBe(5000);
 });
 

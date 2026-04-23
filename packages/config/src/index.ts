@@ -58,6 +58,8 @@ export interface BotConfig {
     sniperHorizonHours: number;
     /** Minimum bet size in cents — skip signals whose Kelly-sized bet falls below this (0 = disabled) */
     minBetSizeCents: number;
+    /** Flat bet size in cents — when > 0, overrides Kelly-based dollar sizing; Kelly still gates EV sign (0 = disabled) */
+    flatBetSizeCents: number;
     /** Weight (0-1) for blending historicalHitRate into the estimator's final probability (0 = disabled) */
     historicalPriorWeight: number;
   };
@@ -145,6 +147,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   enabled_stations: (c, v) => { c.bot.enabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
   sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sniperHorizonHours = n; },
   min_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minBetSizeCents = n; },
+  flat_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.flatBetSizeCents = n; },
   historical_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.historicalPriorWeight = n; },
 };
 
@@ -163,9 +166,9 @@ export function loadConfig(): BotConfig {
     bot: {
       dryRun: envBool("DRY_RUN", true),
       tickIntervalSec: envNum("TICK_INTERVAL_SEC", 300),
-      edgeThreshold: envNum("EDGE_THRESHOLD", 0.15),
-      minConfidence: envNum("MIN_CONFIDENCE", 0.65),
-      maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.025),
+      edgeThreshold: envNum("EDGE_THRESHOLD", 0.20),
+      minConfidence: envNum("MIN_CONFIDENCE", 0.80),
+      maxKellyFraction: envNum("MAX_KELLY_FRACTION", 0.05),
       maxOpenPositions: envNum("MAX_OPEN_POSITIONS", 6),
       maxContractsPerOrder: envNum("MAX_CONTRACTS_PER_ORDER", 15),
       enabledSeries: env("ENABLED_SERIES")
@@ -181,13 +184,16 @@ export function loadConfig(): BotConfig {
       exitTimeMinEdge: envNum("EXIT_TIME_MIN_EDGE", 0.08),
       minContractPrice: envNum("MIN_CONTRACT_PRICE", 15),
       exitCooldownTicks: envNum("EXIT_COOLDOWN_TICKS", 15),
-      maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 500),
+      // Revisit after bankroll top-up: scale with seed capital.
+      maxExposurePerTicker: envNum("MAX_EXPOSURE_PER_TICKER", 1000),
       minBalanceFloor: envNum("MIN_BALANCE_FLOOR", 5000), // $50 default
+      // Revisit after bankroll top-up.
       seedCapital: envNum("SEED_CAPITAL", 17556), // $175.56 current balance
       profitReservePct: envNum("PROFIT_RESERVE_PCT", 0.5), // keep 50% of profits
       sniperHorizonHours: envNum("SNIPER_HORIZON_HOURS", 12), // enter positions within 12h of close
-      minBetSizeCents: envNum("MIN_BET_SIZE_CENTS", 0), // 0 = disabled; 500 = $5 floor
-      historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0), // 0 = disabled; 0.3 suggested ramp value
+      minBetSizeCents: envNum("MIN_BET_SIZE_CENTS", 500), // $5 floor; skip sub-$5 sized bets
+      flatBetSizeCents: envNum("FLAT_BET_SIZE_CENTS", 500), // $5 flat per signal; 0 = fall back to Kelly sizing
+      historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0.3), // blend toward observed historical hit rate
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

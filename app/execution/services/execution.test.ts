@@ -17,6 +17,7 @@ const mockBotConfig = {
   minBalanceFloor: 0,
   tickIntervalSec: 120,
   minBetSizeCents: 0,
+  flatBetSizeCents: 0,
 };
 
 mock.module("@kcb/config", () => ({
@@ -41,6 +42,7 @@ beforeEach(async () => {
   resetLossTracking();
   resetRestoredFlag();
   mockBotConfig.minBetSizeCents = 0;
+  mockBotConfig.flatBetSizeCents = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -474,6 +476,61 @@ describe("executeSignal min-bet-size guard", () => {
     // balance 20000 * 0.025 = 500¢ → 10 contracts @ 50¢ = 500¢ spend, meets floor
     const orderId = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
+  });
+});
+
+describe("executeSignal flat bet sizing", () => {
+  test("flatBetSizeCents=500 sizes to $5 regardless of small bankroll", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.minBetSizeCents = 500;
+    mockBotConfig.maxExposurePerTicker = 1000;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    // Small bankroll — Kelly at 2.5% cap would spend ~$4.39 on 17556¢. Flat
+    // override pushes to $5. Price 50¢ → 10 contracts (under the 15-order cap).
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(order.quantity * order.limitPrice).toBe(500);
+  });
+
+  test("flatBetSizeCents=500 still skips when Kelly <= 0 (no edge)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    // Negative edge: estimatedProb < marketPrice on yes side → Kelly clamps to 0
+    const signal = makeSignal({ estimatedProb: 0.3, marketPrice: 0.5, edge: -0.2, side: "yes" });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeNull();
+  });
+
+  test("flatBetSizeCents=0 falls back to Kelly sizing (backward compat)", async () => {
+    mockBotConfig.flatBetSizeCents = 0;
+    mockBotConfig.minBetSizeCents = 0;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    // balance 20000 * 0.025 Kelly cap = 500¢ → 10 contracts @ 50¢
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // Kelly-based sizing yields <= 500¢ spend, not flat 500¢
+    expect(order.quantity).toBe(10);
+  });
+
+  test("flat sizing trimmed by exposure cap below min floor -> skip", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.minBetSizeCents = 500;
+    mockBotConfig.maxExposurePerTicker = 300; // leaves only 300¢ of room
+    const service = new ExecutionService(stubKalshi);
+
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.25, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeNull();
   });
 });
 
