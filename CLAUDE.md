@@ -4,6 +4,21 @@ globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
 alwaysApply: false
 ---
 
+This is a Climate Trading bot for Kalshi.
+Refer to ./docs for information FIRST
+Refer to docs/spec.md for operational details.
+Refer to docs/improvements/forecast-sharpening.md for strategy details.
+We want to optimize our profitability. Minimize loses.
+Primary database is SQLite located at ./data/kalshi-bot.db
+Update, create, add, documentation in ./docs after every change
+
+## Workflow Rules
+
+- **Always write tests for changes.** Any new feature, bug fix, or significant refactor must include corresponding tests. Place test files alongside source files using the `*.test.ts` naming convention.
+- **Run tests before committing.** Run `bun test` and ensure all tests pass before creating a commit. Do not commit with failing tests.
+- **Push after a green commit.** Once tests pass and the commit is created, push to the remote.
+
+
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
@@ -110,8 +125,3 @@ bun --hot ./index.ts
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
 
-## Workflow Rules
-
-- **Always write tests for changes.** Any new feature, bug fix, or significant refactor must include corresponding tests. Place test files alongside source files using the `*.test.ts` naming convention.
-- **Run tests before committing.** Run `bun test` and ensure all tests pass before creating a commit. Do not commit with failing tests.
-- **Push after a green commit.** Once tests pass and the commit is created, push to the remote.
