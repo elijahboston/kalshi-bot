@@ -7,7 +7,8 @@ The user proposed depositing $100 and ramping bet sizes, believing the Apr 14 fo
 - **Brier "regression" 0.231 → 0.349 is mostly sample-size noise and outcome-distribution shift.** Post-Apr-14 trading is only 54 trades with -$8.25 combined PnL; the historical -$444.83 loss happened almost entirely pre-Apr-2.
 - **The real issue** is systematic overconfidence in NO: when the bot predicts `P(YES) < 10%`, actuals hit YES **33.8%** of the time (263 trades, -$352.73 loss).
 - **Root cause:** the self-improvement feedback loop is structurally dead. `station_bias` has 0 rows, `weather_forecasts` retains only 36 rows (all Apr 21–22), and `historicalHitRate` is computed but never blended into the final probability.
-- **Targeted fix:** blend `historicalHitRate` into the final probability behind a `historical_prior_weight` runtime flag (defaulted to 0). Uses data already in the `calibration` table (445 rows) without waiting for the weather_forecasts retention issue to be fixed.
+- **Shipped Apr 22 (bce5241):** `historical_prior_weight` runtime flag blends `historicalHitRate` into the final probability. Runtime config set to `0.3` the same day; traces confirm the blend is active.
+- **Shipped Apr 23 (eb8ee44):** retention-resilient `backfillActualValue` — when no cached forecast row exists for a resolved market, synthesize one from the signal's reasoning trace + NWS actual. One settled market is now enough to seed `station_bias`, independent of whatever keeps wiping `weather_forecasts`.
 
 ## Window decomposition (calibration table, n=445)
 
@@ -44,16 +45,16 @@ Sampled biggest losers from the `calibration`/`signals` join. Four findings:
 
 ## Why bias correction never fires
 
-The feedback loop is `weather_forecasts` → `recomputeStationBias` → `station_bias` → `estimator.getBiasCorrection`. Two observed facts kill it:
+The feedback loop is `weather_forecasts` → `recomputeStationBias` → `station_bias` → `estimator.getBiasCorrection`. Two observed facts kill it (state at time of diagnostic, 2026-04-22):
 
 - `SELECT * FROM station_bias` returns 0 rows.
 - `weather_forecasts` holds only 36 rows, all `fetched_at` on Apr 21–22, and every row has `actual_value IS NULL`.
 
-`recomputeStationBias` ([reconciliation.ts:1009-1096](../app/engine/services/reconciliation.ts#L1009-L1096)) requires rows where `pointForecast` and `actualValue` are both non-null. There are zero such rows. The `backfillWeatherActuals` path ([reconciliation.ts:920-1004](../app/engine/services/reconciliation.ts#L920-L1004)) does try to backfill from NWS for any market whose target date has passed, but if `weather_forecasts` doesn't retain historical rows, there's nothing to update.
+`recomputeStationBias` ([reconciliation.ts:1100](../../app/engine/services/reconciliation.ts#L1100)) requires rows where `pointForecast` and `actualValue` are both non-null. There were zero such rows. The original `backfillActualValue` only *updated* existing rows — if `weather_forecasts` was empty for the market's date, it did nothing.
 
-Cache-refresh logic in [ensemble.ts:655-664](../app/data/services/ensemble.ts#L655-L664) deletes-then-inserts per (station, target_date, source, type). That by itself should preserve past-date rows, so the retention problem is likely external — possibly a DB recreation around Apr 21. Either way the estimator has been running blind for weeks.
+Cache-refresh logic in [ensemble.ts](../../app/data/services/ensemble.ts) deletes-then-inserts per (station, target_date, source, type) — a direct experiment on 2026-04-23 (manually inserting a row with `target_date='2026-04-20'` and watching it survive tick cycles) confirmed the cache logic is surgical. The wipes are external (DB recreations, manual cleanup, or the log-review agent touching the DB). The backfill fix below makes this non-blocking.
 
-Fixing the retention issue will take 10+ days of accumulated data before `station_bias` has the `sampleSize >= 10` needed to activate empirical sigma. We need something that works today.
+Original concern: fixing the retention issue would take 10+ days of data accumulation before `station_bias` has the `sampleSize >= 10` needed to activate empirical sigma. The synthesis fix below collapses this to one resolved market per station/horizon.
 
 ## Why `historicalHitRate` is wasted
 
@@ -74,15 +75,22 @@ probability = clamp(blended, floor, 1 - floor)
 
 Runtime config has `historical_prior_weight = 0.3` since 2026-04-22 17:13. Signal traces confirm the blend is active — e.g. KAUS 87.5–88.5 on 2026-04-24 shows `rawProbability=0.108 → blendedProbability=0.186` with `historicalHitRate=0.370`.
 
-### Shipped: retention-resilient actual-value backfill (2026-04-23)
+### Shipped: retention-resilient actual-value backfill (commit eb8ee44, 2026-04-23)
 
-`backfillActualValue` ([reconciliation.ts](../../app/engine/services/reconciliation.ts)) was only useful when a cached forecast row already existed. With `weather_forecasts` being wiped externally (DB recreations, hand-cleanup, or otherwise), resolved markets produced no (pointForecast, actualValue) pair and `station_bias` stayed at 0 rows indefinitely.
+`backfillActualValue` ([reconciliation.ts:921](../../app/engine/services/reconciliation.ts#L921)) was only useful when a cached forecast row already existed. With `weather_forecasts` being wiped externally, resolved markets produced no (pointForecast, actualValue) pair and `station_bias` stayed at 0 rows indefinitely.
 
-The backfill now has two branches:
+Refactored into three methods:
+- `backfillActualValue` — orchestrator with two branches.
+- `fetchNwsActualValue` ([reconciliation.ts:986](../../app/engine/services/reconciliation.ts#L986)) — extracted NWS observation fetch (max/min temp, precip) with unit conversion.
+- `synthesizeForecastFromSignal` ([reconciliation.ts:1046](../../app/engine/services/reconciliation.ts#L1046)) — new: reconstructs a forecast row from the most recent `signals.reasoning` trace for the ticker.
+
+The branches:
 - **Row exists, missing actual:** fill `actual_value` from NWS (unchanged behavior).
 - **No row at all:** pull the most recent `signals.reasoning` trace for the market, extract `correctedEnsembleStats.mean` as `point_forecast` plus `rawEnsembleStats` for ensemble metadata, fetch actual from NWS, and insert a synthesized row with `source='backfilled'`.
 
-This means a single settled market with a cached signal is enough to populate `station_bias` the next time reconciliation runs — no 10+ day data-accumulation wait even if retention continues to break.
+Result: a single settled market with a cached signal is enough to populate `station_bias` on the next reconciliation — no 10+ day accumulation wait even if retention continues to break. Callers already pass the full market row, so `ticker` is available for the signal lookup without a signature change at call sites.
+
+**Test coverage** ([reconciliation.test.ts](../../app/engine/services/reconciliation.test.ts)): 7 new tests covering update-existing, synthesize-when-missing, no-op-when-filled, no-synthesis-without-reasoning, no-synthesis-without-ticker, no-synthesis-without-NWS-actual, and end-to-end recomputeStationBias-readiness. Full suite: 378 pass, 0 fail.
 
 ### Deferred
 
@@ -94,7 +102,9 @@ This means a single settled market with a cached signal is enough to populate `s
 
 Before any deposit and before raising `max_kelly_fraction` / `max_exposure_per_ticker`:
 
-1. Land historical-prior blend with `historical_prior_weight = 0.3`.
-2. Let it run ≥5 trading days.
+1. ~~Land historical-prior blend with `historical_prior_weight = 0.3`.~~ ✅ Done 2026-04-22 (bce5241), runtime weight set to 0.3.
+2. Let it run ≥5 trading days. **Clock started 2026-04-22; earliest evaluation window 2026-04-27.**
 3. Re-run the prediction-bucket analysis above. Target: `pred<10%` bucket hit rate drops below 20% (still badly over-confident but the gap closes), or equivalently predicted probability in the `pred<10%` bucket rises above 10% on average.
 4. Only then recommend the deposit.
+
+Secondary signal now that Apr 23 backfill is shipped: `SELECT COUNT(*) FROM station_bias` should become > 0 within a few days of settled markets, and `biasCorrection` in reasoning traces should stop being `null` for stations with ≥10 samples. If it stays empty, investigate whether the synthesis path is firing (log.debug `"Synthesized weather_forecast…"`).
