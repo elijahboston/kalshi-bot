@@ -95,6 +95,7 @@ All endpoints are on `http://localhost:3100`. WebSocket is `ws://localhost:3100/
 | **Status Bar** | `GET /api/status`, `GET /api/balance`, `GET /api/config` | `bot:status`, `balance:update` |
 | **KPI Row** | `GET /api/performance`, `GET /api/performance/win-rates` | `balance:update`, `market:resolved` |
 | **Equity Curve** | `GET /api/balance/history?limit=200` | `balance:update` (append point) |
+| **Weekly Win-Rate Heatmap** | `GET /api/performance/daily-win-rates?days=84` | `market:resolved` (refetch) |
 | **Daily P&L** | `GET /api/performance/daily-pnl?days=14` | `market:resolved` (refetch) |
 | **Active Markets** | `GET /api/markets?status=open&limit=50` | `market:discovered`, `market:priceUpdate`, `signal:new` (merge edge/conf/estimate into row) |
 | **Open Positions** | `GET /api/positions` | `position:update` |

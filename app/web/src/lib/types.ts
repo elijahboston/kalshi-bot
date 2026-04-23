@@ -152,6 +152,14 @@ export interface DailyPnl {
   pnl: number
 }
 
+/** Daily win rate from GET /api/performance/daily-win-rates */
+export interface DailyWinRate {
+  date: string
+  total: number
+  wins: number
+  winRate: number
+}
+
 /** Calibration bucket from GET /api/performance/calibration */
 export interface CalibrationBucket {
   bucket: string

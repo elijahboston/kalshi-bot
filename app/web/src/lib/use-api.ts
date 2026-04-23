@@ -12,6 +12,7 @@ import type {
   Performance,
   WinRateWindow,
   DailyPnl,
+  DailyWinRate,
   CalibrationBucket,
   Resolution,
   LogEntry,
@@ -38,6 +39,7 @@ export interface ApiState {
   performance: Performance | null
   winRates: WinRateWindow[]
   dailyPnl: DailyPnl[]
+  dailyWinRates: DailyWinRate[]
   calibration: CalibrationBucket[]
   resolutions: Resolution[]
 
@@ -60,6 +62,7 @@ const INITIAL_STATE: ApiState = {
   performance: null,
   winRates: [],
   dailyPnl: [],
+  dailyWinRates: [],
   calibration: [],
   resolutions: [],
   logs: [],
@@ -105,6 +108,7 @@ export function useApi(): ApiState {
       fetchJson<Performance>("/api/performance"),
       fetchJson<WinRateWindow[]>("/api/performance/win-rates"),
       fetchJson<DailyPnl[]>("/api/performance/daily-pnl?days=14"),
+      fetchJson<DailyWinRate[]>("/api/performance/daily-win-rates?days=84"),
       fetchJson<CalibrationBucket[]>("/api/performance/calibration"),
       fetchJson<Resolution[]>("/api/performance/resolutions?limit=10"),
       fetchJson<LogEntry[]>("/api/logs?limit=100"),
@@ -121,6 +125,7 @@ export function useApi(): ApiState {
         performance,
         winRates,
         dailyPnl,
+        dailyWinRates,
         calibration,
         resolutions,
         logs,
@@ -143,6 +148,8 @@ export function useApi(): ApiState {
             winRates.status === "fulfilled" ? winRates.value : [],
           dailyPnl:
             dailyPnl.status === "fulfilled" ? dailyPnl.value : [],
+          dailyWinRates:
+            dailyWinRates.status === "fulfilled" ? dailyWinRates.value : [],
           calibration:
             calibration.status === "fulfilled" ? calibration.value : [],
           resolutions:
@@ -257,12 +264,14 @@ export function useApi(): ApiState {
               fetchJson<Resolution[]>("/api/performance/resolutions?limit=10"),
               fetchJson<DailyPnl[]>("/api/performance/daily-pnl?days=14"),
               fetchJson<WinRateWindow[]>("/api/performance/win-rates"),
-            ]).then(([perf, res, pnl, wr]) => {
+              fetchJson<DailyWinRate[]>("/api/performance/daily-win-rates?days=84"),
+            ]).then(([perf, res, pnl, wr, dwr]) => {
               patch({
                 performance: perf,
                 resolutions: res,
                 dailyPnl: pnl,
                 winRates: wr,
+                dailyWinRates: dwr,
               })
             })
             break

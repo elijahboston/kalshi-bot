@@ -82,6 +82,42 @@ export const performanceRoutes = new Elysia({ prefix: "/api/performance" })
       }),
     },
   )
+  .get(
+    "/daily-win-rates",
+    ({ query }) => {
+      const db = getDb();
+      const days = query.days ?? 84;
+
+      return db
+        .select({
+          date: sql<string>`date(${calibration.resolvedAt})`.as("day"),
+          total: count(),
+          wins: sql<number>`SUM(CASE WHEN ${calibration.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+        })
+        .from(calibration)
+        .where(sql`${calibration.traded} = 1`)
+        .groupBy(sql`date(${calibration.resolvedAt})`)
+        .orderBy(sql`date(${calibration.resolvedAt}) DESC`)
+        .limit(days)
+        .all()
+        .map((r) => {
+          const total = Number(r.total ?? 0);
+          const wins = Number(r.wins ?? 0);
+          return {
+            date: r.date,
+            total,
+            wins,
+            winRate: total > 0 ? wins / total : 0,
+          };
+        })
+        .reverse();
+    },
+    {
+      query: t.Object({
+        days: t.Optional(t.Numeric()),
+      }),
+    },
+  )
   .get("/win-rates", () => {
     const db = getDb();
     const windows = [

@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, describe } from "bun:test";
 import Elysia from "elysia";
-import { runMigrations } from "@kcb/db";
+import { runMigrations, getDb, calibration } from "@kcb/db";
 import { statusRoutes } from "./status";
 import { marketRoutes } from "./markets";
 import { positionRoutes } from "./positions";
@@ -149,6 +149,59 @@ describe("performance routes", () => {
     expect(body).toHaveLength(3);
     expect(body[0]).toHaveProperty("label");
     expect(body[0]).toHaveProperty("rate");
+  });
+
+  test("GET /api/performance/daily-win-rates returns array", async () => {
+    const { status, body } = await get("/api/performance/daily-win-rates?days=7");
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+  });
+
+  test("GET /api/performance/daily-win-rates groups by day and excludes untraded rows", async () => {
+    const db = getDb();
+    db.delete(calibration).run();
+
+    const mk = (id: string, resolvedAt: string, realizedPnl: number | null, traded: boolean) => ({
+      id,
+      ticker: `T-${id}`,
+      seriesTicker: "KXHIGH",
+      category: "high_temp",
+      stationId: "KNYC",
+      predictedProb: 0.5,
+      actualOutcome: 0,
+      marketPrice: 50,
+      edge: 0,
+      realizedPnl,
+      traded,
+      forecastHorizon: 1,
+      resolvedAt,
+    });
+
+    db.insert(calibration)
+      .values([
+        mk("a1", "2026-04-20T12:00:00Z", 100, true),
+        mk("a2", "2026-04-20T18:00:00Z", -50, true),
+        mk("b1", "2026-04-21T10:00:00Z", 200, true),
+        mk("b2", "2026-04-21T15:00:00Z", 150, true),
+        mk("c1", "2026-04-22T08:00:00Z", -80, true),
+        mk("d1", "2026-04-19T08:00:00Z", 99, false),
+      ])
+      .run();
+
+    const { status, body } = await get("/api/performance/daily-win-rates?days=30");
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+
+    const byDate = new Map<string, any>(body.map((r: any) => [r.date, r]));
+    expect(byDate.get("2026-04-20")).toEqual({ date: "2026-04-20", total: 2, wins: 1, winRate: 0.5 });
+    expect(byDate.get("2026-04-21")).toEqual({ date: "2026-04-21", total: 2, wins: 2, winRate: 1 });
+    expect(byDate.get("2026-04-22")).toEqual({ date: "2026-04-22", total: 1, wins: 0, winRate: 0 });
+    expect(byDate.has("2026-04-19")).toBe(false); // untraded excluded
+
+    const dates = body.map((r: any) => r.date);
+    expect([...dates].sort()).toEqual(dates); // chronological ascending
+
+    db.delete(calibration).run();
   });
 
   test("GET /api/performance/calibration returns 6 buckets", async () => {

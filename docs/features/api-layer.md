@@ -113,6 +113,7 @@ All endpoints return JSON. Derived from what each TUI view currently displays.
 | `GET` | `/api/performance` | Aggregate stats: cash, portfolio, realized/unrealized PnL, win rate, Brier score, order count | Mirrors `performance-cache.ts` queries |
 | `GET` | `/api/performance/daily-pnl` | Daily PnL breakdown. Query param: `?days=7` | `calibration` table grouped by day |
 | `GET` | `/api/performance/win-rates` | Windowed win rates (24h, 48h, 7d) | `calibration` table |
+| `GET` | `/api/performance/daily-win-rates` | Per-day win rate for the dashboard heatmap. Query param: `?days=84` (default). Returns `[{ date, total, wins, winRate }]` chronological ascending, including only days with ≥1 traded resolution. A win is `realizedPnl > 0` on a `traded = 1` row. | `calibration` table grouped by `date(resolvedAt)` |
 | `GET` | `/api/performance/calibration` | Calibration bucket stats (predicted vs actual by probability bucket) | `calibration` table |
 | `GET` | `/api/performance/resolutions` | Recent market resolutions with PnL. Query param: `?limit=10` | `calibration` table |
 
