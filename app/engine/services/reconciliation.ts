@@ -1250,10 +1250,13 @@ export class ReconciliationService {
     let kalshiPortfolioValue: number | undefined;
 
     if (config.bot.dryRun) {
-      // Use last known balance (default $100 = 10000 cents)
+      // Use last known paper balance (default $100 = 10000 cents). Filter by
+      // dry_run=1 so live history doesn't leak into the paper simulation when
+      // mode flips.
       const lastRecord = await db
         .select()
         .from(balanceHistory)
+        .where(eq(balanceHistory.dryRun, true))
         .orderBy(sql`${balanceHistory.recordedAt} DESC`)
         .limit(1);
 
@@ -1290,6 +1293,7 @@ export class ReconciliationService {
       openPositions: openPositions.length,
       realizedPnl: Math.round(realizedPnl),
       recordedAt: now(),
+      dryRun: config.bot.dryRun,
     });
 
     bus.emit("balance:update", {

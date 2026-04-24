@@ -96,43 +96,52 @@ export function useApi(): ApiState {
   useEffect(() => {
     mountedRef.current = true
 
-    Promise.allSettled([
-      fetchJson<BotStatus>("/api/status"),
-      fetchJson<BotConfig>("/api/config"),
-      fetchJson<Balance>("/api/balance"),
-      fetchJson<BalancePoint[]>("/api/balance/history?limit=200"),
-      fetchJson<Position[]>("/api/positions"),
-      fetchJson<Market[]>("/api/markets?status=open&limit=50"),
-      fetchJson<Signal[]>("/api/signals?limit=30"),
-      fetchJson<Order[]>("/api/orders?limit=50"),
-      fetchJson<Performance>("/api/performance"),
-      fetchJson<WinRateWindow[]>("/api/performance/win-rates"),
-      fetchJson<DailyPnl[]>("/api/performance/daily-pnl?days=14"),
-      fetchJson<DailyWinRate[]>("/api/performance/daily-win-rates?days=84"),
-      fetchJson<CalibrationBucket[]>("/api/performance/calibration"),
-      fetchJson<Resolution[]>("/api/performance/resolutions?limit=10"),
-      fetchJson<LogEntry[]>("/api/logs?limit=100"),
-    ]).then(
-      ([
-        status,
-        config,
-        balance,
-        equityHistory,
-        positions,
-        markets,
-        signals,
-        orders,
-        performance,
-        winRates,
-        dailyPnl,
-        dailyWinRates,
-        calibration,
-        resolutions,
-        logs,
-      ]) => {
+    // Two-phase load: status first to determine paper/live mode, then the rest
+    // with mode-scoped filters so charts/stats aren't mingled.
+    fetchJson<BotStatus>("/api/status")
+      .then((status) => {
+        if (!mountedRef.current) return
+        const modeParam = status.dryRun ? "true" : "false"
+        patch({ status })
+
+        return Promise.allSettled([
+          fetchJson<BotConfig>("/api/config"),
+          fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
+          fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
+          fetchJson<Position[]>("/api/positions"),
+          fetchJson<Market[]>("/api/markets?status=open&limit=50"),
+          fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`),
+          fetchJson<Order[]>(`/api/orders?limit=50&dryRun=${modeParam}`),
+          fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`),
+          fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
+          fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`),
+          fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
+          fetchJson<CalibrationBucket[]>(`/api/performance/calibration?dryRun=${modeParam}`),
+          fetchJson<Resolution[]>(`/api/performance/resolutions?limit=10&dryRun=${modeParam}`),
+          fetchJson<LogEntry[]>("/api/logs?limit=100"),
+        ])
+      })
+      .then((results) => {
+        if (!results || !mountedRef.current) return
+        const [
+          config,
+          balance,
+          equityHistory,
+          positions,
+          markets,
+          signals,
+          orders,
+          performance,
+          winRates,
+          dailyPnl,
+          dailyWinRates,
+          calibration,
+          resolutions,
+          logs,
+        ] = results
+
         patch({
           loading: false,
-          status: status.status === "fulfilled" ? status.value : null,
           config: config.status === "fulfilled" ? config.value : null,
           balance: balance.status === "fulfilled" ? balance.value : null,
           equityHistory:
@@ -156,8 +165,11 @@ export function useApi(): ApiState {
             resolutions.status === "fulfilled" ? resolutions.value : [],
           logs: logs.status === "fulfilled" ? logs.value : [],
         })
-      },
-    )
+      })
+      .catch(() => {
+        // Status fetch failed — leave loading true so the UI shows its
+        // disconnected state via the WS onopen/onclose handlers.
+      })
 
     return () => {
       mountedRef.current = false

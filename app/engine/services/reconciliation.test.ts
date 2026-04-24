@@ -290,7 +290,7 @@ import {
   signals,
   markets,
 } from "@kcb/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ReconciliationService } from "./reconciliation";
 
 runMigrations();
@@ -538,5 +538,79 @@ describe("backfillActualValue — retention-resilient backfill", () => {
     expect(row.actualValue).not.toBeNull();
     // bias residual = pointForecast - actual = 72 - 68 = 4
     expect(row.pointForecast! - row.actualValue!).toBeCloseTo(4.0, 1);
+  });
+});
+
+// ── snapshotBalance mode-aware dry-run lookup ──────────────────
+// Tests the core invariant: in dry-run mode, the latest-balance lookup must
+// filter to dry_run=1 rows so live and paper histories don't mix. Uses
+// getConfig directly to set dryRun because updateConfig isn't exported by the
+// mock.module leaks from other test files per project memory.
+import { balanceHistory, positions, calibration } from "@kcb/db";
+import { getConfig } from "@kcb/config";
+
+describe("snapshotBalance — mode-aware balance lookup", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(balanceHistory).run();
+    db.delete(positions).run();
+    db.delete(calibration).run();
+  });
+
+  function seedBalance(id: string, balance: number, dryRun: boolean, recordedAt: string) {
+    const db = getDb();
+    db.insert(balanceHistory).values({
+      id,
+      balance,
+      totalEquity: balance,
+      openPositions: 0,
+      realizedPnl: 0,
+      recordedAt,
+      dryRun,
+    }).run();
+  }
+
+  test("dry-run snapshotBalance only reads dry_run=1 rows", async () => {
+    // Live balance more recent than the paper balance — the mode-aware read
+    // must still return the paper row, not the live one.
+    seedBalance("live-new", 7500, false, "2026-04-24T12:00:00Z");
+    seedBalance("paper-old", 50000, true, "2026-04-20T08:00:00Z");
+
+    // Force dryRun=true directly on the config object returned by getConfig.
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+
+    // Newest row = the snapshot we just took. Filter to dry_run=1 so we
+    // don't confuse it with the seeded live-new row.
+    const newestPaper = rows.find((r) => r.dryRun === true);
+    expect(newestPaper).toBeDefined();
+    expect(newestPaper!.balance).toBe(50000);
+  });
+
+  test("dry-run snapshotBalance falls back to 10000 cents when no paper rows exist", async () => {
+    seedBalance("live-only", 7500, false, "2026-04-24T12:00:00Z");
+
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+
+    const newestPaper = rows.find((r) => r.dryRun === true);
+    expect(newestPaper).toBeDefined();
+    expect(newestPaper!.balance).toBe(10000); // default when no paper history
   });
 });

@@ -7,6 +7,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { AppSidebar } from "@/components/dashboard/app-sidebar"
+import { PaperModeBanner } from "@/components/dashboard/paper-mode-banner"
 import { cn } from "@/lib/utils"
 
 const SIDEBAR_WIDTH = "16rem" // 256px
@@ -43,6 +44,8 @@ export function DashboardShell({ children }: DashboardShellProps) {
 
       {/* ── Main content area ── */}
       <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Persistent dry-run banner on every page (no-op when live) */}
+        <PaperModeBanner />
         {/* Mobile header bar */}
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-4 lg:hidden">
           <Button

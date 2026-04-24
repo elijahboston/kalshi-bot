@@ -1,6 +1,7 @@
-import Elysia from "elysia";
+import Elysia, { t } from "elysia";
 import { getConfig } from "@kcb/config";
 import { loop } from "@kcb/engine";
+import { getDb, runtimeConfig } from "@kcb/db";
 
 export const statusRoutes = new Elysia({ prefix: "/api" })
   .get("/status", () => {
@@ -44,4 +45,36 @@ export const statusRoutes = new Elysia({ prefix: "/api" })
       calibration: config.calibration,
       log: config.log,
     };
-  });
+  })
+  .patch(
+    "/config/dry-run",
+    async ({ body }) => {
+      const config = getConfig();
+      const prev = config.bot.dryRun;
+      config.bot.dryRun = body.dryRun;
+
+      // Persist to runtime_config so restarts retain the choice
+      const db = getDb();
+      await db
+        .insert(runtimeConfig)
+        .values({
+          key: "dry_run",
+          value: String(body.dryRun),
+          updatedAt: new Date().toISOString(),
+        })
+        .onConflictDoUpdate({
+          target: runtimeConfig.key,
+          set: {
+            value: String(body.dryRun),
+            updatedAt: new Date().toISOString(),
+          },
+        });
+
+      return { previous: prev, current: body.dryRun };
+    },
+    {
+      body: t.Object({
+        dryRun: t.Boolean(),
+      }),
+    },
+  );

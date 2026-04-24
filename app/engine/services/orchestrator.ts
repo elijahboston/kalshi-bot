@@ -262,6 +262,7 @@ export async function initOrchestrator(): Promise<void> {
         acted: false,
         skipReason,
         createdAt: now(),
+        dryRun: getConfig().bot.dryRun,
       });
 
       if (recommendation !== "skip" && recommendation !== "scout" && side) {

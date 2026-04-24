@@ -1,6 +1,6 @@
-import { test, expect, beforeAll, describe } from "bun:test";
+import { test, expect, beforeAll, beforeEach, describe } from "bun:test";
 import Elysia from "elysia";
-import { runMigrations, getDb, calibration } from "@kcb/db";
+import { runMigrations, getDb, calibration, signals, orders, balanceHistory, runtimeConfig, eq } from "@kcb/db";
 import { statusRoutes } from "./status";
 import { marketRoutes } from "./markets";
 import { positionRoutes } from "./positions";
@@ -36,6 +36,27 @@ async function get(path: string): Promise<{ status: number; body: any }> {
   return { status: res.status, body };
 }
 
+async function patch(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
+  const res = await app.handle(
+    new Request(`http://localhost${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+  const text = await res.text();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = text;
+  }
+  return { status: res.status, body: parsed };
+}
+
 describe("status routes", () => {
   test("GET /api/status returns bot state", async () => {
     const { status, body } = await get("/api/status");
@@ -52,6 +73,48 @@ describe("status routes", () => {
     expect(body).toHaveProperty("bot");
     expect(body.bot).toHaveProperty("tickIntervalSec");
     expect(body).not.toHaveProperty("kalshi"); // credentials excluded
+  });
+
+  test("PATCH /api/config/dry-run persists the flag to runtime_config", async () => {
+    // NOTE: Can't reliably assert GET /api/config after PATCH because other
+    // test files (loop.test.ts, execution.test.ts) use mock.module("@kcb/config")
+    // which leaks globally per project memory — some mocks return a fresh
+    // {bot:{dryRun:true}} object on every getConfig() call, so the in-memory
+    // mutation path is non-deterministic when running the full suite. The
+    // DB-persistence path IS deterministic and is what matters for restarts.
+    const db = getDb();
+
+    // Set to false, verify DB row.
+    let res = await patch("/api/config/dry-run", { dryRun: false });
+    expect(res.status).toBe(200);
+    expect(res.body.current).toBe(false);
+    let [row] = db
+      .select()
+      .from(runtimeConfig)
+      .where(eq(runtimeConfig.key, "dry_run"))
+      .all();
+    expect(row?.value).toBe("false");
+
+    // Flip to true, verify DB row updated.
+    res = await patch("/api/config/dry-run", { dryRun: true });
+    expect(res.status).toBe(200);
+    expect(res.body.current).toBe(true);
+    [row] = db
+      .select()
+      .from(runtimeConfig)
+      .where(eq(runtimeConfig.key, "dry_run"))
+      .all();
+    expect(row?.value).toBe("true");
+
+    // Clean up for downstream tests.
+    await patch("/api/config/dry-run", { dryRun: false });
+  });
+
+  test("PATCH /api/config/dry-run rejects non-boolean body", async () => {
+    const res = await patch("/api/config/dry-run", { dryRun: "maybe" });
+    // Elysia schema validation rejects non-boolean with 4xx
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
   });
 });
 
@@ -261,5 +324,174 @@ describe("log routes", () => {
     expect(body.every((l: any) => l.level === "error")).toBe(true);
 
     stopCapture();
+  });
+});
+
+describe("dryRun query filter", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(signals).run();
+    db.delete(orders).run();
+    db.delete(balanceHistory).run();
+    db.delete(calibration).run();
+  });
+
+  function seedSignal(id: string, dryRun: boolean) {
+    const db = getDb();
+    db.insert(signals).values({
+      id,
+      ticker: `T-${id}`,
+      seriesTicker: "KXHIGH",
+      estimatedProb: 0.5,
+      confidence: 0.9,
+      marketPrice: 0.4,
+      edge: 0.1,
+      edgeThreshold: 0.05,
+      recommendation: "buy_yes",
+      createdAt: new Date().toISOString(),
+      dryRun,
+    }).run();
+  }
+
+  function seedOrder(id: string, ticker: string, dryRun: boolean) {
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: id,
+      ticker,
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 1,
+      filledQuantity: 1,
+      status: "filled",
+      signalId: `sig-${id}`,
+      dryRun,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+  }
+
+  function seedBalance(id: string, balance: number, dryRun: boolean) {
+    const db = getDb();
+    db.insert(balanceHistory).values({
+      id,
+      balance,
+      totalEquity: balance,
+      openPositions: 0,
+      realizedPnl: 0,
+      recordedAt: new Date().toISOString(),
+      dryRun,
+    }).run();
+  }
+
+  function seedCalibration(
+    id: string,
+    ticker: string,
+    realizedPnl: number,
+    resolvedAt: string,
+  ) {
+    const db = getDb();
+    db.insert(calibration).values({
+      id,
+      ticker,
+      seriesTicker: "KXHIGH",
+      category: "high_temp",
+      stationId: "KNYC",
+      predictedProb: 0.05,
+      actualOutcome: 0,
+      marketPrice: 30,
+      edge: -0.25,
+      realizedPnl,
+      traded: true,
+      forecastHorizon: 1,
+      resolvedAt,
+    }).run();
+  }
+
+  test("GET /api/signals?dryRun=true returns only paper signals", async () => {
+    seedSignal("live-1", false);
+    seedSignal("paper-1", true);
+    seedSignal("paper-2", true);
+
+    const { body } = await get("/api/signals?dryRun=true&limit=50");
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.map((s: any) => s.id).sort()).toEqual(["paper-1", "paper-2"]);
+  });
+
+  test("GET /api/signals?dryRun=false returns only live signals", async () => {
+    seedSignal("live-1", false);
+    seedSignal("paper-1", true);
+
+    const { body } = await get("/api/signals?dryRun=false&limit=50");
+    expect(body.map((s: any) => s.id)).toEqual(["live-1"]);
+  });
+
+  test("GET /api/signals (no filter) returns all", async () => {
+    seedSignal("live-1", false);
+    seedSignal("paper-1", true);
+
+    const { body } = await get("/api/signals?limit=50");
+    expect(body.length).toBe(2);
+  });
+
+  test("GET /api/orders?dryRun=true/false filters by mode", async () => {
+    seedOrder("live-1", "T-live", false);
+    seedOrder("paper-1", "T-paper", true);
+
+    const paper = await get("/api/orders?dryRun=true&limit=50");
+    expect(paper.body.map((o: any) => o.orderId)).toEqual(["paper-1"]);
+
+    const live = await get("/api/orders?dryRun=false&limit=50");
+    expect(live.body.map((o: any) => o.orderId)).toEqual(["live-1"]);
+  });
+
+  test("GET /api/balance/history?dryRun=true filters by mode", async () => {
+    seedBalance("b-live", 5000, false);
+    seedBalance("b-paper", 50000, true);
+
+    const paper = await get("/api/balance/history?dryRun=true&limit=10");
+    expect(paper.body).toHaveLength(1);
+    expect(paper.body[0].balance).toBe(50000);
+
+    const live = await get("/api/balance/history?dryRun=false&limit=10");
+    expect(live.body).toHaveLength(1);
+    expect(live.body[0].balance).toBe(5000);
+  });
+
+  test("GET /api/balance?dryRun=true returns paper latest", async () => {
+    seedBalance("b-live", 5000, false);
+    seedBalance("b-paper", 50000, true);
+
+    const { body } = await get("/api/balance?dryRun=true");
+    expect(body.cash).toBe(50000);
+  });
+
+  test("GET /api/performance/resolutions?dryRun filters via orders join", async () => {
+    const now = new Date().toISOString();
+    seedCalibration("cal-live", "T-live", 100, now);
+    seedCalibration("cal-paper", "T-paper", -50, now);
+    seedOrder("ord-live", "T-live", false);
+    seedOrder("ord-paper", "T-paper", true);
+
+    const paper = await get("/api/performance/resolutions?dryRun=true&limit=50");
+    expect(paper.body.map((r: any) => r.ticker)).toEqual(["T-paper"]);
+
+    const live = await get("/api/performance/resolutions?dryRun=false&limit=50");
+    expect(live.body.map((r: any) => r.ticker)).toEqual(["T-live"]);
+  });
+
+  test("GET /api/performance/daily-pnl?dryRun filters via orders join", async () => {
+    seedCalibration("cal-live", "T-live", 200, "2026-04-20T10:00:00Z");
+    seedCalibration("cal-paper", "T-paper", -100, "2026-04-20T14:00:00Z");
+    seedOrder("ord-live", "T-live", false);
+    seedOrder("ord-paper", "T-paper", true);
+
+    const paper = await get("/api/performance/daily-pnl?dryRun=true&days=30");
+    expect(paper.body).toHaveLength(1);
+    expect(paper.body[0].pnl).toBe(-100);
+
+    const live = await get("/api/performance/daily-pnl?dryRun=false&days=30");
+    expect(live.body).toHaveLength(1);
+    expect(live.body[0].pnl).toBe(200);
   });
 });

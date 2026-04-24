@@ -1,5 +1,17 @@
 import Elysia, { t } from "elysia";
-import { getDb, signals, desc, eq, sql } from "@kcb/db";
+import { getDb, signals, desc, eq, sql, and } from "@kcb/db";
+import type { SQL } from "drizzle-orm";
+
+/**
+ * Parse `?dryRun=true|false|all` query param.
+ * Returns a filter fragment or null when no filter should apply.
+ */
+function dryRunFilter(raw: string | undefined, col: typeof signals.dryRun): SQL | null {
+  if (raw == null || raw === "all") return null;
+  if (raw === "true" || raw === "1") return eq(col, true);
+  if (raw === "false" || raw === "0") return eq(col, false);
+  return null;
+}
 
 export const signalRoutes = new Elysia({ prefix: "/api" })
   .get(
@@ -8,19 +20,21 @@ export const signalRoutes = new Elysia({ prefix: "/api" })
       const db = getDb();
       const limit = Math.min(query.limit ?? 20, 200);
 
-      if (query.actionable === "true") {
-        return db
-          .select()
-          .from(signals)
-          .where(sql`${signals.acted} = 1`)
-          .orderBy(desc(signals.createdAt))
-          .limit(limit)
-          .all();
-      }
+      const filters: SQL[] = [];
+      if (query.actionable === "true") filters.push(sql`${signals.acted} = 1`);
+      const dryFilter = dryRunFilter(query.dryRun, signals.dryRun);
+      if (dryFilter) filters.push(dryFilter);
 
-      return db
-        .select()
-        .from(signals)
+      const whereClause = filters.length === 0
+        ? undefined
+        : filters.length === 1
+        ? filters[0]
+        : and(...filters);
+
+      const baseQuery = db.select().from(signals);
+      const withWhere = whereClause ? baseQuery.where(whereClause) : baseQuery;
+
+      return withWhere
         .orderBy(desc(signals.createdAt))
         .limit(limit)
         .all();
@@ -29,6 +43,7 @@ export const signalRoutes = new Elysia({ prefix: "/api" })
       query: t.Object({
         limit: t.Optional(t.Numeric()),
         actionable: t.Optional(t.String()),
+        dryRun: t.Optional(t.String()),
       }),
     },
   )

@@ -1,10 +1,74 @@
-import { Settings } from "lucide-react"
+import { useState } from "react"
+import { Settings, FlaskConical } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
 import { useApiContext } from "@/src/lib/api-context"
 import { fmtMoney, fmtPct } from "@/src/lib/format"
+import { API_BASE } from "@/src/lib/config"
+
+/**
+ * Interactive dry-run toggle. Optimistically flips, then PATCHes the config
+ * endpoint and persists to runtime_config. On failure, rolls back.
+ */
+function DryRunRow({ initialValue }: { initialValue: boolean }) {
+  const [checked, setChecked] = useState(initialValue)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleChange(next: boolean) {
+    const prev = checked
+    setChecked(next)
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_BASE}/api/config/dry-run`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dryRun: next }),
+      })
+      if (!res.ok) throw new Error(`${res.status}`)
+    } catch (err) {
+      // Revert optimistic update
+      setChecked(prev)
+      setError(err instanceof Error ? err.message : "unknown error")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          Dry Run
+        </span>
+        {checked && (
+          <Badge
+            variant="outline"
+            className="gap-1 border-amber-500/30 px-1.5 py-0 text-[10px] text-amber-500"
+          >
+            <FlaskConical className="h-3 w-3" />
+            Paper
+          </Badge>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {error && (
+          <span className="text-xs text-red-500" title={`Failed to save: ${error}`}>
+            save failed
+          </span>
+        )}
+        <Switch
+          checked={checked}
+          disabled={saving}
+          onCheckedChange={handleChange}
+        />
+      </div>
+    </div>
+  )
+}
 
 function SettingRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -85,12 +149,7 @@ export function SettingsView() {
 
       {/* Trading Parameters */}
       <SettingSection title="Trading Parameters">
-        <div className="flex items-center justify-between py-2.5">
-          <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-            Dry Run
-          </span>
-          <Switch checked={bot.dryRun} disabled />
-        </div>
+        <DryRunRow initialValue={bot.dryRun} />
         <SettingRow label="Edge Threshold">{fmtPct(bot.edgeThreshold)}</SettingRow>
         <SettingRow label="Min Confidence">{fmtPct(bot.minConfidence)}</SettingRow>
         <SettingRow label="Max Kelly Fraction">{fmtPct(bot.maxKellyFraction)}</SettingRow>

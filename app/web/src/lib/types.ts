@@ -52,6 +52,7 @@ export interface BalancePoint {
   balance: number
   openPositions: number
   recordedAt: string
+  dryRun?: boolean
 }
 
 /** Position from GET /api/positions */
@@ -107,6 +108,7 @@ export interface Signal {
   orderId: string | null
   skipReason: string | null
   createdAt: string
+  dryRun: boolean
 }
 
 /** Order from GET /api/orders */
