@@ -94,7 +94,7 @@ Result: a single settled market with a cached signal is enough to populate `stat
 
 ### Deferred
 
-- **Root-cause of weather_forecasts wipes.** Still unknown. Direct experiment (manually inserting a row with `target_date='2026-04-20'`) confirmed the cache delete-then-insert logic in `ensemble.ts` is surgical — past-date rows survive tick cycles. The wipes are external (migration run, manual DB work, or the log-review agent). The backfill fix above makes this non-blocking.
+- **Root-cause of weather_forecasts wipes.** ~~Still unknown.~~ **Resolved 2026-04-26**: the wipes were the test suite. Tests using `runMigrations()` with no path defaulted to `./data/kalshi-bot.db` (production), then `beforeEach` `db.delete(...)` cleanups silently destroyed live data. See [test-db-wipe-incident.md](test-db-wipe-incident.md) for the full post-mortem. Fixed via `bunfig.toml` test preload that forces `DB_PATH=:memory:`. The Apr 23 retention-resilient backfill above remains useful as defense in depth.
 - **Observation-adjustment sigma multiplier.** Already loosened 0.5×→0.7× on Apr 21. Post-loosening data is too thin to tell if further loosening is needed. Revisit after 2 weeks.
 - **Per-category calibration.** All current calibration data is `high_temp`. Before enabling precip/snow trading again, ensure those categories actually produce rows.
 
