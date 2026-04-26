@@ -97,6 +97,29 @@ describe("KalshiFeed sequence-gap handling", () => {
     expect(gaps).toEqual([{ sid: 2, expected: 2, got: 4, missed: 2 }]);
   });
 
+  test("sequence reset after onclose does not produce a false gap", () => {
+    const { feed, gaps, send } = feedFor();
+    // Simulate normal traffic
+    send(1, 1);
+    send(1, 2);
+    send(1, 50);
+    expect(gaps).toHaveLength(1); // real gap 2→50
+
+    // Simulate WebSocket close (reconnect) — clears seq tracking
+    (feed as any).ws = null;
+    (feed as any).subscriptionIds.clear();
+    (feed as any).seqNumbers.clear();
+    // ^ This is what onclose now does; we call it directly since we
+    //   can't fire a real close event without a socket.
+
+    gaps.length = 0; // reset collector
+
+    // First message on new connection starts at seq 1 again
+    send(1, 1);
+    send(1, 2);
+    expect(gaps).toHaveLength(0); // no false gap
+  });
+
   test("unrecognized message types with sid/seq do not cause false gaps", () => {
     const feed = new KalshiFeed();
     const gaps: SequenceGap[] = [];

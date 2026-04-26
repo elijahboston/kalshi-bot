@@ -21,7 +21,7 @@ export interface SequenceGap {
   sid: number;
   expected: number;
   got: number;
-  /** Number of messages missed (got - expected). Always >= 1. */
+  /** Number of messages missed (got - expected). Positive for forward gaps. */
   missed: number;
 }
 
@@ -123,6 +123,12 @@ export class KalshiFeed {
 
     this.ws.onclose = () => {
       this.ws = null;
+      // Clear tracking state — subscription IDs and sequence numbers are
+      // server-side state that resets on a new connection. Without this,
+      // the first message after reconnect triggers a false sequence-gap
+      // warning (seq resets to 1 while the client still expects old+1).
+      this.subscriptionIds.clear();
+      this.seqNumbers.clear();
       this.events.onDisconnected?.();
 
       if (!this.intentionalClose) {
