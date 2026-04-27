@@ -12,6 +12,7 @@ import {
   eq,
   and,
   sql,
+  inArray,
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
@@ -806,11 +807,15 @@ export class ReconciliationService {
   private async checkResolutions(): Promise<void> {
     const db = getDb();
 
-    // Find settled markets that don't have calibration records yet
+    // Find resolved markets that don't have calibration records yet. The bot's
+    // lifecycle marks markets as 'finalized' on resolution (see lines 256, 678,
+    // 693); 'settled' is a legacy value never written by current code. Without
+    // 'finalized' here, this entire branch was dead — calibration only grew
+    // via syncSettlements which is gated on the user having a position.
     const settledMarkets = await db
       .select()
       .from(markets)
-      .where(eq(markets.status, "settled"));
+      .where(inArray(markets.status, ["settled", "finalized"]));
 
     for (const market of settledMarkets) {
       if (!market.result) continue;

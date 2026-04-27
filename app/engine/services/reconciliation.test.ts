@@ -614,3 +614,155 @@ describe("snapshotBalance — mode-aware balance lookup", () => {
     expect(newestPaper!.balance).toBe(10000); // default when no paper history
   });
 });
+
+// ── checkResolutions handles finalized status ──────────────────
+// Regression: the function used to filter on status='settled' but the bot's
+// lifecycle only ever marks markets as 'finalized'. That left this entire
+// branch dead — calibration only grew via syncSettlements (which is gated on
+// the user having a position), starving the historical-prior blend of data.
+import { markets as marketsTable } from "@kcb/db";
+
+describe("checkResolutions — accepts finalized markets", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(marketsTable).run();
+    db.delete(signals).run();
+    db.delete(calibration).run();
+    db.delete(weatherForecasts).run();
+  });
+
+  function seedFinalizedMarketAndSignal(ticker: string, predictedProb: number, result: "yes" | "no") {
+    const db = getDb();
+    // Intentionally omit stationId/targetDate so the recomputeStationBias and
+    // backfillActualValue branches are skipped. Test the calibration-row
+    // creation in isolation without depending on those downstream paths,
+    // which dereference fields on getConfig() that mock.module leaks from
+    // other test files don't provide.
+    db.insert(marketsTable).values({
+      ticker,
+      eventTicker: "EVT-1",
+      seriesTicker: "KXHIGHNY",
+      title: `Test market ${ticker}`,
+      category: "high_temp",
+      stationId: null,
+      targetDate: null,
+      bracketLow: 70,
+      bracketHigh: 71,
+      marketType: "bracket",
+      status: "finalized",
+      result,
+      discoveredAt: "2026-04-26T08:00:00Z",
+      updatedAt: "2026-04-26T23:00:00Z",
+    }).run();
+    db.insert(signals).values({
+      id: `sig-${ticker}`,
+      ticker,
+      seriesTicker: "KXHIGHNY",
+      estimatedProb: predictedProb,
+      confidence: 0.85,
+      marketPrice: 0.5,
+      edge: predictedProb - 0.5,
+      edgeThreshold: 0.05,
+      recommendation: "skip",
+      createdAt: "2026-04-26T10:00:00Z",
+    }).run();
+  }
+
+  test("creates calibration rows for finalized markets with signals", async () => {
+    seedFinalizedMarketAndSignal("M-A", 0.05, "yes"); // bot said 5%, hit YES — miscalibrated low
+    seedFinalizedMarketAndSignal("M-B", 0.7, "yes");  // bot said 70%, hit YES — calibrated
+    seedFinalizedMarketAndSignal("M-C", 0.3, "no");   // bot said 30%, hit NO — calibrated
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).checkResolutions();
+
+    const rows = getDb()
+      .select()
+      .from(calibration)
+      .all();
+
+    expect(rows).toHaveLength(3);
+    const byTicker = new Map(rows.map((r) => [r.ticker, r]));
+    expect(byTicker.get("M-A")?.predictedProb).toBe(0.05);
+    expect(byTicker.get("M-A")?.actualOutcome).toBe(1);
+    expect(byTicker.get("M-B")?.actualOutcome).toBe(1);
+    expect(byTicker.get("M-C")?.actualOutcome).toBe(0);
+    // Untraded by design — the whole point is calibration grows from market
+    // resolutions even when the bot didn't trade.
+    expect(byTicker.get("M-A")?.traded).toBe(false);
+  });
+
+  test("skips markets that already have a calibration row", async () => {
+    seedFinalizedMarketAndSignal("M-A", 0.5, "yes");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).checkResolutions();
+    expect(getDb().select().from(calibration).all()).toHaveLength(1);
+
+    // Run again — should be idempotent
+    await (svc as any).checkResolutions();
+    expect(getDb().select().from(calibration).all()).toHaveLength(1);
+  });
+
+  test("skips markets without a signal (post-wipe orphans)", async () => {
+    const db = getDb();
+    db.insert(marketsTable).values({
+      ticker: "ORPHAN",
+      eventTicker: "EVT-2",
+      seriesTicker: "KXHIGHNY",
+      title: "Orphaned market",
+      category: "high_temp",
+      stationId: null,
+      targetDate: null,
+      bracketLow: 60,
+      bracketHigh: 61,
+      marketType: "bracket",
+      status: "finalized",
+      result: "no",
+      discoveredAt: "2026-04-25T08:00:00Z",
+      updatedAt: "2026-04-25T23:00:00Z",
+    }).run();
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).checkResolutions();
+
+    expect(db.select().from(calibration).all()).toHaveLength(0);
+  });
+
+  test("ignores active markets", async () => {
+    const db = getDb();
+    db.insert(marketsTable).values({
+      ticker: "ACTIVE",
+      eventTicker: "EVT-3",
+      seriesTicker: "KXHIGHNY",
+      title: "Active market",
+      category: "high_temp",
+      stationId: null,
+      targetDate: null,
+      bracketLow: 60,
+      bracketHigh: 61,
+      marketType: "bracket",
+      status: "active",
+      result: null,
+      discoveredAt: "2026-04-26T08:00:00Z",
+      updatedAt: "2026-04-26T23:00:00Z",
+    }).run();
+    db.insert(signals).values({
+      id: "sig-active",
+      ticker: "ACTIVE",
+      seriesTicker: "KXHIGHNY",
+      estimatedProb: 0.5,
+      confidence: 0.9,
+      marketPrice: 0.5,
+      edge: 0,
+      edgeThreshold: 0.05,
+      recommendation: "skip",
+      createdAt: "2026-04-26T10:00:00Z",
+    }).run();
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).checkResolutions();
+
+    expect(db.select().from(calibration).all()).toHaveLength(0);
+  });
+});
