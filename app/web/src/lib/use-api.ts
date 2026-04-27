@@ -177,6 +177,44 @@ export function useApi(): ApiState {
   }, [patch])
 
   // ── WebSocket ──────────────────────────────────────────────
+  // Debounced performance refetch — coalesces burst events (balance + order
+  // updates often arrive together) into a single round-trip. Reads current
+  // status from state to scope the fetches to the active mode.
+  const perfRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stateRef = useRef<ApiState>(state)
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
+
+  const refetchPerformance = useCallback(() => {
+    if (perfRefetchTimer.current) return
+    perfRefetchTimer.current = setTimeout(() => {
+      perfRefetchTimer.current = null
+      const dryRun = stateRef.current.status?.dryRun
+      const modeParam = dryRun == null ? "all" : dryRun ? "true" : "false"
+      Promise.allSettled([
+        fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`),
+        fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
+        fetchJson<Resolution[]>(`/api/performance/resolutions?limit=10&dryRun=${modeParam}`),
+        fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`),
+        fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
+        fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
+        fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
+      ]).then(([perf, bal, res, pnl, wr, dwr, eq]) => {
+        if (!mountedRef.current) return
+        patch({
+          performance: perf.status === "fulfilled" ? perf.value : stateRef.current.performance,
+          balance: bal.status === "fulfilled" ? bal.value : stateRef.current.balance,
+          resolutions: res.status === "fulfilled" ? res.value : stateRef.current.resolutions,
+          dailyPnl: pnl.status === "fulfilled" ? pnl.value : stateRef.current.dailyPnl,
+          winRates: wr.status === "fulfilled" ? wr.value : stateRef.current.winRates,
+          dailyWinRates: dwr.status === "fulfilled" ? dwr.value : stateRef.current.dailyWinRates,
+          equityHistory: eq.status === "fulfilled" ? eq.value : stateRef.current.equityHistory,
+        })
+      })
+    }, 500)
+  }, [patch])
+
   useEffect(() => {
     function connect() {
       const ws = new WebSocket(WS_URL)
@@ -185,6 +223,9 @@ export function useApi(): ApiState {
       ws.onopen = () => {
         retryRef.current = 1000
         patch({ connected: true })
+        // Page may have been mounted before the bot was running — refetch
+        // performance so dashboard cards aren't stuck at stale initial values.
+        refetchPerformance()
       }
 
       ws.onclose = () => {
@@ -223,6 +264,9 @@ export function useApi(): ApiState {
             break
           case "balance:update":
             patch({ balance: msg.data as Balance })
+            // Dashboard stat cards read performance.cash/portfolio/realizedPnl,
+            // not balance.* — refetch performance so they stay in sync.
+            refetchPerformance()
             break
           case "position:update":
             setState((s) => {
@@ -248,6 +292,7 @@ export function useApi(): ApiState {
               ...s,
               orders: [msg.data as Order, ...s.orders].slice(0, 100),
             }))
+            refetchPerformance()
             break
           case "order:update":
             setState((s) => {
@@ -261,6 +306,7 @@ export function useApi(): ApiState {
                 ),
               }
             })
+            refetchPerformance()
             break
           case "market:discovered":
           case "market:priceUpdate":
@@ -270,22 +316,10 @@ export function useApi(): ApiState {
             )
             break
           case "market:resolved":
-            // Refetch performance-related data
-            Promise.all([
-              fetchJson<Performance>("/api/performance"),
-              fetchJson<Resolution[]>("/api/performance/resolutions?limit=10"),
-              fetchJson<DailyPnl[]>("/api/performance/daily-pnl?days=14"),
-              fetchJson<WinRateWindow[]>("/api/performance/win-rates"),
-              fetchJson<DailyWinRate[]>("/api/performance/daily-win-rates?days=84"),
-            ]).then(([perf, res, pnl, wr, dwr]) => {
-              patch({
-                performance: perf,
-                resolutions: res,
-                dailyPnl: pnl,
-                winRates: wr,
-                dailyWinRates: dwr,
-              })
-            })
+            // Mode-scoped via refetchPerformance — was previously fetching
+            // unfiltered data, which polluted paper-mode dashboards with live
+            // history.
+            refetchPerformance()
             break
           case "log":
             setState((s) => ({
