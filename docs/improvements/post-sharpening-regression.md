@@ -103,8 +103,71 @@ Result: a single settled market with a cached signal is enough to populate `stat
 Before any deposit and before raising `max_kelly_fraction` / `max_exposure_per_ticker`:
 
 1. ~~Land historical-prior blend with `historical_prior_weight = 0.3`.~~ ✅ Done 2026-04-22 (bce5241), runtime weight set to 0.3.
-2. Let it run ≥5 trading days. **Clock started 2026-04-22; earliest evaluation window 2026-04-27.**
+2. Let it run ≥5 trading days. ~~**Clock started 2026-04-22; earliest evaluation window 2026-04-27.**~~ Clock reset by Apr 26 DB wipe. **New earliest evaluation: 2026-05-07** (10 days for calibration rebuild + blend activation).
 3. Re-run the prediction-bucket analysis above. Target: `pred<10%` bucket hit rate drops below 20% (still badly over-confident but the gap closes), or equivalently predicted probability in the `pred<10%` bucket rises above 10% on average.
 4. Only then recommend the deposit.
 
 Secondary signal now that Apr 23 backfill is shipped: `SELECT COUNT(*) FROM station_bias` should become > 0 within a few days of settled markets, and `biasCorrection` in reasoning traces should stop being `null` for stations with ≥10 samples. If it stays empty, investigate whether the synthesis path is firing (log.debug `"Synthesized weather_forecast…"`).
+
+## 2026-04-27 Five-day recheck — INCONCLUSIVE (DB wipe invalidated the window)
+
+### Runtime config
+
+```
+historical_prior_weight = 0.3  (set 2026-04-22 17:13:32) ✅
+```
+
+### Blend activation: NOT ACTIVE
+
+Sampled 3 post-wipe acted signals (2026-04-26 17:16–20:04). All show:
+- `historicalHitRate`: NULL
+- `blendedProbability`: NULL
+- `biasCorrection`: null
+
+Root cause: the [2026-04-26 production DB wipe](test-db-wipe-incident.md) destroyed 457 of 459 calibration rows. `getHistoricalHitRate` requires ≥5 same-station/category resolutions per bracket. With only 2 surviving calibration rows (both from 2026-04-20 test fixtures), the function returns `null` for every estimate and the blend silently falls back to unblended `rawProbability`. The bot has been running in effectively pre-fix mode since the wipe.
+
+### Post-fix calibration data
+
+| Metric | Value |
+|---|---|
+| Calibration rows resolved after 2026-04-22 | **0** |
+| Total calibration rows | 2 |
+| Post-wipe signals (since Apr 26) | 7,440 (3 acted) |
+| station_bias rows | 0 |
+
+**No prediction-bucket or Brier analysis is possible.** Zero markets have resolved and been reconciled into the calibration table since the wipe.
+
+### Baseline comparison
+
+| Metric | Baseline (2026-04-22) | Current (2026-04-27) |
+|---|---|---|
+| pred<10% hit rate | 29.86% (N=211) | — (N=0) |
+| pred<10% avg pred | 3.9% | — |
+| Total traded PnL | -$455.66 | — |
+| Brier (all) | 0.268 | — |
+| Blend active? | N/A (not yet deployed) | ❌ Silently inactive |
+
+### Why the evaluation window is invalid
+
+1. **DB wipe (Apr 26 06:25)** destroyed calibration, signals, and balance_history. The 5-day evaluation window (Apr 22–27) was cut short to ~4 days of data accumulation, then reset to zero.
+2. **Blend is structurally disabled** post-wipe because `getHistoricalHitRate` has no calibration rows to query. Even if markets had resolved, the estimator would produce unblended probabilities — defeating the purpose of the test.
+3. **Paper-trading clock also reset.** The Apr 24 paper run (2 days of dry_run data) was lost.
+
+### What needs to happen before re-evaluation
+
+1. **Rebuild calibration data.** The bot needs to accumulate ≥30 resolved markets into the calibration table. At current volume (~3 acted signals/day on high_temp), this requires roughly 10+ trading days assuming daily market resolution cycles.
+2. **Re-seed historicalHitRate.** Once ≥5 rows exist per station/category/bracket, `getHistoricalHitRate` will return non-null and the blend will activate automatically (no restart needed — it checks per-estimate).
+3. **Verify blend activation.** After ~5 calibration rows per bracket accumulate, spot-check: `json_extract(reasoning, '$.historicalHitRate')` should be non-null in new signals.
+
+### Recommendation: WAIT
+
+- **Do NOT deposit $100.** The fix has not been testable since the DB wipe.
+- **Do NOT raise bet sizes.** The bot is currently running with the same overconfident-in-NO behavior documented in the original diagnostic.
+- **Re-evaluate on 2026-05-07** (10 days from now). By then the bot should have accumulated enough calibration rows for the blend to activate and produce a meaningful sample.
+- **Verify the `bunfig.toml` test preload is working** to prevent another wipe: `bun test` should show `DB_PATH=:memory:` in test output. The fix (commit 8370471) is in place but has only been live for ~1 day.
+- Consider the LaunchAgent for this recheck: the annual recurrence (Apr 27) won't fire again for a year. Either create a new one-shot agent for May 7, or run the check manually.
+
+### Anomalies
+
+- **Only 3 acted signals since the wipe** (1.5 days). This is low but consistent with paper-trading mode (`dry_run=true`) and the bot's selectivity. Worth confirming the bot loop is healthy: `SELECT COUNT(*), MAX(created_at) FROM signals WHERE created_at > '2026-04-26'` should show continuous tick activity.
+- **station_bias still 0 rows.** Expected — no markets have resolved post-wipe, so the backfill synthesis path hasn't had a chance to fire.
