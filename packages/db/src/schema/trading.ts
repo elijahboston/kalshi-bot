@@ -72,6 +72,8 @@ export const positions = sqliteTable("positions", {
   /** When this position was opened */
   openedAt: text("opened_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+  /** True when this position came from dry-run/paper trading. */
+  dryRun: integer("dry_run", { mode: "boolean" }).notNull().default(false),
 });
 
 export type Order = typeof orders.$inferSelect;

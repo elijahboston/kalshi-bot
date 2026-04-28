@@ -277,18 +277,31 @@ export class ReconciliationService {
 
     const allTrades = await db.select().from(trades);
 
-    // Group trades by ticker (active markets only)
+    // Index orders by id to recover the dry_run flag on each trade — trades
+    // don't carry the flag themselves but inherit through order_id. A position
+    // is "paper" if any of its underlying trades came from a dry_run order.
+    const allOrders = await db.select().from(orders);
+    const orderModeById = new Map<string, boolean>();
+    for (const o of allOrders) orderModeById.set(o.orderId, o.dryRun);
+
+    // Group trades by ticker
     const byTicker = new Map<
       string,
-      { side: string; totalQty: number; totalCost: number; firstAt: string }
+      { side: string; totalQty: number; totalCost: number; firstAt: string; dryRun: boolean }
     >();
 
     for (const t of allTrades) {
       if (!activeMarketTickers.has(t.ticker)) continue;
+      const tradeDryRun = orderModeById.get(t.orderId) ?? false;
       let pos = byTicker.get(t.ticker);
       if (!pos) {
-        pos = { side: t.side, totalQty: 0, totalCost: 0, firstAt: t.filledAt };
+        pos = { side: t.side, totalQty: 0, totalCost: 0, firstAt: t.filledAt, dryRun: tradeDryRun };
         byTicker.set(t.ticker, pos);
+      } else if (tradeDryRun) {
+        // If any contributing trade is paper, mark the whole position paper.
+        // This biases toward "paper" when modes mix — protects paper rows
+        // from being mistaken for live and wiped by syncPositionsFromKalshi.
+        pos.dryRun = true;
       }
 
       if (t.action === "buy") {
@@ -343,6 +356,7 @@ export class ReconciliationService {
             marketValue,
             unrealizedPnl,
             updatedAt: timestamp,
+            dryRun: pos.dryRun,
           })
           .where(eq(positions.ticker, ticker));
       } else {
@@ -356,6 +370,7 @@ export class ReconciliationService {
           unrealizedPnl,
           openedAt: pos.firstAt,
           updatedAt: timestamp,
+          dryRun: pos.dryRun,
         });
       }
 
@@ -456,6 +471,7 @@ export class ReconciliationService {
               marketValue,
               unrealizedPnl,
               updatedAt: timestamp,
+              dryRun: false,
             })
             .where(eq(positions.ticker, ticker));
         } else {
@@ -469,6 +485,7 @@ export class ReconciliationService {
             unrealizedPnl,
             openedAt: timestamp,
             updatedAt: timestamp,
+            dryRun: false,
           });
         }
 
@@ -481,8 +498,14 @@ export class ReconciliationService {
         });
       }
 
-      // Remove local positions that Kalshi no longer reports (settled/closed)
-      const localPositions = await db.select().from(positions);
+      // Remove local LIVE positions that Kalshi no longer reports
+      // (settled/closed). Paper positions (dry_run=true) are NOT in Kalshi's
+      // response by design — leave them alone or paper trading dashboard
+      // breaks every tick.
+      const localPositions = await db
+        .select()
+        .from(positions)
+        .where(eq(positions.dryRun, false));
       let removed = 0;
       for (const lp of localPositions) {
         if (!kalshiTickers.has(lp.ticker)) {

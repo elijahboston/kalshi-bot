@@ -2,7 +2,9 @@ import Elysia, { t } from "elysia";
 import { getDb, positions, balanceHistory, desc, eq } from "@kcb/db";
 import type { SQL } from "drizzle-orm";
 
-function dryRunFilter(raw: string | undefined, col: typeof balanceHistory.dryRun): SQL | null {
+type DryRunCol = typeof balanceHistory.dryRun | typeof positions.dryRun;
+
+function dryRunFilter(raw: string | undefined, col: DryRunCol): SQL | null {
   if (raw == null || raw === "all") return null;
   if (raw === "true" || raw === "1") return eq(col, true);
   if (raw === "false" || raw === "0") return eq(col, false);
@@ -10,10 +12,20 @@ function dryRunFilter(raw: string | undefined, col: typeof balanceHistory.dryRun
 }
 
 export const positionRoutes = new Elysia({ prefix: "/api" })
-  .get("/positions", () => {
-    const db = getDb();
-    return db.select().from(positions).all();
-  })
+  .get(
+    "/positions",
+    ({ query }) => {
+      const db = getDb();
+      const dryFilter = dryRunFilter(query.dryRun, positions.dryRun);
+      const base = db.select().from(positions);
+      return (dryFilter ? base.where(dryFilter) : base).all();
+    },
+    {
+      query: t.Object({
+        dryRun: t.Optional(t.String()),
+      }),
+    },
+  )
   .get(
     "/balance",
     ({ query }) => {

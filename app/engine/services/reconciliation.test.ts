@@ -766,3 +766,119 @@ describe("checkResolutions — accepts finalized markets", () => {
     expect(db.select().from(calibration).all()).toHaveLength(0);
   });
 });
+
+// ── updatePositions tags rows by dry_run from underlying orders ─
+// Verifies the core invariant: a position assembled from dry_run=1 trades
+// gets marked dry_run=true, so syncPositionsFromKalshi (which scopes its
+// stale-row cleanup to dry_run=false) leaves it alone.
+import { positions as positionsTable, trades as tradesTable, orders as ordersTable } from "@kcb/db";
+
+describe("updatePositions — tags positions by dry_run from orders", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(positionsTable).run();
+    db.delete(tradesTable).run();
+    db.delete(ordersTable).run();
+    db.delete(marketsTable).run();
+  });
+
+  function seedActiveMarket(ticker: string) {
+    const db = getDb();
+    db.insert(marketsTable).values({
+      ticker,
+      eventTicker: "EVT",
+      seriesTicker: "KXHIGHNY",
+      title: ticker,
+      category: "high_temp",
+      stationId: null,
+      targetDate: null,
+      bracketLow: 70,
+      bracketHigh: 71,
+      marketType: "bracket",
+      status: "active",
+      result: null,
+      lastYesPrice: 80,
+      lastNoPrice: 20,
+      discoveredAt: "2026-04-28T08:00:00Z",
+      updatedAt: "2026-04-28T08:00:00Z",
+    }).run();
+  }
+
+  function seedFilledOrderAndTrade(orderId: string, ticker: string, dryRun: boolean, qty = 25, price = 20) {
+    const db = getDb();
+    db.insert(ordersTable).values({
+      orderId,
+      ticker,
+      action: "buy",
+      side: "no",
+      limitPrice: price,
+      quantity: qty,
+      filledQuantity: qty,
+      status: "filled",
+      signalId: `sig-${orderId}`,
+      dryRun,
+      createdAt: "2026-04-28T17:00:00Z",
+      updatedAt: "2026-04-28T17:00:00Z",
+    }).run();
+    db.insert(tradesTable).values({
+      id: `trd-${orderId}`,
+      orderId,
+      ticker,
+      side: "no",
+      price,
+      quantity: qty,
+      action: "buy",
+      filledAt: "2026-04-28T17:00:00Z",
+    }).run();
+  }
+
+  test("tags position dry_run=true when underlying order is dry_run=1", async () => {
+    seedActiveMarket("KX-PAPER");
+    seedFilledOrderAndTrade("dry-1", "KX-PAPER", true);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb()
+      .select()
+      .from(positionsTable)
+      .where(eq(positionsTable.ticker, "KX-PAPER"))
+      .all();
+    expect(pos).toBeDefined();
+    expect(pos.dryRun).toBe(true);
+    expect(pos.quantity).toBe(25);
+    expect(pos.costBasis).toBe(500); // 25 contracts × 20¢
+    expect(pos.avgEntryPrice).toBe(20);
+  });
+
+  test("tags position dry_run=false when underlying order is dry_run=0", async () => {
+    seedActiveMarket("KX-LIVE");
+    seedFilledOrderAndTrade("live-1", "KX-LIVE", false);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb()
+      .select()
+      .from(positionsTable)
+      .where(eq(positionsTable.ticker, "KX-LIVE"))
+      .all();
+    expect(pos).toBeDefined();
+    expect(pos.dryRun).toBe(false);
+  });
+
+  test("opened_at reflects the first fill timestamp", async () => {
+    seedActiveMarket("KX-PAPER");
+    seedFilledOrderAndTrade("dry-1", "KX-PAPER", true);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb()
+      .select()
+      .from(positionsTable)
+      .where(eq(positionsTable.ticker, "KX-PAPER"))
+      .all();
+    expect(pos.openedAt).toBe("2026-04-28T17:00:00Z");
+  });
+});

@@ -66,6 +66,7 @@ export interface Position {
   unrealizedPnl: number | null
   openedAt: string
   updatedAt: string
+  dryRun?: boolean
 }
 
 /** Market from GET /api/markets */

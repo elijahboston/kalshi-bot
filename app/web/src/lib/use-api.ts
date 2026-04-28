@@ -108,7 +108,7 @@ export function useApi(): ApiState {
           fetchJson<BotConfig>("/api/config"),
           fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
           fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
-          fetchJson<Position[]>("/api/positions"),
+          fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
           fetchJson<Market[]>("/api/markets?status=open&limit=50"),
           fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`),
           fetchJson<Order[]>(`/api/orders?limit=50&dryRun=${modeParam}`),
@@ -200,7 +200,8 @@ export function useApi(): ApiState {
         fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
         fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
         fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
-      ]).then(([perf, bal, res, pnl, wr, dwr, eq]) => {
+        fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
+      ]).then(([perf, bal, res, pnl, wr, dwr, eq, pos]) => {
         if (!mountedRef.current) return
         patch({
           performance: perf.status === "fulfilled" ? perf.value : stateRef.current.performance,
@@ -210,6 +211,7 @@ export function useApi(): ApiState {
           winRates: wr.status === "fulfilled" ? wr.value : stateRef.current.winRates,
           dailyWinRates: dwr.status === "fulfilled" ? dwr.value : stateRef.current.dailyWinRates,
           equityHistory: eq.status === "fulfilled" ? eq.value : stateRef.current.equityHistory,
+          positions: pos.status === "fulfilled" ? pos.value : stateRef.current.positions,
         })
       })
     }, 500)
@@ -269,16 +271,10 @@ export function useApi(): ApiState {
             refetchPerformance()
             break
           case "position:update":
-            setState((s) => {
-              const pos = msg.data as Position
-              const idx = s.positions.findIndex((p) => p.ticker === pos.ticker)
-              if (idx >= 0) {
-                const next = [...s.positions]
-                next[idx] = pos
-                return { ...s, positions: next }
-              }
-              return { ...s, positions: [pos, ...s.positions] }
-            })
+            // Refetch with current mode filter rather than splicing the WS
+            // payload — the event doesn't carry dry_run, so a live-mode
+            // update could otherwise leak into a paper-mode dashboard.
+            refetchPerformance()
             break
           case "signal:new":
           case "signal:scout":
