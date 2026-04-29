@@ -882,3 +882,100 @@ describe("updatePositions — tags positions by dry_run from orders", () => {
     expect(pos.openedAt).toBe("2026-04-28T17:00:00Z");
   });
 });
+
+// ── fetchNwsActualValue uses per-observation temperature field ─
+// Regression: NWS rarely populates maxTemperatureLast24Hours / minTemperatureLast24Hours
+// even when the schema defines them. The reliably-populated field is `temperature`
+// (instantaneous reading at each observation time). Without taking max/min of
+// those, every backfill call returns null and weather_forecasts.actual_value
+// stays empty forever, starving station_bias / empirical sigma.
+import { weatherForecasts as weatherForecastsTable } from "@kcb/db";
+
+function mockNwsRealisticResponse(temperaturesC: number[]) {
+  globalThis.fetch = mock(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({
+          features: temperaturesC.map((tc) => ({
+            properties: {
+              // Realistic shape: temperature populated, max/min24h null.
+              temperature: { value: tc },
+              maxTemperatureLast24Hours: { value: null },
+              minTemperatureLast24Hours: { value: null },
+              precipitationLastHour: { value: null },
+            },
+          })),
+        }),
+        { status: 200 }
+      )
+    )
+  ) as typeof fetch;
+}
+
+describe("fetchNwsActualValue — uses per-observation temperature", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(weatherForecastsTable).run();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("derives high_temp from max of per-observation temperature when max24h is null", async () => {
+    // 33°C is the daily high for KAUS on 2026-04-28 — the actual NWS pattern.
+    mockNwsRealisticResponse([28, 30, 31, 33, 32, 30, 27]);
+
+    const svc = new ReconciliationService({} as never);
+    const result = await (svc as any).fetchNwsActualValue("KAUS", "2026-04-28", "high_temp");
+    // 33°C → 91.4°F
+    expect(result).toBeCloseTo(91.4, 1);
+  });
+
+  test("derives low_temp from min of per-observation temperature", async () => {
+    mockNwsRealisticResponse([28, 30, 31, 33, 32, 30, 27]);
+
+    const svc = new ReconciliationService({} as never);
+    const result = await (svc as any).fetchNwsActualValue("KAUS", "2026-04-28", "low_temp");
+    // 27°C → 80.6°F
+    expect(result).toBeCloseTo(80.6, 1);
+  });
+
+  test("still uses precomputed max24h when both are present (prefers tighter source)", async () => {
+    // If max24h is more accurate (e.g. precomputed daily high from a
+    // dedicated max-min thermometer), the function should pick the higher
+    // value of either source. Realistic case: max24h reports 35°C while
+    // hourly observations only saw 33°C.
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            features: [
+              {
+                properties: {
+                  temperature: { value: 33 },
+                  maxTemperatureLast24Hours: { value: 35 },
+                  minTemperatureLast24Hours: { value: null },
+                  precipitationLastHour: { value: null },
+                },
+              },
+            ],
+          }),
+          { status: 200 }
+        )
+      )
+    ) as typeof fetch;
+
+    const svc = new ReconciliationService({} as never);
+    const result = await (svc as any).fetchNwsActualValue("KAUS", "2026-04-28", "high_temp");
+    // max(33→91.4, 35→95.0) = 95.0
+    expect(result).toBeCloseTo(95.0, 1);
+  });
+
+  test("returns null when no features", async () => {
+    mockNwsRealisticResponse([]);
+    const svc = new ReconciliationService({} as never);
+    const result = await (svc as any).fetchNwsActualValue("KAUS", "2026-04-28", "high_temp");
+    expect(result).toBeNull();
+  });
+});

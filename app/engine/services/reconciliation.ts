@@ -850,91 +850,101 @@ export class ReconciliationService {
         .where(eq(calibration.ticker, market.ticker))
         .limit(1);
 
-      if (existing.length > 0) continue;
+      const calibrationAlreadyExists = existing.length > 0;
 
-      // Find the most recent signal for this market
-      const [signal] = await db
-        .select()
-        .from(signals)
-        .where(eq(signals.ticker, market.ticker))
-        .limit(1);
+      if (!calibrationAlreadyExists) {
+        // Find the most recent signal for this market
+        const [signal] = await db
+          .select()
+          .from(signals)
+          .where(eq(signals.ticker, market.ticker))
+          .limit(1);
 
-      if (!signal) continue; // No signal means we never evaluated this market
+        if (!signal) {
+          // No signal means we never evaluated this market — fall through to
+          // backfill so weather_forecasts.actual_value can still be populated
+          // for the empirical-sigma feedback loop.
+        } else {
+          // Compute realized PnL from bot-attributable orders, with trades as fallback
+          const botOrders = await db
+            .select()
+            .from(orders)
+            .where(
+              and(
+                eq(orders.ticker, market.ticker),
+                eq(orders.status, "filled"),
+                sql`${orders.signalId} IS NOT NULL`
+              )
+            );
 
-      // Compute realized PnL from bot-attributable orders, with trades as fallback
-      const botOrders = await db
-        .select()
-        .from(orders)
-        .where(
-          and(
-            eq(orders.ticker, market.ticker),
-            eq(orders.status, "filled"),
-            sql`${orders.signalId} IS NOT NULL`
-          )
-        );
+          let realizedPnl: number | null = null;
+          const traded = botOrders.length > 0;
 
-      let realizedPnl: number | null = null;
-      const traded = botOrders.length > 0;
+          if (traded) {
+            const outcome = market.result === "yes" ? 1 : 0;
+            realizedPnl = computePerSidePnl(botOrders, outcome);
+          }
 
-      if (traded) {
-        const outcome = market.result === "yes" ? 1 : 0;
-        realizedPnl = computePerSidePnl(botOrders, outcome);
+          const actualOutcome = market.result === "yes" ? 1 : 0;
+          const timestamp = now();
+
+          await db.insert(calibration).values({
+            id: uuid(),
+            ticker: market.ticker,
+            seriesTicker: market.seriesTicker,
+            category: market.category,
+            stationId: market.stationId,
+            predictedProb: signal.estimatedProb,
+            actualOutcome,
+            marketPrice: signal.marketPrice,
+            edge: signal.edge,
+            realizedPnl,
+            traded,
+            forecastHorizon: signal.ensembleSize, // closest proxy we have
+            resolvedAt: timestamp,
+          });
+
+          bus.emit("market:resolved", {
+            ticker: market.ticker,
+            result: market.result as "yes" | "no",
+            predictedProb: signal.estimatedProb,
+            realizedPnl: realizedPnl ?? undefined,
+          });
+
+          bus.emit("calibration:updated", {
+            ticker: market.ticker,
+            predictedProb: signal.estimatedProb,
+            actualOutcome,
+            calibrationError: Math.abs(signal.estimatedProb - actualOutcome),
+            brierScore: (signal.estimatedProb - actualOutcome) ** 2,
+          });
+
+          log.info(
+            `Calibration: ${market.ticker} predicted=${signal.estimatedProb.toFixed(2)} actual=${market.result} ` +
+              (realizedPnl != null
+                ? `PnL=${realizedPnl >= 0 ? "+" : ""}$${(realizedPnl / 100).toFixed(2)}`
+                : "(not traded)")
+          );
+        }
       }
 
-      const actualOutcome = market.result === "yes" ? 1 : 0;
-      const timestamp = now();
-
-      await db.insert(calibration).values({
-        id: uuid(),
-        ticker: market.ticker,
-        seriesTicker: market.seriesTicker,
-        category: market.category,
-        stationId: market.stationId,
-        predictedProb: signal.estimatedProb,
-        actualOutcome,
-        marketPrice: signal.marketPrice,
-        edge: signal.edge,
-        realizedPnl,
-        traded,
-        forecastHorizon: signal.ensembleSize, // closest proxy we have
-        resolvedAt: timestamp,
-      });
-
-      // Backfill actual observed value in weather_forecasts if possible
+      // Backfill weather_forecasts.actual_value and recompute station_bias for
+      // every resolved market with a station, regardless of whether the
+      // calibration row was just created or already exists. This makes the
+      // weather feedback loop retroactively recoverable: if NWS didn't have
+      // observations at the time the calibration was first inserted (e.g.
+      // observations lag market settlement), a later tick will succeed and
+      // fill the actuals. backfillActualValue itself is idempotent — it
+      // returns early when all rows for the date already have actual_value
+      // populated, so the cost on no-op ticks is one short SELECT per market.
       if (
         market.targetDate &&
         market.stationId &&
         new Date(market.targetDate) < new Date()
       ) {
         await this.backfillActualValue(market);
-      }
-
-      // Recompute station bias for this station
-      if (market.stationId && market.targetDate) {
         await this.recomputeStationBias(market.stationId);
       }
-
-      bus.emit("market:resolved", {
-        ticker: market.ticker,
-        result: market.result as "yes" | "no",
-        predictedProb: signal.estimatedProb,
-        realizedPnl: realizedPnl ?? undefined,
-      });
-
-      bus.emit("calibration:updated", {
-        ticker: market.ticker,
-        predictedProb: signal.estimatedProb,
-        actualOutcome,
-        calibrationError: Math.abs(signal.estimatedProb - actualOutcome),
-        brierScore: (signal.estimatedProb - actualOutcome) ** 2,
-      });
-
-      log.info(
-        `Calibration: ${market.ticker} predicted=${signal.estimatedProb.toFixed(2)} actual=${market.result} ` +
-          (realizedPnl != null
-            ? `PnL=${realizedPnl >= 0 ? "+" : ""}$${(realizedPnl / 100).toFixed(2)}`
-            : "(not traded)")
-      );
     }
   }
 
@@ -1026,9 +1036,10 @@ export class ReconciliationService {
       const data = (await res.json()) as {
         features: Array<{
           properties: {
-            maxTemperatureLast24Hours: { value: number | null };
-            minTemperatureLast24Hours: { value: number | null };
-            precipitationLastHour: { value: number | null };
+            temperature?: { value: number | null };
+            maxTemperatureLast24Hours?: { value: number | null };
+            minTemperatureLast24Hours?: { value: number | null };
+            precipitationLastHour?: { value: number | null };
           };
         }>;
       };
@@ -1041,6 +1052,20 @@ export class ReconciliationService {
 
       for (const f of data.features) {
         const p = f.properties;
+        // The instantaneous `temperature` field is reliably populated on
+        // every observation (~5–60 minute cadence). The precomputed
+        // `maxTemperatureLast24Hours` / `minTemperatureLast24Hours` fields
+        // exist on the schema but are null on the vast majority of stations
+        // — relying on them silently leaves actual_value=null for every
+        // resolved market and starves station_bias / empirical sigma. Take
+        // the day-spanning max/min from per-observation readings, with the
+        // precomputed fields kept as a tighter source if present.
+        const observed = p.temperature?.value;
+        if (observed != null) {
+          const valF = observed * 9 / 5 + 32;
+          if (maxTemp == null || valF > maxTemp) maxTemp = valF;
+          if (minTemp == null || valF < minTemp) minTemp = valF;
+        }
         if (p.maxTemperatureLast24Hours?.value != null) {
           const valF = p.maxTemperatureLast24Hours.value * 9 / 5 + 32;
           if (maxTemp == null || valF > maxTemp) maxTemp = valF;
