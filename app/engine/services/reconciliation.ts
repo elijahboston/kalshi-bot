@@ -1320,17 +1320,46 @@ export class ReconciliationService {
     let kalshiPortfolioValue: number | undefined;
 
     if (config.bot.dryRun) {
-      // Use last known paper balance (default $100 = 10000 cents). Filter by
-      // dry_run=1 so live history doesn't leak into the paper simulation when
-      // mode flips.
-      const lastRecord = await db
-        .select()
+      // Compute paper balance dynamically from the seed + ledger of paper
+      // activity. The previous behavior (read latest balance_history row and
+      // copy it forward) never deducted buy costs or applied realized PnL,
+      // so the paper "balance" stayed frozen at the seed value regardless
+      // of fills or settlements.
+      //
+      // Formula: balance = seed − sum(open paper position cost basis)
+      //                         + sum(realized PnL on resolved paper trades)
+      //
+      // Open paper positions tie up capital. Resolved paper trades have
+      // their net PnL recorded in `calibration.realized_pnl`. Together with
+      // the seed, this is the honest cash figure.
+      const seedRows = await db
+        .select({ balance: balanceHistory.balance })
         .from(balanceHistory)
         .where(eq(balanceHistory.dryRun, true))
-        .orderBy(sql`${balanceHistory.recordedAt} DESC`)
+        .orderBy(balanceHistory.recordedAt) // ASC — earliest is the seed
         .limit(1);
+      const seedBalance = seedRows[0]?.balance ?? 10000;
 
-      balance = lastRecord[0]?.balance ?? 10000;
+      const openPaperCostRows = await db
+        .select({ s: sql<number>`COALESCE(SUM(${positions.costBasis}), 0)` })
+        .from(positions)
+        .where(eq(positions.dryRun, true));
+      const openPaperCost = Number(openPaperCostRows[0]?.s ?? 0);
+
+      // Paper-attributable realized PnL: calibration rows whose ticker has a
+      // dry_run=1 bot order. Mirrors the EXISTS-style filter used in
+      // performance routes.
+      const realizedRows = await db
+        .select({
+          s: sql<number>`COALESCE(SUM(${calibration.realizedPnl}), 0)`,
+        })
+        .from(calibration)
+        .where(
+          sql`${calibration.traded} = 1 AND EXISTS (SELECT 1 FROM ${orders} WHERE ${orders.ticker} = ${calibration.ticker} AND ${orders.signalId} IS NOT NULL AND ${orders.dryRun} = 1)`
+        );
+      const realizedPaperPnl = Number(realizedRows[0]?.s ?? 0);
+
+      balance = Math.round(seedBalance - openPaperCost + realizedPaperPnl);
     } else {
       const kalshiBalance = await this.kalshi.getBalance();
       balance = kalshiBalance.balance;

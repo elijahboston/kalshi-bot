@@ -613,6 +613,202 @@ describe("snapshotBalance — mode-aware balance lookup", () => {
     expect(newestPaper).toBeDefined();
     expect(newestPaper!.balance).toBe(10000); // default when no paper history
   });
+
+  test("paper balance deducts cost basis of open paper positions", async () => {
+    const db = getDb();
+    seedBalance("seed", 50000, true, "2026-04-28T08:00:00Z");
+
+    // Two open paper positions, $5 cost each.
+    db.insert(positionsTable).values([
+      {
+        ticker: "KX-A",
+        side: "no",
+        quantity: 25,
+        avgEntryPrice: 20,
+        costBasis: 500,
+        marketValue: 25,
+        unrealizedPnl: -475,
+        openedAt: "2026-04-28T17:00:00Z",
+        updatedAt: "2026-04-28T17:00:00Z",
+        dryRun: true,
+      },
+      {
+        ticker: "KX-B",
+        side: "no",
+        quantity: 10,
+        avgEntryPrice: 50,
+        costBasis: 500,
+        marketValue: 480,
+        unrealizedPnl: -20,
+        openedAt: "2026-04-28T18:00:00Z",
+        updatedAt: "2026-04-28T18:00:00Z",
+        dryRun: true,
+      },
+    ]).run();
+
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+    const newest = rows.find((r) => r.dryRun === true && r.recordedAt !== "2026-04-28T08:00:00Z");
+    expect(newest).toBeDefined();
+    // 50000 seed − (500 + 500) tied up = 49000
+    expect(newest!.balance).toBe(49000);
+  });
+
+  test("paper balance applies realized PnL from resolved paper trades", async () => {
+    const db = getDb();
+    seedBalance("seed", 50000, true, "2026-04-28T08:00:00Z");
+
+    // Bot order on a now-resolved paper trade
+    db.insert(ordersTable).values({
+      orderId: "dry-1",
+      ticker: "KX-RESOLVED",
+      action: "buy",
+      side: "no",
+      limitPrice: 20,
+      quantity: 25,
+      filledQuantity: 25,
+      status: "filled",
+      signalId: "sig-1",
+      dryRun: true,
+      createdAt: "2026-04-28T17:00:00Z",
+      updatedAt: "2026-04-28T17:00:00Z",
+    }).run();
+
+    // Calibration row records the realized PnL: bought 25 NO @ 20¢ = $5 cost,
+    // market resolved YES → NO worthless → $5 loss = -500 cents
+    db.insert(calibration).values({
+      id: "cal-1",
+      ticker: "KX-RESOLVED",
+      seriesTicker: "KXHIGHNY",
+      category: "high_temp",
+      stationId: "KNYC",
+      predictedProb: 0.05,
+      actualOutcome: 1,
+      marketPrice: 20,
+      edge: -0.15,
+      realizedPnl: -500,
+      traded: true,
+      forecastHorizon: 1,
+      resolvedAt: "2026-04-29T05:00:00Z",
+    }).run();
+
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+    const newest = rows.find((r) => r.dryRun === true && r.recordedAt !== "2026-04-28T08:00:00Z");
+    // 50000 seed + (-500 realized) − 0 open = 49500
+    expect(newest!.balance).toBe(49500);
+  });
+
+  test("paper balance combines open positions and realized PnL correctly", async () => {
+    const db = getDb();
+    seedBalance("seed", 50000, true, "2026-04-28T08:00:00Z");
+
+    // One open position, $5 tied up
+    db.insert(positionsTable).values({
+      ticker: "KX-OPEN",
+      side: "no",
+      quantity: 25,
+      avgEntryPrice: 20,
+      costBasis: 500,
+      marketValue: 100,
+      unrealizedPnl: -400,
+      openedAt: "2026-04-30T10:00:00Z",
+      updatedAt: "2026-04-30T10:00:00Z",
+      dryRun: true,
+    }).run();
+
+    // Three resolved paper trades: -$5, -$5, +$3 (net -$7 realized = -700 cents)
+    for (const [id, pnl] of [["a", -500], ["b", -500], ["c", 300]] as const) {
+      db.insert(ordersTable).values({
+        orderId: `dry-${id}`,
+        ticker: `KX-RESOLVED-${id}`,
+        action: "buy", side: "no", limitPrice: 20, quantity: 25, filledQuantity: 25,
+        status: "filled", signalId: `sig-${id}`, dryRun: true,
+        createdAt: "2026-04-28T17:00:00Z", updatedAt: "2026-04-28T17:00:00Z",
+      }).run();
+      db.insert(calibration).values({
+        id: `cal-${id}`,
+        ticker: `KX-RESOLVED-${id}`,
+        seriesTicker: "KXHIGHNY",
+        category: "high_temp",
+        stationId: "KNYC",
+        predictedProb: 0.05,
+        actualOutcome: pnl < 0 ? 1 : 0,
+        marketPrice: 20,
+        edge: -0.15,
+        realizedPnl: pnl,
+        traded: true,
+        forecastHorizon: 1,
+        resolvedAt: "2026-04-29T05:00:00Z",
+      }).run();
+    }
+
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+    const newest = rows.find((r) => r.dryRun === true && r.recordedAt !== "2026-04-28T08:00:00Z");
+    // 50000 seed + (-500 + -500 + 300 = -700 realized) − 500 tied up = 48800
+    expect(newest!.balance).toBe(48800);
+  });
+
+  test("paper balance ignores untraded calibration rows (no bot order)", async () => {
+    const db = getDb();
+    seedBalance("seed", 50000, true, "2026-04-28T08:00:00Z");
+
+    // Untraded calibration row — no bot order exists for this ticker.
+    // Should NOT affect paper balance.
+    db.insert(calibration).values({
+      id: "cal-untraded",
+      ticker: "KX-UNTRADED",
+      seriesTicker: "KXHIGHNY",
+      category: "high_temp",
+      stationId: "KNYC",
+      predictedProb: 0.05,
+      actualOutcome: 1,
+      marketPrice: 20,
+      edge: -0.15,
+      realizedPnl: 0, // not traded → null in practice, but using 0 for clarity
+      traded: false,
+      forecastHorizon: 1,
+      resolvedAt: "2026-04-29T05:00:00Z",
+    }).run();
+
+    getConfig().bot.dryRun = true;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).snapshotBalance();
+
+    const rows = getDb()
+      .select()
+      .from(balanceHistory)
+      .orderBy(sql`recorded_at DESC`)
+      .all();
+    const newest = rows.find((r) => r.dryRun === true && r.recordedAt !== "2026-04-28T08:00:00Z");
+    expect(newest!.balance).toBe(50000);
+  });
 });
 
 // ── checkResolutions handles finalized status ──────────────────
