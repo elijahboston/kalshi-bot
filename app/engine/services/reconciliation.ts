@@ -275,6 +275,23 @@ export class ReconciliationService {
       .where(sql`${markets.status} NOT IN ('settled', 'finalized')`);
     const activeMarketTickers = new Set(activeMarketRows.map((m) => m.ticker));
 
+    // Clean up positions whose underlying market has resolved. For LIVE
+    // positions this used to happen via syncPositionsFromKalshi (Kalshi drops
+    // settled markets from its positions response). For PAPER positions
+    // syncPositionsFromKalshi was scoped to dry_run=false to protect them
+    // from being wiped, which left paper rows on resolved markets stuck open
+    // forever. Delete them explicitly here, regardless of dry_run mode.
+    const resolvedMarketRows = await db
+      .select({ ticker: markets.ticker })
+      .from(markets)
+      .where(inArray(markets.status, ["settled", "finalized"]));
+    if (resolvedMarketRows.length > 0) {
+      const resolvedTickers = resolvedMarketRows.map((m) => m.ticker);
+      await db
+        .delete(positions)
+        .where(inArray(positions.ticker, resolvedTickers));
+    }
+
     const allTrades = await db.select().from(trades);
 
     // Index orders by id to recover the dry_run flag on each trade — trades

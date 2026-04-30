@@ -881,6 +881,50 @@ describe("updatePositions — tags positions by dry_run from orders", () => {
       .all();
     expect(pos.openedAt).toBe("2026-04-28T17:00:00Z");
   });
+
+  test("removes paper position when its market becomes finalized", async () => {
+    const db = getDb();
+    seedActiveMarket("KX-PAPER");
+    seedFilledOrderAndTrade("dry-1", "KX-PAPER", true);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    // Position should now exist
+    expect(db.select().from(positionsTable).all()).toHaveLength(1);
+
+    // Market resolves — flip to finalized
+    db.update(marketsTable)
+      .set({ status: "finalized", result: "yes" })
+      .where(eq(marketsTable.ticker, "KX-PAPER"))
+      .run();
+
+    await (svc as any).updatePositions();
+
+    // Position should be cleaned up. Without the cleanup pass, paper rows on
+    // finalized markets sat open indefinitely because syncPositionsFromKalshi
+    // is scoped to dry_run=false and the active-market filter excludes them
+    // from the trade-aggregation map (so the inner delete never fires).
+    expect(db.select().from(positionsTable).all()).toHaveLength(0);
+  });
+
+  test("removes live position when its market becomes finalized (without waiting for syncPositionsFromKalshi)", async () => {
+    const db = getDb();
+    seedActiveMarket("KX-LIVE");
+    seedFilledOrderAndTrade("live-1", "KX-LIVE", false);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+    expect(db.select().from(positionsTable).all()).toHaveLength(1);
+
+    db.update(marketsTable)
+      .set({ status: "settled", result: "no" })
+      .where(eq(marketsTable.ticker, "KX-LIVE"))
+      .run();
+
+    await (svc as any).updatePositions();
+    expect(db.select().from(positionsTable).all()).toHaveLength(0);
+  });
 });
 
 // ── fetchNwsActualValue uses per-observation temperature field ─
