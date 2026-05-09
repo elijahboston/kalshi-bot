@@ -552,10 +552,9 @@ describe("ProbabilityEstimator — precip/snow", () => {
   });
 });
 
-describe("ProbabilityEstimator — empirical sigma", () => {
-  test("uses empirical sigma (stdBias) when sample size >= 10", async () => {
+describe("ProbabilityEstimator — empirical sigma blend", () => {
+  test("blends empirical + ensemble sigma weighted by sample size (n=50 → fully empirical)", async () => {
     const db = getDb();
-    // Insert bias with empirical sigma of 1.2F (much tighter than typical 2.6F ensemble spread)
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
@@ -563,44 +562,75 @@ describe("ProbabilityEstimator — empirical sigma", () => {
       forecastHorizonDays: 1,
       meanBias: 0.5,
       stdBias: 1.2, // empirical forecast error std
-      sampleSize: 25,
+      sampleSize: 50, // saturates the blend at full empirical weight
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
 
     const estimator = new ProbabilityEstimator();
-    // Ensemble with ~2.6F spread, mean ~30.5
     const ensemble = [28, 29, 29, 30, 30, 30, 31, 31, 32, 33];
 
     const result = await estimator.estimate(makeMarket(), ensemble);
 
-    // Should use empirical sigma (1.2) not ensemble spread (~1.5)
     expect(result.reasoning.sigmaSource).toBe("empirical");
-    expect(result.reasoning.sigmaUsed).toBe(1.2);
-    // With tighter sigma, probability for the correct bracket should be higher
+    expect(result.reasoning.empiricalSigmaWeight).toBe(1);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.2, 6);
     expect(result.reasoning.cdfProbability).toBeGreaterThan(0.2);
   });
 
-  test("falls back to ensemble spread when sample size < 10", async () => {
+  test("blends sigma at intermediate sample size (n=25 → 50/50 blend, widens toward ensemble)", async () => {
     const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
       category: "high_temp",
       forecastHorizonDays: 1,
-      meanBias: 0.5,
-      stdBias: 1.2,
-      sampleSize: 5, // too few samples
+      meanBias: 0,
+      stdBias: 1.0, // tight empirical
+      sampleSize: 25, // w = 0.5
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
 
     const estimator = new ProbabilityEstimator();
-    const ensemble = [28, 29, 30, 30, 31, 32, 33];
+    // Wide ensemble spread (~3F) — blend should land between empirical and ensemble
+    const ensemble = [27, 28, 29, 30, 31, 32, 33];
 
     const result = await estimator.estimate(makeMarket(), ensemble);
 
+    const corrStd = std(ensemble);
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.5, 6);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.5 * 1.0 + 0.5 * corrStd, 6);
+    // Source labels "empirical" once weight >= 0.5
+    expect(result.reasoning.sigmaSource).toBe("empirical");
+    // Blended sigma must lie strictly between the two inputs
+    expect(result.reasoning.sigmaUsed).toBeGreaterThan(1.0);
+    expect(result.reasoning.sigmaUsed).toBeLessThan(corrStd);
+  });
+
+  test("low sample size (n=10) → mostly ensemble (w=0.2), source labels 'ensemble'", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 1.0,
+      sampleSize: 10,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [27, 28, 29, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.2, 6);
     expect(result.reasoning.sigmaSource).toBe("ensemble");
+    const corrStd = std(ensemble);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.2 * 1.0 + 0.8 * corrStd, 6);
   });
 
   test("falls back to ensemble spread when no bias data", async () => {
@@ -610,11 +640,42 @@ describe("ProbabilityEstimator — empirical sigma", () => {
     const result = await estimator.estimate(makeMarket(), ensemble);
 
     expect(result.reasoning.sigmaSource).toBe("ensemble");
+    expect(result.reasoning.empiricalSigmaWeight).toBeNull();
   });
 
-  test("empirical sigma concentrates probability on correct bracket", async () => {
+  test("same-day market still picks up horizon=1 bias correction", async () => {
     const db = getDb();
-    // Tight empirical sigma: 1.0F
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: -2,
+      stdBias: 1.2,
+      sampleSize: 16, // w = 0.32 → blend dominated by ensemble
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    // Same-day market: targetDate = today. Without the floor, ceil((midnight - now)/day)
+    // resolves to 0 once we're past midnight UTC, and the horizon=1 bias row is missed.
+    const today = new Date().toISOString().slice(0, 10);
+    const market = { ...makeMarket(), targetDate: today };
+    const ensemble = [28, 29, 30, 30, 31, 32, 33, 34, 35, 36];
+
+    const result = await estimator.estimate(market, ensemble);
+
+    expect(result.reasoning.biasCorrection).not.toBeNull();
+    expect(result.reasoning.biasCorrection!.meanBias).toBe(-2);
+    expect(result.reasoning.biasCorrection!.sampleSize).toBe(16);
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(16 / 50, 6);
+    // n=16 → w=0.32 < 0.5 → labels "ensemble", but blend still tightens slightly
+    expect(result.reasoning.sigmaSource).toBe("ensemble");
+  });
+
+  test("empirical sigma concentrates probability on correct bracket (n=50 saturated)", async () => {
+    const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
@@ -622,7 +683,7 @@ describe("ProbabilityEstimator — empirical sigma", () => {
       forecastHorizonDays: 1,
       meanBias: 0,
       stdBias: 1.0,
-      sampleSize: 30,
+      sampleSize: 50, // fully empirical
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
@@ -634,8 +695,7 @@ describe("ProbabilityEstimator — empirical sigma", () => {
     const result = await estimator.estimate(makeMarket(), ensemble);
 
     // With sigma=1.0 and mean=30.5, P(30 <= X < 31) should be ~38%
-    // (vs ~26% with ensemble spread of ~0.4)
-    expect(result.reasoning.sigmaUsed).toBe(1.0);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.0, 6);
     expect(result.reasoning.cdfProbability).toBeGreaterThan(0.3);
   });
 });

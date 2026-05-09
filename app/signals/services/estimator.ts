@@ -35,10 +35,12 @@ export interface ReasoningTrace {
   biasCorrection: { meanBias: number; sampleSize: number } | null;
   /** Corrected ensemble stats */
   correctedEnsembleStats: { mean: number; std: number };
-  /** Sigma used for CDF: empirical (from station_bias) or ensemble spread */
+  /** Sigma source label: "empirical" when blend weight >= 0.5, otherwise "ensemble" */
   sigmaSource: "empirical" | "ensemble";
-  /** The sigma value used for CDF computation */
+  /** The sigma value used for CDF computation (sample-size-weighted blend of empirical + ensemble) */
   sigmaUsed: number;
+  /** Empirical-sigma weight in the blend (n/50, capped at 1). null when no bias data. */
+  empiricalSigmaWeight: number | null;
   /** Same-day observation adjustment applied */
   observationAdjustment: { observedTemp: number; sigmaBefore: number; sigmaAfter: number; meanShift: number } | null;
   /** How many members fall in the bracket */
@@ -76,9 +78,17 @@ export class ProbabilityEstimator {
       throw new Error(`Market ${market.ticker} missing station/bracket data`);
     }
 
+    // Same-day markets resolve at midnight-UTC of target_date, so this can be
+    // <= 0 once we cross that boundary. station_bias rows are stored with
+    // Math.max(1, ...) (see reconciliation.recomputeStationBias), so floor at
+    // 1 to keep estimator lookup and stored data on the same horizon. Without
+    // this floor, same-day estimates silently lose bias correction.
     const forecastHorizon = market.targetDate
-      ? Math.ceil(
-          (new Date(market.targetDate).getTime() - Date.now()) / 86400_000
+      ? Math.max(
+          1,
+          Math.ceil(
+            (new Date(market.targetDate).getTime() - Date.now()) / 86400_000
+          )
         )
       : 1;
 
@@ -120,22 +130,28 @@ export class ProbabilityEstimator {
     const countingProb = membersInBracket / correctedValues.length;
 
     // Step 3.5: Determine sigma for CDF computation
-    // Prefer empirical sigma (std of historical forecast errors) over ensemble spread.
-    // Empirical sigma is typically 1.0-1.5F for day-1 temps vs 2.6F ensemble spread.
+    // Blend empirical sigma (std of historical forecast errors) with ensemble spread,
+    // weighted by sample size. Pure-empirical at n>=50, pure-ensemble at n=0. The
+    // residuals fit on a small bias-correction window are systematically tighter
+    // than out-of-sample errors (overfit to the same data the bias was estimated on),
+    // so weighting toward ensemble at small n widens sigma where the empirical
+    // estimate is least trustworthy.
     let sigmaSource: "empirical" | "ensemble" = "ensemble";
     let sigmaUsed = corrStd;
+    let empiricalSigmaWeight: number | null = null;
     let obsAdj: ReasoningTrace["observationAdjustment"] = null;
 
-    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize >= 10) {
-      // Use stdBias as empirical sigma — this is the std of (forecast - actual),
-      // which represents true forecast error, not model disagreement
+    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize > 0) {
       const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
       if (empiricalSigma != null && empiricalSigma > 0) {
-        sigmaUsed = empiricalSigma;
-        sigmaSource = "empirical";
+        const w = Math.min(1, biasCorrection.sampleSize / 50);
+        sigmaUsed = w * empiricalSigma + (1 - w) * corrStd;
+        sigmaSource = w >= 0.5 ? "empirical" : "ensemble";
+        empiricalSigmaWeight = w;
         log.debug(
-          `${market.ticker}: using empirical sigma=${empiricalSigma.toFixed(2)}F ` +
-          `(vs ensemble spread=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
+          `${market.ticker}: blended sigma=${sigmaUsed.toFixed(2)}F ` +
+          `(empirical=${empiricalSigma.toFixed(2)}F w=${w.toFixed(2)}, ` +
+          `ensemble=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
         );
       }
     }
@@ -256,6 +272,7 @@ export class ProbabilityEstimator {
       correctedEnsembleStats: { mean: corrMean, std: corrStd },
       sigmaSource,
       sigmaUsed,
+      empiricalSigmaWeight,
       observationAdjustment: obsAdj,
       membersInBracket,
       cdfProbability: cdfProb,

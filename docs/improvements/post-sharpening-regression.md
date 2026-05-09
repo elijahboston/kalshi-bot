@@ -171,3 +171,164 @@ Root cause: the [2026-04-26 production DB wipe](test-db-wipe-incident.md) destro
 
 - **Only 3 acted signals since the wipe** (1.5 days). This is low but consistent with paper-trading mode (`dry_run=true`) and the bot's selectivity. Worth confirming the bot loop is healthy: `SELECT COUNT(*), MAX(created_at) FROM signals WHERE created_at > '2026-04-26'` should show continuous tick activity.
 - **station_bias still 0 rows.** Expected — no markets have resolved post-wipe, so the backfill synthesis path hasn't had a chance to fire.
+
+## 2026-05-04 Three-day-early recheck — bias correction silently disabled
+
+Calibration table is back at 194 rows (mostly KXHIGH same-day brackets resolving daily). `station_bias` finally has 6 rows — one per enabled station, all `forecast_horizon_days=1`, sample sizes 16 each. Mean biases are large and consistent: KORD -2.06°F, KMIA -1.58°F, KAUS -1.51°F, KDEN -1.18°F, KLAX -0.65°F, KNYC +0.43°F. Forecasts run consistently cold across most stations.
+
+### Calibration result is worse where it matters
+
+| Bucket | Status | N | YES rate | Avg pred | Avg mkt | PnL |
+|---|---|---|---|---|---|---|
+| <10% | skipped | 81 | 9.9% | 5.9% | 22.2% | — |
+| <10% | **traded** | 22 | **59.1%** | 6.2% | 30.3% | -$8.50 |
+| 10–20% | skipped | 68 | 10.3% | 13.4% | 23.5% | — |
+| 10–20% | **traded** | 10 | **80.0%** | 14.9% | 28.5% | -$17.50 |
+| 20–30% | traded | 2 | 100% | 21.8% | 32.5% | -$10.00 |
+
+Skipped markets calibrate fine (~10% pred → ~10% YES). The bot is **selectively wrong on the markets it actually trades**. Cumulative paper PnL: -$36 over 30 days, -$25 today, -$21 yesterday.
+
+### Root cause: same-day markets miss bias correction
+
+`signals.reasoning` traces show the historical-prior blend IS firing (e.g. KXHIGHCHI-26MAY04-B80.5: rawProb=0.005 → blended=0.060 with hist=0.19, w=0.3). But every recent trace has `biasCorrection: null` despite station_bias being populated.
+
+The mismatch:
+- `recomputeStationBias` ([reconciliation.ts:1154](../../app/engine/services/reconciliation.ts#L1154)) stores rows with `forecastHorizon: Math.max(1, trace.forecastHorizon ?? 1)` — minimum 1.
+- `ProbabilityEstimator.estimate` ([estimator.ts:79-83](../../app/signals/services/estimator.ts#L79-L83)) computed `forecastHorizon = Math.ceil((targetDate - now) / 86400_000)`. For same-day markets, `targetDate` is parsed as midnight-UTC and is in the past for any tick after 00:00 UTC, yielding `horizon = 0`.
+- `getBiasCorrection` looks up by exact horizon match; horizon=0 query against horizon=1 rows returns nothing. Bias silently null.
+
+This kills both bias correction AND the empirical-sigma path that depends on `biasCorrection.sampleSize >= 10`. Same-day markets are most of the bot's volume (sniper window 12h before close), so the production bot has been running with neither correction nor empirical sigma since station_bias started populating.
+
+Effect on the failing trades: KORD's -2°F bias would shift ensemble means up 2°F. Bracket B80.5 markets sit ~2°F above the (uncorrected) ensemble mean, so a 5% predicted YES becomes much higher with the correction applied. That matches the observed 59% actual YES rate.
+
+### Shipped: floor estimator horizon at 1
+
+[estimator.ts:79-91](../../app/signals/services/estimator.ts#L79-L91): wrap the horizon computation in `Math.max(1, …)` so estimator and reconciliation use the same horizon space. Test added in [estimator.test.ts](../../app/signals/services/estimator.test.ts) covering same-day market with horizon=1 bias row, asserting both biasCorrection fires and sigmaSource is "empirical".
+
+Verification path post-deploy: spot-check `json_extract(reasoning, '$.biasCorrection.meanBias')` is non-null for new signals on enabled stations within one tick cycle.
+
+### Still recommend: WAIT on deposit
+
+The blend was the documented fix; bias correction was assumed working. With both now in place, give it ≥5 trading days of resolved calibration rows before evaluating. If `pred<10% TRADED` hit rate drops below 30% (currently 59%), the bias-correction fix is doing real work.
+
+## 2026-05-05 Follow-up: three more bugs and a config-drift discovery
+
+After yesterday's bias-correction fix, deeper inspection turned up three more issues, all material. Combined effect on the eval framework: the May 7 recheck date is invalidated again — too many model variables changed in a single day to attribute outcomes cleanly to any one. New eval clock starts from bot restart with all four fixes deployed.
+
+### 1. Tail markets never reached the estimator
+
+[orchestrator.ts:102](../../app/engine/services/orchestrator.ts#L102) skipped any market with `bracketHigh == null`. Discovery deliberately stores tails (upper_tail / lower_tail) with `bracketHigh = null` because the threshold is `bracketLow` and there's no upper bound. The estimator's tail branch (`marketType === "upper_tail" || "lower_tail"`) was reachable in code but never receivable any markets — every tail was filtered out one phase earlier. Fixed: filter now mirrors the estimator's check (`!isTail && bracketHigh == null`). Per tick the estimation count goes from 48 → 72 (24 more tails: 12 upper + 12 lower across 6 stations). Tails fill the [0.7, 1.0] and [0.0, 0.3] tails of the prediction distribution that brackets structurally can't reach.
+
+This filter dates to commit 2cb2e1b (Feb 22, 2026), pre-dating the April threshold-fix work that taught the estimator to handle tails. The estimator change never relaxed the upstream gate.
+
+### 2. Position cost-basis math broken — disabled stop-loss
+
+[reconciliation.ts:330](../../app/engine/services/reconciliation.ts#L330) reduced cost basis by *sell proceeds* (`qty × sell_price`) instead of by the proportional avg entry of contracts being closed. A profitable round-trip drove cost basis below zero, then the next buy inherited a negative starting point and produced an inverted avg entry price. Concrete example caught in production: KXHIGHNY-26MAY05-B81.5 with 5 trades (buy 20@25, sell 20@84, buy 20@25, sell 20@84, buy 10@50) showed `quantity=10, avg_entry_price=-186, cost_basis=-1860` — correct values are `cost=500, avg=50`.
+
+Downstream effect on profitability: stop-loss check at [exit-eval.ts:42](../../app/engine/services/exit-eval.ts#L42) is `liveUnrealized = qty × currentPrice − costBasis`. With negative cost basis, unrealized always looked massively positive and stop-loss never fired. The 25% stop-loss has been **structurally disabled** for the entire evaluation window. Same for the per-ticker exposure cap at [execution.ts:280](../../app/execution/services/execution.ts#L280). This is a previously-unknown silent failure that contaminates the post-sharpening PnL data — losses captured in calibration include trades that should have been stopped out earlier.
+
+Fixed: on sell, reduce cost by `closedQty × (totalCost / totalQty)`; snap to flat (`qty=0, cost=0`) on full close. Three regression tests added covering partial sell, profitable buy/sell/rebuy, and oversell.
+
+### 3. `.env` config drift since Apr 23 conviction-sizing change
+
+`.env` (last modified 2026-04-26) still has pre-conviction-sizing overrides:
+
+```
+EDGE_THRESHOLD=0.15      → intended 0.20
+MIN_CONFIDENCE=0.65      → intended 0.80
+MAX_KELLY_FRACTION=0.025 → intended 0.05  (covered by runtime_config: 0.05 ✓)
+```
+
+`maxKellyFraction` was already corrected via runtime_config. `edgeThreshold` and `minConfidence` were not — they sat at the old values for nearly two weeks. Effect: signals at confidence 0.74-0.77 (entire same-day cohort) cleared the gate, where conviction-sizing intended only ≥0.80 to clear. Edge gate at 15¢ vs intended 20¢ also let smaller-edge trades through. The conviction-sizing doc's expected-effects section ("Trade count drops sharply", "P(YES)<10% bucket sees fewer entries") never materialized because the gates weren't actually tightened in production.
+
+Shipped: inserted `min_confidence=0.80` and `edge_threshold=0.20` into `runtime_config`, which overrides `.env` on next config load. `.env` itself left unchanged (user-managed file), but runtime_config is now authoritative.
+
+### Combined impact on the May 4 calibration table
+
+The 30-day calibration data in this doc covers a window during which:
+- Bias correction was off for same-day markets (fixed yesterday)
+- Tail markets weren't being signaled (fixed today)
+- Cost-basis math broke stop-loss (fixed today)
+- Confidence/edge gates were running at pre-conviction values (fixed today)
+
+The −$36 paper PnL over 30 days is the *combined* loss across all four problems. Attribution of any individual fix to outcome change is impossible without a fresh window.
+
+### New eval clock
+
+Bot restart is required — the four fixes are in code (estimator.ts, orchestrator.ts, reconciliation.ts) and the runtime_config rows. Process config is a singleton cached at first `getConfig()` call ([config/src/index.ts:243-249](../../packages/config/src/index.ts#L243-L249)), so even runtime_config changes need a restart.
+
+After restart:
+1. Spot-check first tick logs: `Estimated N market(s)` should show ~72 (vs prior 48), confirming tails flow.
+2. Confirm same-day signal traces have `biasCorrection: non-null` and `sigmaSource: "empirical"`.
+3. Confirm signal recommendation rate drops sharply — most current signals have conf 0.74-0.77 and would now skip.
+4. Watch for first stop-loss event in `orders` table (signalId pattern `bot-exit`) — should fire on positions losing >25% from now on, where previously they wouldn't.
+5. Re-run prediction-bucket analysis after 5 trading days of post-restart calibration rows. Earliest meaningful eval: 2026-05-12.
+
+### Status of earlier deferred items
+
+- **Per-category calibration:** still 0 rows for precip/snow. Today's tail unlock will start showing precip predictions, but the markets are series-gated by config — see [enabledSeries](../../packages/config/src/index.ts) (currently empty = all). No change needed; will populate organically as the signal mix diversifies.
+- **Observation-adjustment sigma multiplier (0.7×):** May 5 is the 2-week mark from the Apr 21 loosening. Cannot evaluate yet — same-day trades dominated the window and were running with broken bias correction, so sigma path is contaminated. Defer until clean post-restart data exists.
+
+## 2026-05-09 Three-day-post-restart review — empirical sigma is too narrow
+
+Trade review across the 15 resolved + 4 open trades since the May 5 restart. Net PnL is **+$0.20** (six +$5–$20 wins offset nine –$5 losses), so the bot is no longer bleeding — but every loss shares one shape.
+
+### Failure mode
+
+All nine losses were `buy_no` on bracket markets where the **corrected ensemble mean sits inside or right at the bracket edge**, but the model still assigned ≤25% to YES. Examples (all resolved YES):
+
+| Ticker | Bracket | Corr. mean | σ used | Pred YES | Outcome |
+|---|---|---|---|---|---|
+| KXHIGHCHI-26MAY07-B60.5 | [60.5, 61.5] | 60.24°F | 1.16 | 25% | YES |
+| KXHIGHNY-26MAY07-B64.5 | [64.5, 65.5] | 64.50°F | 1.15 | 22% | YES |
+| KXHIGHMIA-26MAY07-B91.5 | [91.5, 92.5] | 91.73°F | 1.06 | 17% | YES |
+| KXHIGHAUS-26MAY07-T70 (lower_tail) | <70°F | 70.27°F | 2.02 | 28% | YES |
+
+When the corrected mean is inside a 1°F bracket, a well-calibrated model with realistic σ should assign 30–40% YES, not 17–25%.
+
+### Root cause: empirical σ overfits its own bias-correction window
+
+`station_bias` rows currently hold n=24 samples per station and the `stdBias` is the std of (forecast – actual) residuals **over those same 24 samples after subtracting the empirical mean bias from them**. Residuals fit on small data are systematically tighter than out-of-sample errors. Production averages bear this out:
+
+| Station | empirical σ (°F) | ensemble σ (°F) | sigma used |
+|---|---|---|---|
+| KMIA | 1.20 | 2.30 | 0.94 |
+| KLAX | 1.79 | 4.68 | 1.52 |
+| KAUS | 2.29 | 4.64 | 1.77 |
+| KORD | 1.60 | 1.67 | 1.25 |
+
+KMIA's effective σ is 2.5× tighter than ensemble spread. At those σs, a 1°F bracket two σs from the mean gets <5% probability — directly producing the over-confident NO calls.
+
+### Shipped: sample-size-weighted σ blend (commit pending, 2026-05-09)
+
+[estimator.ts:130–155](../../app/signals/services/estimator.ts#L130) — replaced the `n ≥ 10` cliff with a continuous blend:
+
+```
+w        = min(1, sampleSize / 50)
+sigmaUsed = w * empiricalSigma + (1 - w) * ensembleSigma
+```
+
+`sigmaSource` keeps the union type (`"empirical" | "ensemble"`) and labels by which side dominates (`w ≥ 0.5`). New trace field `empiricalSigmaWeight` exposes the actual weight for debugging. Pure-empirical at n=50 (matches old behavior); pure-ensemble at n=0; intermediate sample sizes get a defensible widening.
+
+Effect on the documented losers (with current n=24, w=0.48):
+- KMIA σ: 0.94 → 1.78°F. P(91.5≤X≤92.5 | μ=91.73, σ=1.78) jumps from 17% to ~30%.
+- KCHI σ: 1.16 → 1.42°F. Edge against market collapses below the 0.20 gate; trade likely skipped instead of buying NO.
+- KAUS σ: 2.02 → 3.46°F. Tail probability widens enough to skip the trade.
+
+The 20¢ edge gate doing the heavy lifting here: when σ widens, the bot's edge over market price shrinks, and most of these marginal NO bets stop clearing the gate.
+
+### Tests
+
+[estimator.test.ts:555–701](../../app/signals/services/estimator.test.ts#L555) — six tests covering: blend at n=50 (full empirical), n=25 (50/50, sigma strictly between), n=10 (mostly ensemble, "ensemble" label), no-bias (ensemble only), same-day horizon=1 lookup, and the centered-bracket scenario. Full suite: 413 pass, 0 fail.
+
+### What this doesn't fix
+
+- The historical-prior blend still pulls toward empirical hit rates (~12–20% YES historically for these brackets), which is correct for normal weather but mutes signal when the day genuinely is hot/cold. Not changing it now — its job is exactly to dampen overconfidence and it's doing that.
+- KMIA-style markets with very narrow brackets (1°F) at the climatological mean will still be hard. Widened σ helps but doesn't make the bot an expert; the right answer for the marginal cases is to skip, which is what the edge gate now enforces.
+
+### New eval clock
+
+After bot restart picks up the σ blend:
+1. Spot-check `json_extract(reasoning, '$.empiricalSigmaWeight')` is populated and `sigmaUsed` ≈ midway between empirical and ensemble σ.
+2. Watch trade volume — expect another sharp drop as marginal NO bets fail the edge gate.
+3. Re-run the bracket-edge analysis above after 5 trading days. Earliest meaningful eval: 2026-05-14.
