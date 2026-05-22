@@ -99,7 +99,13 @@ export async function initOrchestrator(): Promise<void> {
 
     for (const market of activeMarkets) {
       if (!market.stationId || !market.category) continue;
-      if (market.bracketLow == null || market.bracketHigh == null) continue;
+      // Tails (upper_tail/lower_tail) intentionally store bracketHigh=null —
+      // bracketLow is the threshold and the estimator branches on marketType.
+      // Only brackets need both bounds populated.
+      if (market.bracketLow == null) continue;
+      const isTail =
+        market.marketType === "upper_tail" || market.marketType === "lower_tail";
+      if (!isTail && market.bracketHigh == null) continue;
 
       try {
         // Compute forecast horizon in hours for HRRR/blending
