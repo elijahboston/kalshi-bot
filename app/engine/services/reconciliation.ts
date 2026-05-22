@@ -325,9 +325,24 @@ export class ReconciliationService {
         pos.totalQty += t.quantity;
         pos.totalCost += t.quantity * t.price;
       } else {
-        // sell reduces position
-        pos.totalQty -= t.quantity;
-        pos.totalCost -= t.quantity * t.price;
+        // Sell reduces position quantity. Cost basis must drop proportionally
+        // to the avg entry of contracts being closed — NOT by sell proceeds.
+        // Subtracting proceeds was the prior bug: a profitable round-trip
+        // (proceeds > cost) drove cost basis negative, then the next buy
+        // inherited that negative starting point and produced an inverted
+        // avg entry price.
+        if (pos.totalQty > 0) {
+          const avgCost = pos.totalCost / pos.totalQty;
+          const closedQty = Math.min(t.quantity, pos.totalQty);
+          pos.totalQty -= closedQty;
+          pos.totalCost -= closedQty * avgCost;
+        }
+        // Snap to flat on full close so floating-point residue and overshoots
+        // (sell qty exceeding holdings) can't poison the next buy's basis.
+        if (pos.totalQty <= 0) {
+          pos.totalQty = 0;
+          pos.totalCost = 0;
+        }
       }
     }
 

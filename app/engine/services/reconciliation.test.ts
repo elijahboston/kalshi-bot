@@ -1121,6 +1121,105 @@ describe("updatePositions — tags positions by dry_run from orders", () => {
     await (svc as any).updatePositions();
     expect(db.select().from(positionsTable).all()).toHaveLength(0);
   });
+
+  // ── cost-basis math across buy / sell / rebuy ─────────────
+  // Regression: previously, `sell` reduced cost basis by sell *proceeds* rather
+  // than by the proportional avg-entry of contracts being closed. A profitable
+  // round-trip drove cost basis below zero, then the next buy inherited that
+  // negative basis and produced an inverted avg entry price.
+
+  function seedTrade(
+    orderId: string,
+    ticker: string,
+    action: "buy" | "sell",
+    qty: number,
+    price: number,
+    filledAt: string,
+    dryRun = true
+  ) {
+    const db = getDb();
+    db.insert(ordersTable).values({
+      orderId,
+      ticker,
+      action,
+      side: "no",
+      limitPrice: price,
+      quantity: qty,
+      filledQuantity: qty,
+      status: "filled",
+      signalId: `sig-${orderId}`,
+      dryRun,
+      createdAt: filledAt,
+      updatedAt: filledAt,
+    }).run();
+    db.insert(tradesTable).values({
+      id: `trd-${orderId}`,
+      orderId,
+      ticker,
+      side: "no",
+      price,
+      quantity: qty,
+      action,
+      filledAt,
+    }).run();
+  }
+
+  test("partial sell reduces cost basis proportionally to avg entry, not by sell price", async () => {
+    seedActiveMarket("KX-PARTIAL");
+    seedTrade("buy-1", "KX-PARTIAL", "buy", 20, 25, "2026-04-28T17:00:00Z");
+    seedTrade("sell-1", "KX-PARTIAL", "sell", 10, 80, "2026-04-28T18:00:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).all();
+    // 20 bought @ 25 → cost 500; sell 10 reduces by 10×25 = 250 → cost 250.
+    // The 10×80=800 sell proceeds are realized P&L, not a cost reduction.
+    expect(pos.quantity).toBe(10);
+    expect(pos.costBasis).toBe(250);
+    expect(pos.avgEntryPrice).toBe(25);
+  });
+
+  test("buy / full-exit / rebuy resets cost basis cleanly between cycles", async () => {
+    seedActiveMarket("KX-REBUY");
+    // Cycle 1: buy 20 @ 25, sell 20 @ 84 (profitable round-trip)
+    seedTrade("buy-1", "KX-REBUY", "buy", 20, 25, "2026-05-05T17:00:00Z");
+    seedTrade("sell-1", "KX-REBUY", "sell", 20, 84, "2026-05-05T18:00:00Z");
+    // Cycle 2: buy 20 @ 25, sell 20 @ 84
+    seedTrade("buy-2", "KX-REBUY", "buy", 20, 25, "2026-05-05T19:00:00Z");
+    seedTrade("sell-2", "KX-REBUY", "sell", 20, 84, "2026-05-05T20:00:00Z");
+    // Open: buy 10 @ 50
+    seedTrade("buy-3", "KX-REBUY", "buy", 10, 50, "2026-05-05T21:00:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).all();
+    // Pre-fix produced costBasis=-1860, avgEntryPrice=-186 because each sell
+    // subtracted 20×84=1680 from a 500 cost. Post-fix, full closes snap to flat
+    // and the standalone third buy is the only contributor to cost basis.
+    expect(pos.quantity).toBe(10);
+    expect(pos.costBasis).toBe(500);
+    expect(pos.avgEntryPrice).toBe(50);
+  });
+
+  test("oversell snaps to flat without leaving negative cost basis", async () => {
+    seedActiveMarket("KX-OVERSELL");
+    seedTrade("buy-1", "KX-OVERSELL", "buy", 10, 30, "2026-04-28T17:00:00Z");
+    // Should never happen in practice, but defend against it: a sell larger
+    // than holdings must not bleed cost basis below zero.
+    seedTrade("sell-1", "KX-OVERSELL", "sell", 25, 90, "2026-04-28T18:00:00Z");
+    seedTrade("buy-2", "KX-OVERSELL", "buy", 5, 40, "2026-04-28T19:00:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).all();
+    // After oversell snap to flat, only buy-2 remains: 5 × 40 = 200 cost.
+    expect(pos.quantity).toBe(5);
+    expect(pos.costBasis).toBe(200);
+    expect(pos.avgEntryPrice).toBe(40);
+  });
 });
 
 // ── fetchNwsActualValue uses per-observation temperature field ─
