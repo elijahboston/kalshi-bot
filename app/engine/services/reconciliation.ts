@@ -12,6 +12,7 @@ import {
   eq,
   and,
   sql,
+  inArray,
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
@@ -274,29 +275,74 @@ export class ReconciliationService {
       .where(sql`${markets.status} NOT IN ('settled', 'finalized')`);
     const activeMarketTickers = new Set(activeMarketRows.map((m) => m.ticker));
 
+    // Clean up positions whose underlying market has resolved. For LIVE
+    // positions this used to happen via syncPositionsFromKalshi (Kalshi drops
+    // settled markets from its positions response). For PAPER positions
+    // syncPositionsFromKalshi was scoped to dry_run=false to protect them
+    // from being wiped, which left paper rows on resolved markets stuck open
+    // forever. Delete them explicitly here, regardless of dry_run mode.
+    const resolvedMarketRows = await db
+      .select({ ticker: markets.ticker })
+      .from(markets)
+      .where(inArray(markets.status, ["settled", "finalized"]));
+    if (resolvedMarketRows.length > 0) {
+      const resolvedTickers = resolvedMarketRows.map((m) => m.ticker);
+      await db
+        .delete(positions)
+        .where(inArray(positions.ticker, resolvedTickers));
+    }
+
     const allTrades = await db.select().from(trades);
 
-    // Group trades by ticker (active markets only)
+    // Index orders by id to recover the dry_run flag on each trade — trades
+    // don't carry the flag themselves but inherit through order_id. A position
+    // is "paper" if any of its underlying trades came from a dry_run order.
+    const allOrders = await db.select().from(orders);
+    const orderModeById = new Map<string, boolean>();
+    for (const o of allOrders) orderModeById.set(o.orderId, o.dryRun);
+
+    // Group trades by ticker
     const byTicker = new Map<
       string,
-      { side: string; totalQty: number; totalCost: number; firstAt: string }
+      { side: string; totalQty: number; totalCost: number; firstAt: string; dryRun: boolean }
     >();
 
     for (const t of allTrades) {
       if (!activeMarketTickers.has(t.ticker)) continue;
+      const tradeDryRun = orderModeById.get(t.orderId) ?? false;
       let pos = byTicker.get(t.ticker);
       if (!pos) {
-        pos = { side: t.side, totalQty: 0, totalCost: 0, firstAt: t.filledAt };
+        pos = { side: t.side, totalQty: 0, totalCost: 0, firstAt: t.filledAt, dryRun: tradeDryRun };
         byTicker.set(t.ticker, pos);
+      } else if (tradeDryRun) {
+        // If any contributing trade is paper, mark the whole position paper.
+        // This biases toward "paper" when modes mix — protects paper rows
+        // from being mistaken for live and wiped by syncPositionsFromKalshi.
+        pos.dryRun = true;
       }
 
       if (t.action === "buy") {
         pos.totalQty += t.quantity;
         pos.totalCost += t.quantity * t.price;
       } else {
-        // sell reduces position
-        pos.totalQty -= t.quantity;
-        pos.totalCost -= t.quantity * t.price;
+        // Sell reduces position quantity. Cost basis must drop proportionally
+        // to the avg entry of contracts being closed — NOT by sell proceeds.
+        // Subtracting proceeds was the prior bug: a profitable round-trip
+        // (proceeds > cost) drove cost basis negative, then the next buy
+        // inherited that negative starting point and produced an inverted
+        // avg entry price.
+        if (pos.totalQty > 0) {
+          const avgCost = pos.totalCost / pos.totalQty;
+          const closedQty = Math.min(t.quantity, pos.totalQty);
+          pos.totalQty -= closedQty;
+          pos.totalCost -= closedQty * avgCost;
+        }
+        // Snap to flat on full close so floating-point residue and overshoots
+        // (sell qty exceeding holdings) can't poison the next buy's basis.
+        if (pos.totalQty <= 0) {
+          pos.totalQty = 0;
+          pos.totalCost = 0;
+        }
       }
     }
 
@@ -342,6 +388,7 @@ export class ReconciliationService {
             marketValue,
             unrealizedPnl,
             updatedAt: timestamp,
+            dryRun: pos.dryRun,
           })
           .where(eq(positions.ticker, ticker));
       } else {
@@ -355,6 +402,7 @@ export class ReconciliationService {
           unrealizedPnl,
           openedAt: pos.firstAt,
           updatedAt: timestamp,
+          dryRun: pos.dryRun,
         });
       }
 
@@ -455,6 +503,7 @@ export class ReconciliationService {
               marketValue,
               unrealizedPnl,
               updatedAt: timestamp,
+              dryRun: false,
             })
             .where(eq(positions.ticker, ticker));
         } else {
@@ -468,6 +517,7 @@ export class ReconciliationService {
             unrealizedPnl,
             openedAt: timestamp,
             updatedAt: timestamp,
+            dryRun: false,
           });
         }
 
@@ -480,8 +530,14 @@ export class ReconciliationService {
         });
       }
 
-      // Remove local positions that Kalshi no longer reports (settled/closed)
-      const localPositions = await db.select().from(positions);
+      // Remove local LIVE positions that Kalshi no longer reports
+      // (settled/closed). Paper positions (dry_run=true) are NOT in Kalshi's
+      // response by design — leave them alone or paper trading dashboard
+      // breaks every tick.
+      const localPositions = await db
+        .select()
+        .from(positions)
+        .where(eq(positions.dryRun, false));
       let removed = 0;
       for (const lp of localPositions) {
         if (!kalshiTickers.has(lp.ticker)) {
@@ -806,11 +862,15 @@ export class ReconciliationService {
   private async checkResolutions(): Promise<void> {
     const db = getDb();
 
-    // Find settled markets that don't have calibration records yet
+    // Find resolved markets that don't have calibration records yet. The bot's
+    // lifecycle marks markets as 'finalized' on resolution (see lines 256, 678,
+    // 693); 'settled' is a legacy value never written by current code. Without
+    // 'finalized' here, this entire branch was dead — calibration only grew
+    // via syncSettlements which is gated on the user having a position.
     const settledMarkets = await db
       .select()
       .from(markets)
-      .where(eq(markets.status, "settled"));
+      .where(inArray(markets.status, ["settled", "finalized"]));
 
     for (const market of settledMarkets) {
       if (!market.result) continue;
@@ -822,98 +882,114 @@ export class ReconciliationService {
         .where(eq(calibration.ticker, market.ticker))
         .limit(1);
 
-      if (existing.length > 0) continue;
+      const calibrationAlreadyExists = existing.length > 0;
 
-      // Find the most recent signal for this market
-      const [signal] = await db
-        .select()
-        .from(signals)
-        .where(eq(signals.ticker, market.ticker))
-        .limit(1);
+      if (!calibrationAlreadyExists) {
+        // Find the most recent signal for this market
+        const [signal] = await db
+          .select()
+          .from(signals)
+          .where(eq(signals.ticker, market.ticker))
+          .limit(1);
 
-      if (!signal) continue; // No signal means we never evaluated this market
+        if (!signal) {
+          // No signal means we never evaluated this market — fall through to
+          // backfill so weather_forecasts.actual_value can still be populated
+          // for the empirical-sigma feedback loop.
+        } else {
+          // Compute realized PnL from bot-attributable orders, with trades as fallback
+          const botOrders = await db
+            .select()
+            .from(orders)
+            .where(
+              and(
+                eq(orders.ticker, market.ticker),
+                eq(orders.status, "filled"),
+                sql`${orders.signalId} IS NOT NULL`
+              )
+            );
 
-      // Compute realized PnL from bot-attributable orders, with trades as fallback
-      const botOrders = await db
-        .select()
-        .from(orders)
-        .where(
-          and(
-            eq(orders.ticker, market.ticker),
-            eq(orders.status, "filled"),
-            sql`${orders.signalId} IS NOT NULL`
-          )
-        );
+          let realizedPnl: number | null = null;
+          const traded = botOrders.length > 0;
 
-      let realizedPnl: number | null = null;
-      const traded = botOrders.length > 0;
+          if (traded) {
+            const outcome = market.result === "yes" ? 1 : 0;
+            realizedPnl = computePerSidePnl(botOrders, outcome);
+          }
 
-      if (traded) {
-        const outcome = market.result === "yes" ? 1 : 0;
-        realizedPnl = computePerSidePnl(botOrders, outcome);
+          const actualOutcome = market.result === "yes" ? 1 : 0;
+          const timestamp = now();
+
+          await db.insert(calibration).values({
+            id: uuid(),
+            ticker: market.ticker,
+            seriesTicker: market.seriesTicker,
+            category: market.category,
+            stationId: market.stationId,
+            predictedProb: signal.estimatedProb,
+            actualOutcome,
+            marketPrice: signal.marketPrice,
+            edge: signal.edge,
+            realizedPnl,
+            traded,
+            forecastHorizon: signal.ensembleSize, // closest proxy we have
+            resolvedAt: timestamp,
+          });
+
+          bus.emit("market:resolved", {
+            ticker: market.ticker,
+            result: market.result as "yes" | "no",
+            predictedProb: signal.estimatedProb,
+            realizedPnl: realizedPnl ?? undefined,
+          });
+
+          bus.emit("calibration:updated", {
+            ticker: market.ticker,
+            predictedProb: signal.estimatedProb,
+            actualOutcome,
+            calibrationError: Math.abs(signal.estimatedProb - actualOutcome),
+            brierScore: (signal.estimatedProb - actualOutcome) ** 2,
+          });
+
+          log.info(
+            `Calibration: ${market.ticker} predicted=${signal.estimatedProb.toFixed(2)} actual=${market.result} ` +
+              (realizedPnl != null
+                ? `PnL=${realizedPnl >= 0 ? "+" : ""}$${(realizedPnl / 100).toFixed(2)}`
+                : "(not traded)")
+          );
+        }
       }
 
-      const actualOutcome = market.result === "yes" ? 1 : 0;
-      const timestamp = now();
-
-      await db.insert(calibration).values({
-        id: uuid(),
-        ticker: market.ticker,
-        seriesTicker: market.seriesTicker,
-        category: market.category,
-        stationId: market.stationId,
-        predictedProb: signal.estimatedProb,
-        actualOutcome,
-        marketPrice: signal.marketPrice,
-        edge: signal.edge,
-        realizedPnl,
-        traded,
-        forecastHorizon: signal.ensembleSize, // closest proxy we have
-        resolvedAt: timestamp,
-      });
-
-      // Backfill actual observed value in weather_forecasts if possible
+      // Backfill weather_forecasts.actual_value and recompute station_bias for
+      // every resolved market with a station, regardless of whether the
+      // calibration row was just created or already exists. This makes the
+      // weather feedback loop retroactively recoverable: if NWS didn't have
+      // observations at the time the calibration was first inserted (e.g.
+      // observations lag market settlement), a later tick will succeed and
+      // fill the actuals. backfillActualValue itself is idempotent — it
+      // returns early when all rows for the date already have actual_value
+      // populated, so the cost on no-op ticks is one short SELECT per market.
       if (
         market.targetDate &&
         market.stationId &&
         new Date(market.targetDate) < new Date()
       ) {
         await this.backfillActualValue(market);
-      }
-
-      // Recompute station bias for this station
-      if (market.stationId && market.targetDate) {
         await this.recomputeStationBias(market.stationId);
       }
-
-      bus.emit("market:resolved", {
-        ticker: market.ticker,
-        result: market.result as "yes" | "no",
-        predictedProb: signal.estimatedProb,
-        realizedPnl: realizedPnl ?? undefined,
-      });
-
-      bus.emit("calibration:updated", {
-        ticker: market.ticker,
-        predictedProb: signal.estimatedProb,
-        actualOutcome,
-        calibrationError: Math.abs(signal.estimatedProb - actualOutcome),
-        brierScore: (signal.estimatedProb - actualOutcome) ** 2,
-      });
-
-      log.info(
-        `Calibration: ${market.ticker} predicted=${signal.estimatedProb.toFixed(2)} actual=${market.result} ` +
-          (realizedPnl != null
-            ? `PnL=${realizedPnl >= 0 ? "+" : ""}$${(realizedPnl / 100).toFixed(2)}`
-            : "(not traded)")
-      );
     }
   }
 
   /**
    * Try to backfill the actual observed value from NWS observations.
+   *
+   * When cached forecast rows exist, their `actual_value` is filled. When no
+   * row exists (cache evicted, DB reset, retention gap), a synthetic row is
+   * synthesized from the most recent signal's reasoning trace for this market
+   * so the station-bias feedback loop survives any retention issue.
    */
   private async backfillActualValue(market: {
+    ticker?: string;
     stationId: string | null;
     targetDate: string | null;
     category: string;
@@ -922,7 +998,6 @@ export class ReconciliationService {
 
     const db = getDb();
 
-    // Check if we already have actual values
     const forecasts = await db
       .select()
       .from(weatherForecasts)
@@ -933,41 +1008,102 @@ export class ReconciliationService {
         )
       );
 
-    const needsBackfill = forecasts.some((f) => f.actualValue == null);
-    if (!needsBackfill) return;
+    const hasAnyRow = forecasts.length > 0;
+    const hasUnfilledRow = forecasts.some((f) => f.actualValue == null);
+    if (hasAnyRow && !hasUnfilledRow) return;
 
+    const actual = await this.fetchNwsActualValue(
+      market.stationId,
+      market.targetDate,
+      market.category
+    );
+    if (actual == null) return;
+
+    if (hasUnfilledRow) {
+      for (const f of forecasts) {
+        if (f.actualValue == null) {
+          await db
+            .update(weatherForecasts)
+            .set({ actualValue: actual })
+            .where(eq(weatherForecasts.id, f.id));
+        }
+      }
+      log.debug(
+        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)}`
+      );
+      return;
+    }
+
+    // No row exists — synthesize one from the signal's reasoning trace so the
+    // (point_forecast, actual_value) pair needed by recomputeStationBias survives.
+    if (!market.ticker) return;
+
+    const synthesized = await this.synthesizeForecastFromSignal(
+      market.ticker,
+      market.stationId,
+      market.targetDate,
+      market.category,
+      actual
+    );
+    if (synthesized) {
+      log.debug(
+        `Synthesized weather_forecast for ${market.stationId} ${market.targetDate} from signal trace: actual=${actual.toFixed(1)}`
+      );
+    }
+  }
+
+  /** Fetch observed value from NWS for a given station/date/category. */
+  private async fetchNwsActualValue(
+    stationId: string,
+    targetDate: string,
+    category: string
+  ): Promise<number | null> {
     try {
       const res = await fetch(
-        `https://api.weather.gov/stations/${market.stationId}/observations?start=${market.targetDate}T00:00:00Z&end=${market.targetDate}T23:59:59Z`,
+        `https://api.weather.gov/stations/${stationId}/observations?start=${targetDate}T00:00:00Z&end=${targetDate}T23:59:59Z`,
         { headers: { "User-Agent": "KalshiClimateBot/1.0" } }
       );
-      if (!res.ok) return;
+      if (!res.ok) return null;
 
       const data = (await res.json()) as {
         features: Array<{
           properties: {
-            maxTemperatureLast24Hours: { value: number | null };
-            minTemperatureLast24Hours: { value: number | null };
-            precipitationLastHour: { value: number | null };
+            temperature?: { value: number | null };
+            maxTemperatureLast24Hours?: { value: number | null };
+            minTemperatureLast24Hours?: { value: number | null };
+            precipitationLastHour?: { value: number | null };
           };
         }>;
       };
 
-      if (!data.features?.length) return;
+      if (!data.features?.length) return null;
 
-      // Extract max temp observation (in Celsius from NWS)
       let maxTemp: number | null = null;
       let minTemp: number | null = null;
       let totalPrecip = 0;
 
       for (const f of data.features) {
         const p = f.properties;
+        // The instantaneous `temperature` field is reliably populated on
+        // every observation (~5–60 minute cadence). The precomputed
+        // `maxTemperatureLast24Hours` / `minTemperatureLast24Hours` fields
+        // exist on the schema but are null on the vast majority of stations
+        // — relying on them silently leaves actual_value=null for every
+        // resolved market and starves station_bias / empirical sigma. Take
+        // the day-spanning max/min from per-observation readings, with the
+        // precomputed fields kept as a tighter source if present.
+        const observed = p.temperature?.value;
+        if (observed != null) {
+          const valF = observed * 9 / 5 + 32;
+          if (maxTemp == null || valF > maxTemp) maxTemp = valF;
+          if (minTemp == null || valF < minTemp) minTemp = valF;
+        }
         if (p.maxTemperatureLast24Hours?.value != null) {
-          const valF = p.maxTemperatureLast24Hours.value * 9/5 + 32;
+          const valF = p.maxTemperatureLast24Hours.value * 9 / 5 + 32;
           if (maxTemp == null || valF > maxTemp) maxTemp = valF;
         }
         if (p.minTemperatureLast24Hours?.value != null) {
-          const valF = p.minTemperatureLast24Hours.value * 9/5 + 32;
+          const valF = p.minTemperatureLast24Hours.value * 9 / 5 + 32;
           if (minTemp == null || valF < minTemp) minTemp = valF;
         }
         if (p.precipitationLastHour?.value != null) {
@@ -982,25 +1118,65 @@ export class ReconciliationService {
         snowfall: null, // NWS observations don't reliably report this
       };
 
-      const actual = actualMap[market.category];
-      if (actual == null) return;
-
-      // Update all forecast records for this date/station
-      for (const f of forecasts) {
-        if (f.actualValue == null) {
-          await db
-            .update(weatherForecasts)
-            .set({ actualValue: actual })
-            .where(eq(weatherForecasts.id, f.id));
-        }
-      }
-
-      log.debug(
-        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)}`
-      );
+      return actualMap[category] ?? null;
     } catch {
-      // Non-critical — silently skip
+      return null;
     }
+  }
+
+  /**
+   * Reconstruct a weather_forecasts row from the most recent signal's
+   * reasoning trace for this market. Returns true if a row was inserted.
+   */
+  private async synthesizeForecastFromSignal(
+    ticker: string,
+    stationId: string,
+    targetDate: string,
+    category: string,
+    actual: number
+  ): Promise<boolean> {
+    const db = getDb();
+
+    const [signal] = await db
+      .select()
+      .from(signals)
+      .where(eq(signals.ticker, ticker))
+      .orderBy(sql`${signals.createdAt} DESC`)
+      .limit(1);
+
+    if (!signal?.reasoning) return false;
+
+    let trace: {
+      correctedEnsembleStats?: { mean?: number; std?: number };
+      rawEnsembleStats?: { mean?: number; std?: number; count?: number };
+      forecastHorizon?: number;
+    };
+    try {
+      trace = JSON.parse(signal.reasoning);
+    } catch {
+      return false;
+    }
+
+    const pointForecast = trace.correctedEnsembleStats?.mean;
+    if (pointForecast == null) return false;
+
+    await db.insert(weatherForecasts).values({
+      id: uuid(),
+      stationId,
+      targetDate,
+      source: "backfilled",
+      forecastType: category,
+      forecastHorizon: Math.max(1, trace.forecastHorizon ?? 1),
+      pointForecast,
+      ensembleValues: null,
+      ensembleSize: trace.rawEnsembleStats?.count ?? null,
+      ensembleMean: trace.rawEnsembleStats?.mean ?? null,
+      ensembleStd: trace.rawEnsembleStats?.std ?? null,
+      actualValue: actual,
+      fetchedAt: now(),
+    });
+
+    return true;
   }
 
   /**
@@ -1159,14 +1335,46 @@ export class ReconciliationService {
     let kalshiPortfolioValue: number | undefined;
 
     if (config.bot.dryRun) {
-      // Use last known balance (default $100 = 10000 cents)
-      const lastRecord = await db
-        .select()
+      // Compute paper balance dynamically from the seed + ledger of paper
+      // activity. The previous behavior (read latest balance_history row and
+      // copy it forward) never deducted buy costs or applied realized PnL,
+      // so the paper "balance" stayed frozen at the seed value regardless
+      // of fills or settlements.
+      //
+      // Formula: balance = seed − sum(open paper position cost basis)
+      //                         + sum(realized PnL on resolved paper trades)
+      //
+      // Open paper positions tie up capital. Resolved paper trades have
+      // their net PnL recorded in `calibration.realized_pnl`. Together with
+      // the seed, this is the honest cash figure.
+      const seedRows = await db
+        .select({ balance: balanceHistory.balance })
         .from(balanceHistory)
-        .orderBy(sql`${balanceHistory.recordedAt} DESC`)
+        .where(eq(balanceHistory.dryRun, true))
+        .orderBy(balanceHistory.recordedAt) // ASC — earliest is the seed
         .limit(1);
+      const seedBalance = seedRows[0]?.balance ?? 10000;
 
-      balance = lastRecord[0]?.balance ?? 10000;
+      const openPaperCostRows = await db
+        .select({ s: sql<number>`COALESCE(SUM(${positions.costBasis}), 0)` })
+        .from(positions)
+        .where(eq(positions.dryRun, true));
+      const openPaperCost = Number(openPaperCostRows[0]?.s ?? 0);
+
+      // Paper-attributable realized PnL: calibration rows whose ticker has a
+      // dry_run=1 bot order. Mirrors the EXISTS-style filter used in
+      // performance routes.
+      const realizedRows = await db
+        .select({
+          s: sql<number>`COALESCE(SUM(${calibration.realizedPnl}), 0)`,
+        })
+        .from(calibration)
+        .where(
+          sql`${calibration.traded} = 1 AND EXISTS (SELECT 1 FROM ${orders} WHERE ${orders.ticker} = ${calibration.ticker} AND ${orders.signalId} IS NOT NULL AND ${orders.dryRun} = 1)`
+        );
+      const realizedPaperPnl = Number(realizedRows[0]?.s ?? 0);
+
+      balance = Math.round(seedBalance - openPaperCost + realizedPaperPnl);
     } else {
       const kalshiBalance = await this.kalshi.getBalance();
       balance = kalshiBalance.balance;
@@ -1199,6 +1407,7 @@ export class ReconciliationService {
       openPositions: openPositions.length,
       realizedPnl: Math.round(realizedPnl),
       recordedAt: now(),
+      dryRun: config.bot.dryRun,
     });
 
     bus.emit("balance:update", {

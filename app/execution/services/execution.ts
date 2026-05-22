@@ -180,28 +180,33 @@ export class ExecutionService {
       return null;
     }
 
-    // Already have a position in this market?
-    const existing = openPositions.find((p) => p.ticker === signal.ticker);
-    if (existing) {
-      log.info(`Skipping ${signal.ticker}: already have position`);
-      return null;
-    }
-
-    // Already have a resting or recently filled buy order for this ticker?
-    const recentCutoff = new Date(Date.now() - 60 * 60_000).toISOString(); // 1 hour
-    const [existingBuy] = await db
-      .select({ orderId: orders.orderId, status: orders.status })
+    // Authoritative "already hold this ticker?" check against the orders table.
+    // Computes net held quantity as sum(buy.filled) - sum(sell.filled) across all
+    // non-cancelled orders, regardless of age. This is correct even when the
+    // positions table is lagging on reconciliation and whether the last buy was
+    // 5 minutes or 5 hours ago. Covers both resting/partial buys (filled_quantity
+    // may be 0 but any open-side buy still counts as intent to hold).
+    const [netRow] = await db
+      .select({
+        netHeld: sql<number>`COALESCE(SUM(
+          CASE
+            WHEN ${orders.action} = 'buy' THEN
+              CASE WHEN ${orders.status} IN ('open', 'partial') THEN ${orders.quantity}
+                   ELSE ${orders.filledQuantity} END
+            ELSE -${orders.filledQuantity}
+          END
+        ), 0)`,
+      })
       .from(orders)
       .where(
         and(
           eq(orders.ticker, signal.ticker),
-          eq(orders.action, "buy"),
-          sql`(${orders.status} IN ('open', 'partial') OR (${orders.status} = 'filled' AND ${orders.createdAt} > ${recentCutoff}))`
+          sql`${orders.status} IN ('open', 'partial', 'filled')`
         )
-      )
-      .limit(1);
-    if (existingBuy) {
-      log.info(`Skipping ${signal.ticker}: buy order ${existingBuy.orderId} already ${existingBuy.status}`);
+      );
+    const netHeld = Number(netRow?.netHeld ?? 0);
+    if (netHeld > 0) {
+      log.info(`Skipping ${signal.ticker}: already hold ${netHeld} contract(s) per orders table`);
       return null;
     }
 
@@ -242,8 +247,11 @@ export class ExecutionService {
       return null;
     }
 
-    // Compute contracts
-    const betAmount = Math.floor(balance * cappedKelly);
+    // Compute contracts. Flat sizing (when configured) bypasses Kelly's dollar
+    // amount but still requires cappedKelly > 0 above — Kelly gates the EV sign.
+    const betAmount = config.bot.flatBetSizeCents > 0
+      ? config.bot.flatBetSizeCents
+      : Math.floor(balance * cappedKelly);
     const price = side === "yes"
       ? Math.round(signal.marketPrice * 100) // price in cents
       : Math.round((1 - signal.marketPrice) * 100);
@@ -279,6 +287,18 @@ export class ExecutionService {
     contracts = Math.min(contracts, Math.floor(remainingRoom / price));
     if (contracts <= 0) {
       log.info(`Skipping ${signal.ticker}: price ${price}¢ exceeds remaining exposure room ${remainingRoom}¢`);
+      return null;
+    }
+
+    // Minimum bet size filter. When the Kelly- and cap-sized spend falls below
+    // the floor, skip the signal entirely rather than placing a micro-position
+    // that doesn't move the needle. 0 = disabled.
+    const actualSpend = contracts * price;
+    if (config.bot.minBetSizeCents > 0 && actualSpend < config.bot.minBetSizeCents) {
+      log.info(
+        `Skipping ${signal.ticker}: bet ${actualSpend}¢ < min ${config.bot.minBetSizeCents}¢ ` +
+        `(${contracts} × ${price}¢)`
+      );
       return null;
     }
 

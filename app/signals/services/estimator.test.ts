@@ -1,6 +1,15 @@
-import { test, expect, describe, beforeEach } from "bun:test";
-import { mean, std, erf, normalCdf, ProbabilityEstimator } from "./estimator";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import {
+  mean,
+  std,
+  erf,
+  normalCdf,
+  ProbabilityEstimator,
+  localHourAtStation,
+  estimateDiurnalOffset,
+} from "./estimator";
 import { runMigrations, getDb, calibration, stationBias } from "@kcb/db";
+import { getConfig } from "@kcb/config";
 
 // Use real in-memory DB — DO NOT mock @kcb/db, it leaks globally
 runMigrations();
@@ -132,7 +141,7 @@ describe("ProbabilityEstimator", () => {
     expect(result.reasoning.historicalHitRate).toBeNull();
   });
 
-  test("ensemble far below bracket → probability near 0", async () => {
+  test("ensemble far below bracket → raw probability near 0 (floored to 0.03)", async () => {
     const estimator = new ProbabilityEstimator();
     const ensemble = [10, 11, 12, 13, 14];
 
@@ -140,7 +149,8 @@ describe("ProbabilityEstimator", () => {
 
     expect(result.reasoning.countingProbability).toBe(0);
     expect(result.reasoning.cdfProbability).toBeCloseTo(0, 4);
-    expect(result.probability).toBeCloseTo(0, 4);
+    // Returned probability is floored without empirical bias data
+    expect(result.probability).toBeCloseTo(0.03, 6);
   });
 
   test("estimate throws for missing station/bracket data", async () => {
@@ -164,7 +174,7 @@ describe("ProbabilityEstimator", () => {
     expect(result.probability).toBeLessThanOrEqual(hi + 1e-9);
   });
 
-  test("zero-spread ensemble → falls back to counting", async () => {
+  test("zero-spread ensemble → falls back to counting (floored to 0.97)", async () => {
     const estimator = new ProbabilityEstimator();
     const ensemble = [30.5, 30.5, 30.5, 30.5, 30.5];
 
@@ -172,7 +182,79 @@ describe("ProbabilityEstimator", () => {
 
     expect(result.reasoning.countingProbability).toBe(1);
     expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
-    expect(result.probability).toBe(1);
+    // Returned probability is capped at 0.97 without empirical bias data
+    expect(result.probability).toBe(0.97);
+  });
+});
+
+describe("ProbabilityEstimator — historical prior blend", () => {
+  const originalWeight = getConfig().bot.historicalPriorWeight;
+
+  afterEach(() => {
+    getConfig().bot.historicalPriorWeight = originalWeight;
+  });
+
+  test("weight=0 leaves probability unchanged even when historical rate exists", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 0;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // far below bracket → raw prob ~0
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBe(0.5);
+    expect(result.reasoning.historicalPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6); // unchanged floor
+  });
+
+  test("weight>0 blends raw probability toward historical hit rate", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 0.3;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw prob near 0
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBe(0.5);
+    expect(result.reasoning.historicalPriorBlend).not.toBeNull();
+    expect(result.reasoning.historicalPriorBlend!.weight).toBe(0.3);
+    // blended = 0.7 * ~0 + 0.3 * 0.5 = ~0.15
+    expect(result.probability).toBeGreaterThan(0.13);
+    expect(result.probability).toBeLessThan(0.17);
+  });
+
+  test("weight>0 but historicalHitRate null → no blend applied", async () => {
+    getConfig().bot.historicalPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.historicalHitRate).toBeNull();
+    expect(result.reasoning.historicalPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6);
+  });
+
+  test("weight clamped to [0, 1]", async () => {
+    const db = getDb();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 2; // nonsense, should clamp to 1
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    // weight=1 → probability equals historical rate (0.5)
+    expect(result.reasoning.historicalPriorBlend!.weight).toBe(1);
+    expect(result.probability).toBeCloseTo(0.5, 6);
   });
 });
 
@@ -288,7 +370,7 @@ describe("ProbabilityEstimator — threshold (tail) markets", () => {
     expect(result.reasoning.cdfProbability).toBeLessThan(0.3);
   });
 
-  test("upper_tail: ensemble well below threshold → near 0", async () => {
+  test("upper_tail: ensemble well below threshold → raw near 0 (floored to 0.03)", async () => {
     const estimator = new ProbabilityEstimator();
     const ensemble = [60, 61, 62, 63, 64];
 
@@ -296,10 +378,12 @@ describe("ProbabilityEstimator — threshold (tail) markets", () => {
 
     // All members below 79 → P(temp > 79) ≈ 0
     expect(result.reasoning.countingProbability).toBe(0);
-    expect(result.probability).toBeCloseTo(0, 2);
+    expect(result.reasoning.cdfProbability).toBeCloseTo(0, 2);
+    // Returned probability floored at 0.03 without empirical bias data
+    expect(result.probability).toBeCloseTo(0.03, 6);
   });
 
-  test("lower_tail: ensemble well above threshold → near 0", async () => {
+  test("lower_tail: ensemble well above threshold → raw near 0 (floored to 0.03)", async () => {
     const estimator = new ProbabilityEstimator();
     const ensemble = [70, 71, 72, 73, 74];
 
@@ -307,10 +391,11 @@ describe("ProbabilityEstimator — threshold (tail) markets", () => {
 
     // All members above 56 → P(temp < 56) ≈ 0
     expect(result.reasoning.countingProbability).toBe(0);
-    expect(result.probability).toBeCloseTo(0, 2);
+    expect(result.reasoning.cdfProbability).toBeCloseTo(0, 2);
+    expect(result.probability).toBeCloseTo(0.03, 6);
   });
 
-  test("upper_tail: ensemble well above threshold → near 1", async () => {
+  test("upper_tail: ensemble well above threshold → raw near 1 (capped at 0.97)", async () => {
     const estimator = new ProbabilityEstimator();
     const ensemble = [85, 86, 87, 88, 89];
 
@@ -318,7 +403,8 @@ describe("ProbabilityEstimator — threshold (tail) markets", () => {
 
     // All members above 79 → P(temp > 79) ≈ 1
     expect(result.reasoning.countingProbability).toBe(1);
-    expect(result.probability).toBeCloseTo(1, 2);
+    expect(result.reasoning.cdfProbability).toBeCloseTo(1, 2);
+    expect(result.probability).toBeCloseTo(0.97, 6);
   });
 
   test("tail market does not require bracketHigh", async () => {
@@ -466,10 +552,9 @@ describe("ProbabilityEstimator — precip/snow", () => {
   });
 });
 
-describe("ProbabilityEstimator — empirical sigma", () => {
-  test("uses empirical sigma (stdBias) when sample size >= 10", async () => {
+describe("ProbabilityEstimator — empirical sigma blend", () => {
+  test("blends empirical + ensemble sigma weighted by sample size (n=50 → fully empirical)", async () => {
     const db = getDb();
-    // Insert bias with empirical sigma of 1.2F (much tighter than typical 2.6F ensemble spread)
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
@@ -477,44 +562,75 @@ describe("ProbabilityEstimator — empirical sigma", () => {
       forecastHorizonDays: 1,
       meanBias: 0.5,
       stdBias: 1.2, // empirical forecast error std
-      sampleSize: 25,
+      sampleSize: 50, // saturates the blend at full empirical weight
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
 
     const estimator = new ProbabilityEstimator();
-    // Ensemble with ~2.6F spread, mean ~30.5
     const ensemble = [28, 29, 29, 30, 30, 30, 31, 31, 32, 33];
 
     const result = await estimator.estimate(makeMarket(), ensemble);
 
-    // Should use empirical sigma (1.2) not ensemble spread (~1.5)
     expect(result.reasoning.sigmaSource).toBe("empirical");
-    expect(result.reasoning.sigmaUsed).toBe(1.2);
-    // With tighter sigma, probability for the correct bracket should be higher
+    expect(result.reasoning.empiricalSigmaWeight).toBe(1);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.2, 6);
     expect(result.reasoning.cdfProbability).toBeGreaterThan(0.2);
   });
 
-  test("falls back to ensemble spread when sample size < 10", async () => {
+  test("blends sigma at intermediate sample size (n=25 → 50/50 blend, widens toward ensemble)", async () => {
     const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
       category: "high_temp",
       forecastHorizonDays: 1,
-      meanBias: 0.5,
-      stdBias: 1.2,
-      sampleSize: 5, // too few samples
+      meanBias: 0,
+      stdBias: 1.0, // tight empirical
+      sampleSize: 25, // w = 0.5
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
 
     const estimator = new ProbabilityEstimator();
-    const ensemble = [28, 29, 30, 30, 31, 32, 33];
+    // Wide ensemble spread (~3F) — blend should land between empirical and ensemble
+    const ensemble = [27, 28, 29, 30, 31, 32, 33];
 
     const result = await estimator.estimate(makeMarket(), ensemble);
 
+    const corrStd = std(ensemble);
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.5, 6);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.5 * 1.0 + 0.5 * corrStd, 6);
+    // Source labels "empirical" once weight >= 0.5
+    expect(result.reasoning.sigmaSource).toBe("empirical");
+    // Blended sigma must lie strictly between the two inputs
+    expect(result.reasoning.sigmaUsed).toBeGreaterThan(1.0);
+    expect(result.reasoning.sigmaUsed).toBeLessThan(corrStd);
+  });
+
+  test("low sample size (n=10) → mostly ensemble (w=0.2), source labels 'ensemble'", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 1.0,
+      sampleSize: 10,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [27, 28, 29, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.2, 6);
     expect(result.reasoning.sigmaSource).toBe("ensemble");
+    const corrStd = std(ensemble);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.2 * 1.0 + 0.8 * corrStd, 6);
   });
 
   test("falls back to ensemble spread when no bias data", async () => {
@@ -524,11 +640,42 @@ describe("ProbabilityEstimator — empirical sigma", () => {
     const result = await estimator.estimate(makeMarket(), ensemble);
 
     expect(result.reasoning.sigmaSource).toBe("ensemble");
+    expect(result.reasoning.empiricalSigmaWeight).toBeNull();
   });
 
-  test("empirical sigma concentrates probability on correct bracket", async () => {
+  test("same-day market still picks up horizon=1 bias correction", async () => {
     const db = getDb();
-    // Tight empirical sigma: 1.0F
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: -2,
+      stdBias: 1.2,
+      sampleSize: 16, // w = 0.32 → blend dominated by ensemble
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    // Same-day market: targetDate = today. Without the floor, ceil((midnight - now)/day)
+    // resolves to 0 once we're past midnight UTC, and the horizon=1 bias row is missed.
+    const today = new Date().toISOString().slice(0, 10);
+    const market = { ...makeMarket(), targetDate: today };
+    const ensemble = [28, 29, 30, 30, 31, 32, 33, 34, 35, 36];
+
+    const result = await estimator.estimate(market, ensemble);
+
+    expect(result.reasoning.biasCorrection).not.toBeNull();
+    expect(result.reasoning.biasCorrection!.meanBias).toBe(-2);
+    expect(result.reasoning.biasCorrection!.sampleSize).toBe(16);
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(16 / 50, 6);
+    // n=16 → w=0.32 < 0.5 → labels "ensemble", but blend still tightens slightly
+    expect(result.reasoning.sigmaSource).toBe("ensemble");
+  });
+
+  test("empirical sigma concentrates probability on correct bracket (n=50 saturated)", async () => {
+    const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
       stationId: "KNYC",
@@ -536,7 +683,7 @@ describe("ProbabilityEstimator — empirical sigma", () => {
       forecastHorizonDays: 1,
       meanBias: 0,
       stdBias: 1.0,
-      sampleSize: 30,
+      sampleSize: 50, // fully empirical
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
@@ -548,8 +695,7 @@ describe("ProbabilityEstimator — empirical sigma", () => {
     const result = await estimator.estimate(makeMarket(), ensemble);
 
     // With sigma=1.0 and mean=30.5, P(30 <= X < 31) should be ~38%
-    // (vs ~26% with ensemble spread of ~0.4)
-    expect(result.reasoning.sigmaUsed).toBe(1.0);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.0, 6);
     expect(result.reasoning.cdfProbability).toBeGreaterThan(0.3);
   });
 });
@@ -639,5 +785,171 @@ describe("ProbabilityEstimator — observation adjustment", () => {
 
     // forecastHorizon > 1 → no adjustment
     expect(result.reasoning.observationAdjustment).toBeNull();
+  });
+
+  test("morning obs whose implied afternoon high exceeds forecast mean → diverges branch", async () => {
+    // Regression: Apr 20 NY-51.5 lost because morning obs 50°F was treated as
+    // "confirming" a 50.83°F forecast mean (divergence < 3°F) and sigma was
+    // halved. A 50°F morning reading actually implies a ~57°F afternoon high,
+    // which disagrees with a 50.83°F forecast and should widen — not tighten —
+    // the warm-side tail.
+    const estimator = new ProbabilityEstimator();
+    const today = new Date().toISOString().slice(0, 10);
+    const market = {
+      ...makeMarket(),
+      stationId: "KNYC",
+      targetDate: today,
+      bracketLow: 51.5,
+      bracketHigh: 52.5,
+    };
+    const ensemble = Array.from({ length: 20 }, (_, i) => 49 + i * 0.2); // mean ≈ 50.9
+
+    // 9am ET (EDT) in April = 13:00 UTC; year doesn't matter for TZ logic
+    const observation = {
+      observedTemp: 50,
+      observedAt: `${today}T13:00:00Z`,
+    };
+
+    const result = await estimator.estimate(market, ensemble, observation);
+
+    expect(result.reasoning.observationAdjustment).not.toBeNull();
+    const adj = result.reasoning.observationAdjustment!;
+    // Mean should shift upward (obs implies a warmer afternoon high than forecast)
+    expect(adj.meanShift).toBeGreaterThan(0);
+    // Sigma tightened only mildly (0.85x), not halved
+    expect(adj.sigmaAfter / adj.sigmaBefore).toBeGreaterThan(0.8);
+  });
+
+  test("afternoon obs matching forecast mean → confirms branch tightens sigma", async () => {
+    const estimator = new ProbabilityEstimator();
+    const today = new Date().toISOString().slice(0, 10);
+    const market = {
+      ...makeMarket(),
+      stationId: "KNYC",
+      targetDate: today,
+      bracketLow: 80,
+      bracketHigh: 82,
+    };
+    const ensemble = [79, 80, 80, 81, 81, 81, 82, 82, 83, 84];
+
+    // 3pm ET in April (EDT) = 19:00 UTC; obs temp ≈ forecast mean
+    const observation = {
+      observedTemp: 81,
+      observedAt: `${today}T19:00:00Z`,
+    };
+
+    const result = await estimator.estimate(market, ensemble, observation);
+
+    expect(result.reasoning.observationAdjustment).not.toBeNull();
+    const adj = result.reasoning.observationAdjustment!;
+    // Confirms branch: tighten sigma ~30% (0.7x)
+    expect(adj.sigmaAfter).toBeLessThan(adj.sigmaBefore);
+    expect(adj.sigmaAfter / adj.sigmaBefore).toBeLessThan(0.8);
+    // No mean shift when obs confirms
+    expect(adj.meanShift).toBeCloseTo(0, 6);
+  });
+});
+
+describe("localHourAtStation", () => {
+  test("KNYC 13:00Z in April is 9am local (EDT)", () => {
+    expect(localHourAtStation("2026-04-20T13:00:00Z", "KNYC")).toBe(9);
+  });
+
+  test("KDEN 13:00Z in April is 7am local (MDT)", () => {
+    expect(localHourAtStation("2026-04-20T13:00:00Z", "KDEN")).toBe(7);
+  });
+
+  test("KLAX 13:00Z in April is 6am local (PDT)", () => {
+    expect(localHourAtStation("2026-04-20T13:00:00Z", "KLAX")).toBe(6);
+  });
+
+  test("unknown station falls back to NY tz", () => {
+    expect(localHourAtStation("2026-04-20T13:00:00Z", "KZZZ")).toBe(9);
+  });
+});
+
+describe("estimateDiurnalOffset", () => {
+  test("peak heating (3pm local) → ~0°F", () => {
+    expect(estimateDiurnalOffset(15)).toBeCloseTo(0, 6);
+  });
+
+  test("predawn (~5am) → high offset", () => {
+    expect(estimateDiurnalOffset(5)).toBeGreaterThan(9);
+  });
+
+  test("9am local → mid-range", () => {
+    const offset = estimateDiurnalOffset(9);
+    expect(offset).toBeGreaterThan(5);
+    expect(offset).toBeLessThan(9);
+  });
+
+  test("6pm local → small positive offset", () => {
+    const offset = estimateDiurnalOffset(18);
+    expect(offset).toBeGreaterThan(0);
+    expect(offset).toBeLessThan(4);
+  });
+
+  test("bounded at hour 0 and 24", () => {
+    expect(estimateDiurnalOffset(0)).toBeGreaterThanOrEqual(0);
+    expect(estimateDiurnalOffset(24)).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("ProbabilityEstimator — tail probability floor", () => {
+  test("no bias record + extreme bracket → probability floored at 3%", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Bracket 80-82°F, ensemble all near 50°F with zero spread → raw prob → 0
+    const ensemble = Array.from({ length: 200 }, () => 50);
+    const market = {
+      ...makeMarket(),
+      bracketLow: 80,
+      bracketHigh: 82,
+    };
+
+    const result = await estimator.estimate(market, ensemble);
+
+    // Raw cdf/counting are 0; returned probability should be floored to 0.03
+    expect(result.reasoning.countingProbability).toBe(0);
+    expect(result.probability).toBeGreaterThanOrEqual(0.03 - 1e-9);
+    expect(result.probability).toBeLessThan(0.1);
+  });
+
+  test("no bias record + certain bracket → probability capped at 97%", async () => {
+    const estimator = new ProbabilityEstimator();
+    // All members inside bracket, no bias record
+    const ensemble = Array.from({ length: 200 }, () => 30.5);
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    expect(result.reasoning.countingProbability).toBe(1);
+    expect(result.probability).toBeLessThanOrEqual(0.97 + 1e-9);
+    expect(result.probability).toBeGreaterThan(0.9);
+  });
+
+  test("with empirical bias record (sample >= 10) → floor narrows to 1%", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: crypto.randomUUID(),
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 1.2,
+      sampleSize: 20,
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    } as any).run();
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = Array.from({ length: 200 }, () => 50);
+    const market = {
+      ...makeMarket(),
+      bracketLow: 80,
+      bracketHigh: 82,
+    };
+
+    const result = await estimator.estimate(market, ensemble);
+    // With bias record, floor is 0.01 not 0.03
+    expect(result.probability).toBeGreaterThanOrEqual(0.01 - 1e-9);
+    expect(result.probability).toBeLessThan(0.03);
   });
 });

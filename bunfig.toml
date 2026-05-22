@@ -1,0 +1,4 @@
+[test]
+# Force every test to use an in-memory SQLite DB instead of the production
+# ./data/kalshi-bot.db. See test-setup.ts for details and incident history.
+preload = ["./test-setup.ts"]

@@ -7,6 +7,7 @@
     "start": "bun run src/index.tsx"
   },
   "dependencies": {
+    "@kcb/api": "workspace:*",
     "@kcb/config": "workspace:*",
     "@kcb/db": "workspace:*",
     "@kcb/engine": "workspace:*",

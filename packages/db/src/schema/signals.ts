@@ -38,6 +38,8 @@ export const signals = sqliteTable("signals", {
   /** Skip reason if not acted on */
   skipReason: text("skip_reason"),
   createdAt: text("created_at").notNull(),
+  /** True when this signal was generated while bot was in dry-run/paper mode. */
+  dryRun: integer("dry_run", { mode: "boolean" }).notNull().default(false),
 });
 
 export type Signal = typeof signals.$inferSelect;

@@ -35,10 +35,12 @@ export interface ReasoningTrace {
   biasCorrection: { meanBias: number; sampleSize: number } | null;
   /** Corrected ensemble stats */
   correctedEnsembleStats: { mean: number; std: number };
-  /** Sigma used for CDF: empirical (from station_bias) or ensemble spread */
+  /** Sigma source label: "empirical" when blend weight >= 0.5, otherwise "ensemble" */
   sigmaSource: "empirical" | "ensemble";
-  /** The sigma value used for CDF computation */
+  /** The sigma value used for CDF computation (sample-size-weighted blend of empirical + ensemble) */
   sigmaUsed: number;
+  /** Empirical-sigma weight in the blend (n/50, capped at 1). null when no bias data. */
+  empiricalSigmaWeight: number | null;
   /** Same-day observation adjustment applied */
   observationAdjustment: { observedTemp: number; sigmaBefore: number; sigmaAfter: number; meanShift: number } | null;
   /** How many members fall in the bracket */
@@ -49,6 +51,8 @@ export interface ReasoningTrace {
   countingProbability: number;
   /** Historical verification rate for this bracket */
   historicalHitRate: number | null;
+  /** Historical-prior blend applied (null when weight=0 or hit rate unavailable) */
+  historicalPriorBlend: { weight: number; rawProbability: number; blendedProbability: number } | null;
 }
 
 export class ProbabilityEstimator {
@@ -74,9 +78,17 @@ export class ProbabilityEstimator {
       throw new Error(`Market ${market.ticker} missing station/bracket data`);
     }
 
+    // Same-day markets resolve at midnight-UTC of target_date, so this can be
+    // <= 0 once we cross that boundary. station_bias rows are stored with
+    // Math.max(1, ...) (see reconciliation.recomputeStationBias), so floor at
+    // 1 to keep estimator lookup and stored data on the same horizon. Without
+    // this floor, same-day estimates silently lose bias correction.
     const forecastHorizon = market.targetDate
-      ? Math.ceil(
-          (new Date(market.targetDate).getTime() - Date.now()) / 86400_000
+      ? Math.max(
+          1,
+          Math.ceil(
+            (new Date(market.targetDate).getTime() - Date.now()) / 86400_000
+          )
         )
       : 1;
 
@@ -118,42 +130,52 @@ export class ProbabilityEstimator {
     const countingProb = membersInBracket / correctedValues.length;
 
     // Step 3.5: Determine sigma for CDF computation
-    // Prefer empirical sigma (std of historical forecast errors) over ensemble spread.
-    // Empirical sigma is typically 1.0-1.5F for day-1 temps vs 2.6F ensemble spread.
+    // Blend empirical sigma (std of historical forecast errors) with ensemble spread,
+    // weighted by sample size. Pure-empirical at n>=50, pure-ensemble at n=0. The
+    // residuals fit on a small bias-correction window are systematically tighter
+    // than out-of-sample errors (overfit to the same data the bias was estimated on),
+    // so weighting toward ensemble at small n widens sigma where the empirical
+    // estimate is least trustworthy.
     let sigmaSource: "empirical" | "ensemble" = "ensemble";
     let sigmaUsed = corrStd;
+    let empiricalSigmaWeight: number | null = null;
     let obsAdj: ReasoningTrace["observationAdjustment"] = null;
 
-    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize >= 10) {
-      // Use stdBias as empirical sigma — this is the std of (forecast - actual),
-      // which represents true forecast error, not model disagreement
+    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize > 0) {
       const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
       if (empiricalSigma != null && empiricalSigma > 0) {
-        sigmaUsed = empiricalSigma;
-        sigmaSource = "empirical";
+        const w = Math.min(1, biasCorrection.sampleSize / 50);
+        sigmaUsed = w * empiricalSigma + (1 - w) * corrStd;
+        sigmaSource = w >= 0.5 ? "empirical" : "ensemble";
+        empiricalSigmaWeight = w;
         log.debug(
-          `${market.ticker}: using empirical sigma=${empiricalSigma.toFixed(2)}F ` +
-          `(vs ensemble spread=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
+          `${market.ticker}: blended sigma=${sigmaUsed.toFixed(2)}F ` +
+          `(empirical=${empiricalSigma.toFixed(2)}F w=${w.toFixed(2)}, ` +
+          `ensemble=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
         );
       }
     }
 
-    // Step 3.6: Apply same-day observation adjustment (high_temp only)
+    // Step 3.6: Apply same-day observation adjustment (high_temp only).
+    // We project the observation to an "implied afternoon high" using a
+    // time-of-day diurnal offset (morning obs imply a higher peak; afternoon
+    // obs imply near-peak). Only then do we compare with the forecast mean.
     if (observation && market.category === "high_temp" && forecastHorizon <= 1) {
       const sigmaBefore = sigmaUsed;
-      const divergence = Math.abs(observation.observedTemp - corrMean);
 
-      if (divergence <= 3) {
-        // Observation confirms forecast — tighten sigma by 50%
-        sigmaUsed = sigmaUsed * 0.5;
+      const obsHour = localHourAtStation(observation.observedAt, market.stationId);
+      const diurnalOffset = estimateDiurnalOffset(obsHour);
+      const impliedHigh = observation.observedTemp + diurnalOffset;
+      const divergence = Math.abs(impliedHigh - corrMean);
+
+      if (divergence <= 2) {
+        // Obs-implied high agrees with forecast — tighten sigma, but not as hard
+        // as before (we are one observation against a 150-member ensemble).
+        sigmaUsed = sigmaUsed * 0.7;
       } else {
-        // Observation diverges — shift mean toward observation-based estimate
-        // Use regression: adjustedMean = 0.7 * forecastMean + 0.3 * observationBasedHigh
-        // For morning obs, afternoon high ≈ observedTemp + typical diurnal range offset
-        const diurnalOffset = 10; // rough F offset from morning to afternoon high
-        const obsBased = observation.observedTemp + diurnalOffset;
-        corrMean = 0.7 * corrMean + 0.3 * obsBased;
-        sigmaUsed = sigmaUsed * 0.7; // still tighten somewhat
+        // Obs-implied high disagrees — blend forecast mean toward it and tighten mildly.
+        corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
+        sigmaUsed = sigmaUsed * 0.85;
       }
 
       obsAdj = {
@@ -164,8 +186,9 @@ export class ProbabilityEstimator {
       };
 
       log.debug(
-        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F, ` +
-        `sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, mean shift=${obsAdj.meanShift.toFixed(2)}`
+        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F @ ${obsHour}h local, ` +
+        `implied high=${impliedHigh.toFixed(1)}F, sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, ` +
+        `mean shift=${obsAdj.meanShift.toFixed(2)}`
       );
     }
 
@@ -189,7 +212,39 @@ export class ProbabilityEstimator {
     const countingWeight = isPrecipCategory
       ? 1.0
       : Math.min(1, correctedValues.length / 200);
-    const probability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+    const rawProbability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+
+    // Historical-prior blend. When the estimator's ensemble+CDF view conflicts
+    // with observed historical hit rates for the same station/category/bracket,
+    // pull toward the historical rate. Gated by config.bot.historicalPriorWeight
+    // (0 = disabled). Addresses documented systemic over-confidence in NO.
+    const historicalHitRate = await this.getHistoricalHitRate(
+      market.stationId,
+      market.category,
+      market.bracketLow,
+      market.bracketHigh ?? market.bracketLow
+    );
+    const priorWeight = getConfig().bot.historicalPriorWeight;
+    let blendedProbability = rawProbability;
+    let historicalPriorBlend: ReasoningTrace["historicalPriorBlend"] = null;
+    if (priorWeight > 0 && historicalHitRate != null) {
+      const clampedWeight = Math.min(1, Math.max(0, priorWeight));
+      blendedProbability = (1 - clampedWeight) * rawProbability + clampedWeight * historicalHitRate;
+      historicalPriorBlend = {
+        weight: clampedWeight,
+        rawProbability,
+        blendedProbability,
+      };
+    }
+
+    // Tail-probability floor. Without empirical bias data we can't trust narrow
+    // sigma values, so clamp the returned probability away from 0/1. The raw
+    // cdfProb/countingProb in the reasoning trace are untouched for debugging.
+    const hasEmpirical = biasCorrection != null && biasCorrection.sampleSize >= 10;
+    const floor = isPrecipCategory ? 0 : hasEmpirical ? 0.01 : 0.03;
+    const probability = isPrecipCategory
+      ? blendedProbability
+      : Math.min(1 - floor, Math.max(floor, blendedProbability));
 
     // Step 4: Compute confidence
     const spreadNorm = isPrecipCategory
@@ -217,16 +272,13 @@ export class ProbabilityEstimator {
       correctedEnsembleStats: { mean: corrMean, std: corrStd },
       sigmaSource,
       sigmaUsed,
+      empiricalSigmaWeight,
       observationAdjustment: obsAdj,
       membersInBracket,
       cdfProbability: cdfProb,
       countingProbability: countingProb,
-      historicalHitRate: await this.getHistoricalHitRate(
-        market.stationId,
-        market.category,
-        market.bracketLow,
-        market.bracketHigh
-      ),
+      historicalHitRate,
+      historicalPriorBlend,
     };
 
     log.debug(
@@ -341,4 +393,49 @@ export function erf(x: number): number {
 /** CDF of the normal distribution */
 export function normalCdf(x: number, mu: number, sigma: number): number {
   return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
+}
+
+/** IANA timezone per enabled station. Expand as we enable more stations. */
+const STATION_TZ: Record<string, string> = {
+  KNYC: "America/New_York",
+  KMIA: "America/New_York",
+  KORD: "America/Chicago",
+  KAUS: "America/Chicago",
+  KDEN: "America/Denver",
+  KLAX: "America/Los_Angeles",
+};
+
+/** Extract the local hour-of-day (0–23) at the given station from an ISO timestamp. */
+export function localHourAtStation(iso: string, stationId: string | null): number {
+  const tz = (stationId && STATION_TZ[stationId]) || "America/New_York";
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "numeric",
+    hourCycle: "h23",
+  });
+  const parts = fmt.formatToParts(new Date(iso));
+  const hourPart = parts.find((p) => p.type === "hour");
+  return hourPart ? Number(hourPart.value) : 12;
+}
+
+/**
+ * Estimate the offset between an observation at `localHour` and the day's afternoon
+ * high, in °F. Peak heating is ~3pm local (offset ≈ 0); predawn (~5am) is typically
+ * ~10°F below the afternoon high. Piecewise linear between keypoints — a rough
+ * climatological approximation, intentionally bounded.
+ */
+export function estimateDiurnalOffset(localHour: number): number {
+  const keypoints: Array<[number, number]> = [
+    [0, 8], [3, 10], [6, 10], [9, 7], [12, 3], [15, 0], [18, 2], [21, 5], [24, 8],
+  ];
+  const h = Math.max(0, Math.min(24, localHour));
+  for (let i = 0; i < keypoints.length - 1; i++) {
+    const [h1, o1] = keypoints[i]!;
+    const [h2, o2] = keypoints[i + 1]!;
+    if (h >= h1 && h <= h2) {
+      const t = (h - h1) / (h2 - h1);
+      return o1 + t * (o2 - o1);
+    }
+  }
+  return 8;
 }

@@ -49,6 +49,8 @@ export const balanceHistory = sqliteTable("balance_history", {
   realizedPnl: integer("realized_pnl").notNull().default(0),
   /** Snapshot time */
   recordedAt: text("recorded_at").notNull(),
+  /** True when this snapshot was taken while bot was in dry-run/paper mode. */
+  dryRun: integer("dry_run", { mode: "boolean" }).notNull().default(false),
 });
 
 /**

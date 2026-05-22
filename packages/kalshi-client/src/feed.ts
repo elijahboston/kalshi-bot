@@ -17,6 +17,14 @@ export interface KalshiFeedOptions {
   maxReconnectDelay?: number;
 }
 
+export interface SequenceGap {
+  sid: number;
+  expected: number;
+  got: number;
+  /** Number of messages missed (got - expected). Positive for forward gaps. */
+  missed: number;
+}
+
 export interface KalshiFeedEvents {
   onTicker?: (msg: WsTickerMsg) => void;
   onLifecycle?: (msg: WsLifecycleMsg) => void;
@@ -24,6 +32,13 @@ export interface KalshiFeedEvents {
   onConnected?: () => void;
   onDisconnected?: () => void;
   onError?: (err: Error) => void;
+  /**
+   * Called when a sequence gap is detected on a subscription. Gaps are
+   * informational — the feed continues delivering messages. Reported
+   * separately from `onError` so transport failures (which require action)
+   * are not drowned out by routine packet loss.
+   */
+  onSequenceGap?: (gap: SequenceGap) => void;
 }
 
 /**
@@ -108,6 +123,12 @@ export class KalshiFeed {
 
     this.ws.onclose = () => {
       this.ws = null;
+      // Clear tracking state — subscription IDs and sequence numbers are
+      // server-side state that resets on a new connection. Without this,
+      // the first message after reconnect triggers a false sequence-gap
+      // warning (seq resets to 1 while the client still expects old+1).
+      this.subscriptionIds.clear();
+      this.seqNumbers.clear();
       this.events.onDisconnected?.();
 
       if (!this.intentionalClose) {
@@ -214,19 +235,24 @@ export class KalshiFeed {
       return;
     }
 
+    // Track sequence numbers for any message that carries sid/seq, even
+    // unrecognized types. The server may send message types we don't handle
+    // (e.g. market_lifecycle v1); skipping trackSeq for those causes false
+    // off-by-one gap warnings on the next recognized message.
+    const anyMsg = parsed as Record<string, unknown>;
+    if (typeof anyMsg.sid === "number" && typeof anyMsg.seq === "number") {
+      this.trackSeq(anyMsg.sid, anyMsg.seq);
+    }
+
     // Handle ticker updates
     if (parsed.type === "ticker") {
-      const msg = parsed as WsTickerMsg;
-      this.trackSeq(msg.sid, msg.seq);
-      this.events.onTicker?.(msg);
+      this.events.onTicker?.(parsed as WsTickerMsg);
       return;
     }
 
     // Handle market lifecycle events
     if (parsed.type === "market_lifecycle_v2") {
-      const msg = parsed as WsLifecycleMsg;
-      this.trackSeq(msg.sid, msg.seq);
-      this.events.onLifecycle?.(msg);
+      this.events.onLifecycle?.(parsed as WsLifecycleMsg);
       return;
     }
   }
@@ -234,9 +260,13 @@ export class KalshiFeed {
   private trackSeq(sid: number, seq: number): void {
     const prev = this.seqNumbers.get(sid);
     if (prev !== undefined && seq !== prev + 1) {
-      this.events.onError?.(
-        new Error(`Sequence gap on sid ${sid}: expected ${prev + 1}, got ${seq}`)
-      );
+      const expected = prev + 1;
+      this.events.onSequenceGap?.({
+        sid,
+        expected,
+        got: seq,
+        missed: seq - expected,
+      });
     }
     this.seqNumbers.set(sid, seq);
   }

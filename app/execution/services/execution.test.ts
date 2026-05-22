@@ -6,20 +6,22 @@ import { test, expect, describe, mock, beforeEach } from "bun:test";
 // and breaks api.test.ts, ws-bridge.test.ts, and performance-query.test.ts.
 // DO NOT mock @kcb/engine or @kcb/kalshi-client — those leak too.
 
+const mockBotConfig = {
+  dryRun: true,
+  maxOpenPositions: 6,
+  maxKellyFraction: 0.025,
+  maxContractsPerOrder: 15,
+  minContractPrice: 15,
+  exitCooldownTicks: 3,
+  maxExposurePerTicker: 500,
+  minBalanceFloor: 0,
+  tickIntervalSec: 120,
+  minBetSizeCents: 0,
+  flatBetSizeCents: 0,
+};
+
 mock.module("@kcb/config", () => ({
-  getConfig: () => ({
-    bot: {
-      dryRun: true,
-      maxOpenPositions: 6,
-      maxKellyFraction: 0.025,
-      maxContractsPerOrder: 15,
-      minContractPrice: 15,
-      exitCooldownTicks: 3,
-      maxExposurePerTicker: 500,
-      minBalanceFloor: 0,
-      tickIntervalSec: 120,
-    },
-  }),
+  getConfig: () => ({ bot: mockBotConfig }),
 }));
 
 import { getDb, runMigrations, orders, positions } from "@kcb/db";
@@ -39,6 +41,8 @@ beforeEach(async () => {
   resetCooldowns();
   resetLossTracking();
   resetRestoredFlag();
+  mockBotConfig.minBetSizeCents = 0;
+  mockBotConfig.flatBetSizeCents = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -267,6 +271,152 @@ describe("executeSignal anti-churn guards", () => {
     expect(orderId).toBeNull();
   });
 
+  test("skips when filled buy from >1h ago with no matching sell (DEN-79.5 second-buy case)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "filled-3h-ago",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 2,
+      filledQuantity: 2,
+      status: "filled",
+      signalId: "sig-first",
+      dryRun: true,
+      createdAt: threeHoursAgo,
+      updatedAt: threeHoursAgo,
+    }).run();
+
+    // positions table is empty (simulating sync lag)
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("allows signal when filled buy has been fully sold (net 0)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "buy-closed-out",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 5,
+      status: "filled",
+      dryRun: true,
+      createdAt: twoHoursAgo,
+      updatedAt: twoHoursAgo,
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-matching",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "sell",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 5,
+      filledQuantity: 5,
+      status: "filled",
+      dryRun: true,
+      createdAt: oneHourAgo,
+      updatedAt: oneHourAgo,
+    }).run();
+
+    // Drain cooldown from the sell
+    for (let i = 0; i < 20; i++) tickCooldowns();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeString();
+  });
+
+  test("skips when filled buy partially sold (net > 0)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    db.insert(orders).values({
+      orderId: "buy-large",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 10,
+      filledQuantity: 10,
+      status: "filled",
+      dryRun: true,
+      createdAt: twoHoursAgo,
+      updatedAt: twoHoursAgo,
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-partial",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "sell",
+      side: "yes",
+      limitPrice: 50,
+      quantity: 3,
+      filledQuantity: 3,
+      status: "filled",
+      dryRun: true,
+      createdAt: oneHourAgo,
+      updatedAt: oneHourAgo,
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("skips when open/partial buy is resting (not yet filled)", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "open-buy",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 0,
+      status: "open",
+      dryRun: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+  });
+
+  test("cancelled buys do not count toward netHeld", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "cancelled-buy",
+      ticker: "KXHIGHNY-26MAR04-B40",
+      action: "buy",
+      side: "yes",
+      limitPrice: 40,
+      quantity: 5,
+      filledQuantity: 0,
+      status: "cancelled",
+      dryRun: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const signal = makeSignal();
+    const orderId = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeString();
+  });
+
   test("skips when accumulated exposure would exceed limit", async () => {
     const service = new ExecutionService(stubKalshi);
     // Insert an open position to create exposure near the limit
@@ -295,6 +445,92 @@ describe("executeSignal anti-churn guards", () => {
     const orderId = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
     expect(orderId).toStartWith("dry-");
+  });
+});
+
+describe("executeSignal min-bet-size guard", () => {
+  test("default (minBetSizeCents=0) allows micro bets", async () => {
+    const service = new ExecutionService(stubKalshi);
+    // balance=1000, Kelly 2.5% cap → betAmount ~25¢ → 0 contracts at 50¢ would
+    // trip the "0 contracts" skip. Use a higher balance and capped Kelly so we
+    // end up with 1 contract worth ~50¢ (under $5 floor).
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢
+    const orderId = await service.executeSignal(signal, 2000);
+    expect(orderId).toBeString();
+  });
+
+  test("skips when actual spend is below minBetSizeCents", async () => {
+    mockBotConfig.minBetSizeCents = 500; // $5 floor
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢ = 50¢ spend, below 500¢ floor
+    const orderId = await service.executeSignal(signal, 2000);
+    expect(orderId).toBeNull();
+  });
+
+  test("allows when actual spend meets minBetSizeCents exactly", async () => {
+    mockBotConfig.minBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    // balance 20000 * 0.025 = 500¢ → 10 contracts @ 50¢ = 500¢ spend, meets floor
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+  });
+});
+
+describe("executeSignal flat bet sizing", () => {
+  test("flatBetSizeCents=500 sizes to $5 regardless of small bankroll", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.minBetSizeCents = 500;
+    mockBotConfig.maxExposurePerTicker = 1000;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    // Small bankroll — Kelly at 2.5% cap would spend ~$4.39 on 17556¢. Flat
+    // override pushes to $5. Price 50¢ → 10 contracts (under the 15-order cap).
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(order.quantity * order.limitPrice).toBe(500);
+  });
+
+  test("flatBetSizeCents=500 still skips when Kelly <= 0 (no edge)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    // Negative edge: estimatedProb < marketPrice on yes side → Kelly clamps to 0
+    const signal = makeSignal({ estimatedProb: 0.3, marketPrice: 0.5, edge: -0.2, side: "yes" });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeNull();
+  });
+
+  test("flatBetSizeCents=0 falls back to Kelly sizing (backward compat)", async () => {
+    mockBotConfig.flatBetSizeCents = 0;
+    mockBotConfig.minBetSizeCents = 0;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    // balance 20000 * 0.025 Kelly cap = 500¢ → 10 contracts @ 50¢
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // Kelly-based sizing yields <= 500¢ spend, not flat 500¢
+    expect(order.quantity).toBe(10);
+  });
+
+  test("flat sizing trimmed by exposure cap below min floor -> skip", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.minBetSizeCents = 500;
+    mockBotConfig.maxExposurePerTicker = 300; // leaves only 300¢ of room
+    const service = new ExecutionService(stubKalshi);
+
+    const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.25, edge: 0.3 });
+    const orderId = await service.executeSignal(signal, 17556);
+    expect(orderId).toBeNull();
   });
 });
 
