@@ -56,7 +56,7 @@ After the user tops up bankroll:
 - `seedCapital` (currently `17556` = $175.56)
 - `minBalanceFloor` (currently `5000` = $50)
 - `maxExposurePerTicker` — may want to scale proportionally past `1000¢`
-- `flatBetSizeCents` — consider tiered sizing ($5 at 80% confidence, $10 at 85%+) once current regime shows clean behavior
+- ~~`flatBetSizeCents` — consider tiered sizing ($5 at 80% confidence, $10 at 85%+) once current regime shows clean behavior~~ **Shipped 2026-05-23 as a single high-conf tier ($10 at conf ≥ 0.95) — see [confidence-tier-sizing.md](./confidence-tier-sizing.md). Data showed the 0.90–0.95 band is a *loser*, so no intermediate tier was added.**
 
 ## Verification
 

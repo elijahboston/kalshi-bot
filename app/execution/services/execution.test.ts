@@ -18,6 +18,8 @@ const mockBotConfig = {
   tickIntervalSec: 120,
   minBetSizeCents: 0,
   flatBetSizeCents: 0,
+  highConfidenceThreshold: 0,
+  highConfidenceBetSizeCents: 0,
 };
 
 mock.module("@kcb/config", () => ({
@@ -43,6 +45,10 @@ beforeEach(async () => {
   resetRestoredFlag();
   mockBotConfig.minBetSizeCents = 0;
   mockBotConfig.flatBetSizeCents = 0;
+  mockBotConfig.highConfidenceThreshold = 0;
+  mockBotConfig.highConfidenceBetSizeCents = 0;
+  mockBotConfig.maxExposurePerTicker = 500;
+  mockBotConfig.maxContractsPerOrder = 15;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -531,6 +537,162 @@ describe("executeSignal flat bet sizing", () => {
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.25, edge: 0.3 });
     const orderId = await service.executeSignal(signal, 17556);
     expect(orderId).toBeNull();
+  });
+});
+
+describe("executeSignal confidence-tier sizing", () => {
+  test("signal at/above highConfidenceThreshold scales to highConfidenceBetSizeCents", async () => {
+    mockBotConfig.flatBetSizeCents = 500;       // $5 base
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000; // $10 tier
+    mockBotConfig.maxExposurePerTicker = 2000;
+    mockBotConfig.minBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.97, // above threshold
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // $10 / 50¢ = 20 contracts, but maxContractsPerOrder=15 caps it. 15 × 50¢ = 750¢.
+    // Use a smaller-priced contract for a clean $10 test.
+    expect(order.quantity * order.limitPrice).toBe(750);
+  });
+
+  test("signal at exactly highConfidenceThreshold triggers tier (>=)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    mockBotConfig.maxContractsPerOrder = 100; // remove order-size cap
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.95,
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // $10 / 50¢ = 20 contracts → 1000¢ spend
+    expect(order.quantity * order.limitPrice).toBe(1000);
+  });
+
+  test("signal below threshold uses flatBetSizeCents (not tier)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.92, // below threshold but above minConfidence
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // Base $5 / 50¢ = 10 contracts → 500¢ spend (not 1000¢)
+    expect(order.quantity * order.limitPrice).toBe(500);
+  });
+
+  test("highConfidenceThreshold=0 disables tier (always uses flat base)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0; // disabled
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.99, // would clear any threshold
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(order.quantity * order.limitPrice).toBe(500); // still flat base
+  });
+
+  test("tier still skips when Kelly <= 0 even at high confidence", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    const service = new ExecutionService(stubKalshi);
+
+    // Negative edge: Kelly clamps to 0 — confidence doesn't matter
+    const signal = makeSignal({
+      estimatedProb: 0.3,
+      marketPrice: 0.5,
+      edge: -0.2,
+      side: "yes",
+      confidence: 0.99,
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeNull();
+  });
+
+  test("tier size trimmed by exposure cap (partial-fit allowed)", async () => {
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 800; // tier ($10) doesn't fully fit, but $5+ does
+    mockBotConfig.minBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.97,
+    });
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    // 800¢ room / 50¢ = 16 contracts, capped by maxContractsPerOrder=15 = 750¢
+    expect(order.quantity * order.limitPrice).toBe(750);
+  });
+
+  test("tier with no flat base falls back to Kelly when confidence below threshold", async () => {
+    mockBotConfig.flatBetSizeCents = 0; // no flat base
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+
+    const signal = makeSignal({
+      estimatedProb: 0.8,
+      marketPrice: 0.5,
+      edge: 0.3,
+      confidence: 0.90, // below threshold → no flat, fall back to Kelly
+    });
+    // balance 20000 * 0.025 Kelly cap = 500¢ → 10 contracts @ 50¢
+    const orderId = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+
+    const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(order.quantity).toBe(10); // Kelly path
   });
 });
 

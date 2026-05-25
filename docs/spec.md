@@ -123,6 +123,8 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/improvements.md`](improvements/improvements.md) | Ranked feature backlog: multi-model blending (done), distribution fitting (done), historical hit-rate prior, stale-order cancellation, per-category bias, position exit logic. |
 | [`improvements/post-sharpening-regression.md`](improvements/post-sharpening-regression.md) | 2026-04-22 diagnostic: post-sharpening "regression" is mostly sample noise; real issue is systemic NO overconfidence (pred<10% bets hit YES 34% of the time) and a dead self-improvement loop (station_bias empty, historicalHitRate computed but never blended). Adds gated `historical_prior_weight` fix. |
 | [`improvements/bun-improvements.md`](improvements/bun-improvements.md) | Bun API migration checklist (UUIDv7, strict SQLite, `bun build --compile`, `Bun.nanoseconds`, `using`, typed `Bun.env`) — **all done**. |
+| [`improvements/conviction-sizing.md`](improvements/conviction-sizing.md) | 2026-04-23: shift from Kelly-as-sizer to flat $5 bets behind a strict edge+confidence gate; activate historical-prior blend. Includes the post-funding knob list. |
+| [`improvements/confidence-tier-sizing.md`](improvements/confidence-tier-sizing.md) | 2026-05-23: scale flat bets to $10 on signals with `confidence ≥ 0.95` — data shows that bucket is 56% win / +$8.4k while 0.90–0.95 is 32% / –$5.6k, so only the top band tiers up. |
 
 ---
 

@@ -60,6 +60,10 @@ export interface BotConfig {
     minBetSizeCents: number;
     /** Flat bet size in cents — when > 0, overrides Kelly-based dollar sizing; Kelly still gates EV sign (0 = disabled) */
     flatBetSizeCents: number;
+    /** Confidence threshold (0-1) above which signals scale up to highConfidenceBetSizeCents. 0 = disabled (always use flatBetSizeCents) */
+    highConfidenceThreshold: number;
+    /** Bet size in cents applied when signal.confidence >= highConfidenceThreshold */
+    highConfidenceBetSizeCents: number;
     /** Weight (0-1) for blending historicalHitRate into the estimator's final probability (0 = disabled) */
     historicalPriorWeight: number;
   };
@@ -148,6 +152,8 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sniperHorizonHours = n; },
   min_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.minBetSizeCents = n; },
   flat_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.flatBetSizeCents = n; },
+  high_confidence_threshold: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.highConfidenceThreshold = n; },
+  high_confidence_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.highConfidenceBetSizeCents = n; },
   historical_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.historicalPriorWeight = n; },
 };
 
@@ -193,6 +199,10 @@ export function loadConfig(): BotConfig {
       sniperHorizonHours: envNum("SNIPER_HORIZON_HOURS", 12), // enter positions within 12h of close
       minBetSizeCents: envNum("MIN_BET_SIZE_CENTS", 500), // $5 floor; skip sub-$5 sized bets
       flatBetSizeCents: envNum("FLAT_BET_SIZE_CENTS", 500), // $5 flat per signal; 0 = fall back to Kelly sizing
+      // Confidence-tier sizing: scale up to $10 on conf >= 0.95 signals (per 2026-05-23 analysis,
+      // 0.95+ bucket = 56% win / +$8.4k; 0.90-0.95 bucket = 32% win / -$5.6k, so do NOT scale that band)
+      highConfidenceThreshold: envNum("HIGH_CONFIDENCE_THRESHOLD", 0.95),
+      highConfidenceBetSizeCents: envNum("HIGH_CONFIDENCE_BET_SIZE_CENTS", 1000), // $10 on high-conf signals
       historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0.3), // blend toward observed historical hit rate
     },
     calibration: {

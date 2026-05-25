@@ -249,8 +249,17 @@ export class ExecutionService {
 
     // Compute contracts. Flat sizing (when configured) bypasses Kelly's dollar
     // amount but still requires cappedKelly > 0 above — Kelly gates the EV sign.
-    const betAmount = config.bot.flatBetSizeCents > 0
-      ? config.bot.flatBetSizeCents
+    // High-confidence signals scale up to highConfidenceBetSizeCents when their
+    // confidence meets the threshold (per 2026-05-23 perf analysis).
+    const isHighConfidence =
+      config.bot.highConfidenceThreshold > 0 &&
+      signal.confidence >= config.bot.highConfidenceThreshold &&
+      config.bot.highConfidenceBetSizeCents > 0;
+    const flatSize = isHighConfidence
+      ? config.bot.highConfidenceBetSizeCents
+      : config.bot.flatBetSizeCents;
+    const betAmount = flatSize > 0
+      ? flatSize
       : Math.floor(balance * cappedKelly);
     const price = side === "yes"
       ? Math.round(signal.marketPrice * 100) // price in cents
@@ -302,9 +311,11 @@ export class ExecutionService {
       return null;
     }
 
+    const tierTag = isHighConfidence ? ` HIGH-CONF(${signal.confidence.toFixed(2)})` : "";
     log.info(
-      `Executing: ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
-      `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢)`
+      `Executing:${tierTag} ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
+      `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢, ` +
+      `flat: ${flatSize}¢)`
     );
 
     if (config.bot.dryRun) {
