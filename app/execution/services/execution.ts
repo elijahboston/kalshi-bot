@@ -6,6 +6,25 @@ import { bus, createLogger } from "@kcb/engine";
 
 const log = createLogger("execution");
 
+/**
+ * Result of an `executeSignal` call. Exactly one of `orderId` and `skipReason`
+ * is non-null. `skipReason` is what the orchestrator persists to
+ * `signals.skip_reason` so we can attribute which guard fired in the DB.
+ */
+export interface ExecuteSignalResult {
+  orderId: string | null;
+  skipReason: string | null;
+}
+
+const skip = (reason: string): ExecuteSignalResult => ({
+  orderId: null,
+  skipReason: reason,
+});
+const placed = (orderId: string): ExecuteSignalResult => ({
+  orderId,
+  skipReason: null,
+});
+
 /** Per-ticker cooldown tracking: ticker → remaining ticks */
 const cooldownMap = new Map<string, number>();
 
@@ -163,12 +182,15 @@ export class ExecutionService {
 
   /**
    * Execute a signal: compute position size via Kelly, place order.
+   * Returns `{orderId}` on success, `{skipReason}` on any guard failure.
+   * The specific skip reason is what gets persisted to `signals.skip_reason`
+   * so we can attribute which guard is biting most often.
    */
-  async executeSignal(signal: Signal, balance: number): Promise<string | null> {
+  async executeSignal(signal: Signal, balance: number): Promise<ExecuteSignalResult> {
     const config = getConfig();
 
     if (signal.recommendation === "skip" || !signal.side) {
-      return null;
+      return skip("recommendation=skip or missing side");
     }
 
     // Check position limits
@@ -176,8 +198,9 @@ export class ExecutionService {
     const openPositions = await db.select().from(positions);
 
     if (openPositions.length >= config.bot.maxOpenPositions) {
-      log.info(`Skipping ${signal.ticker}: max positions reached (${openPositions.length})`);
-      return null;
+      const reason = `max positions reached (${openPositions.length}/${config.bot.maxOpenPositions})`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
     // Authoritative "already hold this ticker?" check against the orders table.
@@ -206,15 +229,17 @@ export class ExecutionService {
       );
     const netHeld = Number(netRow?.netHeld ?? 0);
     if (netHeld > 0) {
-      log.info(`Skipping ${signal.ticker}: already hold ${netHeld} contract(s) per orders table`);
-      return null;
+      const reason = `already hold ${netHeld} contract(s)`;
+      log.info(`Skipping ${signal.ticker}: ${reason} per orders table`);
+      return skip(reason);
     }
 
     // Post-exit cooldown: skip if ticker was recently exited
     const remaining = getCooldown(signal.ticker);
     if (remaining > 0) {
-      log.info(`Skipping ${signal.ticker}: cooldown (${remaining} tick(s) remaining)`);
-      return null;
+      const reason = `cooldown (${remaining} tick(s) remaining)`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
     // Loss-based re-entry guard: require 1.5x normal edge after a recent loss exit.
@@ -224,11 +249,11 @@ export class ExecutionService {
     if (recentLoss) {
       const requiredEdge = signal.edgeThreshold * 1.5;
       if (signal.edge < requiredEdge) {
-        log.info(
-          `Skipping ${signal.ticker}: recent loss exit, edge ${(signal.edge * 100).toFixed(1)}¢ < ` +
-          `elevated threshold ${(requiredEdge * 100).toFixed(1)}¢ (1.5x after loss)`
-        );
-        return null;
+        const reason =
+          `recent-loss elevated edge (${(signal.edge * 100).toFixed(1)}¢ < ` +
+          `${(requiredEdge * 100).toFixed(1)}¢ required after loss)`;
+        log.info(`Skipping ${signal.ticker}: ${reason}`);
+        return skip(reason);
       }
       log.info(`${signal.ticker}: allowing re-entry after loss (edge ${(signal.edge * 100).toFixed(1)}¢ >= ${(requiredEdge * 100).toFixed(1)}¢)`);
     }
@@ -243,8 +268,9 @@ export class ExecutionService {
 
     const cappedKelly = Math.min(kellyFraction, config.bot.maxKellyFraction);
     if (cappedKelly <= 0) {
-      log.info(`Skipping ${signal.ticker}: Kelly fraction ≤ 0`);
-      return null;
+      const reason = "Kelly fraction <= 0 (no positive EV)";
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
     // Compute contracts. Flat sizing (when configured) bypasses Kelly's dollar
@@ -270,14 +296,28 @@ export class ExecutionService {
     );
 
     if (contracts <= 0) {
-      log.info(`Skipping ${signal.ticker}: 0 contracts at ${price}¢`);
-      return null;
+      const reason = `0 contracts at ${price}¢ (betAmount=${betAmount}¢)`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
-    // Minimum contract price filter: skip cheap lottery tickets
-    if (price < config.bot.minContractPrice) {
-      log.info(`Skipping ${signal.ticker}: price ${price}¢ < min ${config.bot.minContractPrice}¢`);
-      return null;
+    // Minimum contract price filter: skip cheap lottery tickets — but bypass
+    // for high-confidence signals. Per 2026-05-26 audit, the 15¢ floor was
+    // silently dropping every actionable tail signal (1,807 over 11 days,
+    // some at conf=0.92 / edge=27¢ on 1¢ markets — i.e., the highest-EV
+    // trades on the board). The Kelly EV-sign gate above already filters
+    // genuinely bad bets; the price floor was only a safety net against
+    // low-confidence "lottery ticket" bets that this gate doesn't catch.
+    if (price < config.bot.minContractPrice && !isHighConfidence) {
+      const reason = `price ${price}¢ < min ${config.bot.minContractPrice}¢ (low-conf lottery filter)`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
+    }
+    if (price < config.bot.minContractPrice && isHighConfidence) {
+      log.info(
+        `${signal.ticker}: bypassing minContractPrice (${price}¢ < ${config.bot.minContractPrice}¢) — ` +
+        `confidence ${signal.confidence.toFixed(2)} >= ${config.bot.highConfidenceThreshold}`
+      );
     }
 
     // Per-ticker exposure limit — use current position cost basis (not historical orders)
@@ -289,14 +329,16 @@ export class ExecutionService {
     const currentExposure = existingPosition?.costBasis ?? 0;
     const remainingRoom = config.bot.maxExposurePerTicker - currentExposure;
     if (remainingRoom <= 0) {
-      log.info(`Skipping ${signal.ticker}: already at max exposure ${currentExposure}¢`);
-      return null;
+      const reason = `at max exposure ${currentExposure}¢/${config.bot.maxExposurePerTicker}¢`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
     // Size down contracts to fit within exposure limit
     contracts = Math.min(contracts, Math.floor(remainingRoom / price));
     if (contracts <= 0) {
-      log.info(`Skipping ${signal.ticker}: price ${price}¢ exceeds remaining exposure room ${remainingRoom}¢`);
-      return null;
+      const reason = `price ${price}¢ exceeds remaining exposure room ${remainingRoom}¢`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
     // Minimum bet size filter. When the Kelly- and cap-sized spend falls below
@@ -304,11 +346,10 @@ export class ExecutionService {
     // that doesn't move the needle. 0 = disabled.
     const actualSpend = contracts * price;
     if (config.bot.minBetSizeCents > 0 && actualSpend < config.bot.minBetSizeCents) {
-      log.info(
-        `Skipping ${signal.ticker}: bet ${actualSpend}¢ < min ${config.bot.minBetSizeCents}¢ ` +
-        `(${contracts} × ${price}¢)`
-      );
-      return null;
+      const reason =
+        `bet ${actualSpend}¢ (${contracts} × ${price}¢) < min ${config.bot.minBetSizeCents}¢`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
     }
 
     const tierTag = isHighConfidence ? ` HIGH-CONF(${signal.confidence.toFixed(2)})` : "";
@@ -349,7 +390,7 @@ export class ExecutionService {
         dryRun: true,
       });
 
-      return orderId;
+      return placed(orderId);
     }
 
     // Real order
@@ -391,7 +432,7 @@ export class ExecutionService {
       dryRun: false,
     });
 
-    return result.order.order_id;
+    return placed(result.order.order_id);
   }
 
   /**

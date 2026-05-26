@@ -411,10 +411,16 @@ export async function initOrchestrator(): Promise<void> {
       const exitReserve = openPositions.reduce((sum, p) => sum + p.quantity * 2, 0);
       const balanceFloor = config.bot.minBalanceFloor;
 
-      // Profit reserve: lock away a percentage of gains above seed capital
+      // Profit reserve: lock away a percentage of gains above seed capital.
+      // Skipped in dry_run mode — paper bankroll has no "deposited capital" to
+      // protect, and a stale seedCapital (e.g., 17556¢ from an earlier balance
+      // snapshot) silently locks away large fractions of paper gains
+      // (~$150/$473 = 35% of effective capital, per 2026-05-26 audit).
       const totalEquity = balance + openPositions.reduce((sum, p) => sum + (p.quantity ?? 0) * 2, 0); // rough equity
       const profit = Math.max(0, balance - config.bot.seedCapital);
-      const profitReserve = Math.round(profit * config.bot.profitReservePct);
+      const profitReserve = config.bot.dryRun
+        ? 0
+        : Math.round(profit * config.bot.profitReservePct);
 
       const availableBalance = Math.max(0, balance - exitReserve - balanceFloor - profitReserve);
 
@@ -461,22 +467,22 @@ export async function initOrchestrator(): Promise<void> {
             createdAt: now(),
           };
 
-          const orderId = await executionService.executeSignal(
+          const result = await executionService.executeSignal(
             signalRecord,
             availableBalance
           );
 
           // Update signal with result
-          if (orderId) {
+          if (result.orderId) {
             ordersPlacedThisTick++;
             await db
               .update(signals)
-              .set({ acted: true, orderId })
+              .set({ acted: true, orderId: result.orderId })
               .where(eq(signals.id, signal.id));
           } else {
             await db
               .update(signals)
-              .set({ skipReason: "execution skipped (position/size limits)" })
+              .set({ skipReason: result.skipReason ?? "execution skipped" })
               .where(eq(signals.id, signal.id));
           }
         } catch (err) {

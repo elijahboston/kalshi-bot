@@ -224,7 +224,7 @@ describe("executeSignal anti-churn guards", () => {
       side: "yes",
     });
 
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -235,7 +235,7 @@ describe("executeSignal anti-churn guards", () => {
     recordExit(signal.ticker);
     expect(getCooldown(signal.ticker)).toBe(3);
 
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -273,7 +273,7 @@ describe("executeSignal anti-churn guards", () => {
     }).run();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -298,7 +298,7 @@ describe("executeSignal anti-churn guards", () => {
 
     // positions table is empty (simulating sync lag)
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -338,7 +338,7 @@ describe("executeSignal anti-churn guards", () => {
     for (let i = 0; i < 20; i++) tickCooldowns();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
   });
 
@@ -375,7 +375,7 @@ describe("executeSignal anti-churn guards", () => {
     }).run();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -397,7 +397,7 @@ describe("executeSignal anti-churn guards", () => {
     }).run();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -419,7 +419,7 @@ describe("executeSignal anti-churn guards", () => {
     }).run();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
   });
 
@@ -440,7 +440,7 @@ describe("executeSignal anti-churn guards", () => {
     }).run();
 
     const signal = makeSignal();
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull();
   });
 
@@ -448,7 +448,7 @@ describe("executeSignal anti-churn guards", () => {
     const service = new ExecutionService(stubKalshi);
     const signal = makeSignal();
 
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
     expect(orderId).toStartWith("dry-");
   });
@@ -462,7 +462,7 @@ describe("executeSignal min-bet-size guard", () => {
     // end up with 1 contract worth ~50¢ (under $5 floor).
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
     // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢
-    const orderId = await service.executeSignal(signal, 2000);
+    const { orderId } = await service.executeSignal(signal, 2000);
     expect(orderId).toBeString();
   });
 
@@ -471,7 +471,7 @@ describe("executeSignal min-bet-size guard", () => {
     const service = new ExecutionService(stubKalshi);
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
     // balance 2000 * 0.025 = 50¢ → 1 contract @ 50¢ = 50¢ spend, below 500¢ floor
-    const orderId = await service.executeSignal(signal, 2000);
+    const { orderId } = await service.executeSignal(signal, 2000);
     expect(orderId).toBeNull();
   });
 
@@ -480,7 +480,7 @@ describe("executeSignal min-bet-size guard", () => {
     const service = new ExecutionService(stubKalshi);
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
     // balance 20000 * 0.025 = 500¢ → 10 contracts @ 50¢ = 500¢ spend, meets floor
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
   });
 });
@@ -496,7 +496,7 @@ describe("executeSignal flat bet sizing", () => {
     // Small bankroll — Kelly at 2.5% cap would spend ~$4.39 on 17556¢. Flat
     // override pushes to $5. Price 50¢ → 10 contracts (under the 15-order cap).
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
-    const orderId = await service.executeSignal(signal, 17556);
+    const { orderId } = await service.executeSignal(signal, 17556);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -508,7 +508,7 @@ describe("executeSignal flat bet sizing", () => {
     const service = new ExecutionService(stubKalshi);
     // Negative edge: estimatedProb < marketPrice on yes side → Kelly clamps to 0
     const signal = makeSignal({ estimatedProb: 0.3, marketPrice: 0.5, edge: -0.2, side: "yes" });
-    const orderId = await service.executeSignal(signal, 17556);
+    const { orderId } = await service.executeSignal(signal, 17556);
     expect(orderId).toBeNull();
   });
 
@@ -520,7 +520,7 @@ describe("executeSignal flat bet sizing", () => {
 
     // balance 20000 * 0.025 Kelly cap = 500¢ → 10 contracts @ 50¢
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.5, edge: 0.3 });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -535,7 +535,7 @@ describe("executeSignal flat bet sizing", () => {
     const service = new ExecutionService(stubKalshi);
 
     const signal = makeSignal({ estimatedProb: 0.8, marketPrice: 0.25, edge: 0.3 });
-    const orderId = await service.executeSignal(signal, 17556);
+    const { orderId } = await service.executeSignal(signal, 17556);
     expect(orderId).toBeNull();
   });
 });
@@ -556,7 +556,7 @@ describe("executeSignal confidence-tier sizing", () => {
       edge: 0.3,
       confidence: 0.97, // above threshold
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -580,7 +580,7 @@ describe("executeSignal confidence-tier sizing", () => {
       edge: 0.3,
       confidence: 0.95,
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -602,7 +602,7 @@ describe("executeSignal confidence-tier sizing", () => {
       edge: 0.3,
       confidence: 0.92, // below threshold but above minConfidence
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -624,7 +624,7 @@ describe("executeSignal confidence-tier sizing", () => {
       edge: 0.3,
       confidence: 0.99, // would clear any threshold
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -646,7 +646,7 @@ describe("executeSignal confidence-tier sizing", () => {
       side: "yes",
       confidence: 0.99,
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeNull();
   });
 
@@ -665,7 +665,7 @@ describe("executeSignal confidence-tier sizing", () => {
       edge: 0.3,
       confidence: 0.97,
     });
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
@@ -688,11 +688,113 @@ describe("executeSignal confidence-tier sizing", () => {
       confidence: 0.90, // below threshold → no flat, fall back to Kelly
     });
     // balance 20000 * 0.025 Kelly cap = 500¢ → 10 contracts @ 50¢
-    const orderId = await service.executeSignal(signal, 20000);
+    const { orderId } = await service.executeSignal(signal, 20000);
     expect(orderId).toBeString();
 
     const [order] = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
     expect(order.quantity).toBe(10); // Kelly path
+  });
+});
+
+describe("executeSignal minContractPrice high-confidence bypass", () => {
+  test("blocks cheap contract when confidence below highConfidenceThreshold", async () => {
+    (mockBotConfig as any).minContractPrice = 15;
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    const service = new ExecutionService(stubKalshi);
+
+    // 92% confidence on a 1¢ market — exactly the high-edge tail scenario,
+    // but confidence here is BELOW the threshold so the filter still applies.
+    const signal = makeSignal({
+      estimatedProb: 0.92,
+      marketPrice: 0.01,
+      edge: 0.27,
+      side: "yes",
+      confidence: 0.90,
+    });
+    const { orderId, skipReason } = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("min");
+  });
+
+  test("allows cheap contract when confidence meets highConfidenceThreshold", async () => {
+    (mockBotConfig as any).minContractPrice = 15;
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0.95;
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    mockBotConfig.maxExposurePerTicker = 2000;
+    mockBotConfig.maxContractsPerOrder = 200;
+    mockBotConfig.minBetSizeCents = 0;
+    const service = new ExecutionService(stubKalshi);
+
+    // Same high-edge signal but conf=0.97 (above threshold) → bypass the filter
+    const signal = makeSignal({
+      estimatedProb: 0.92,
+      marketPrice: 0.01,
+      edge: 0.27,
+      side: "yes",
+      confidence: 0.97,
+    });
+    const { orderId } = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeString();
+  });
+
+  test("threshold disabled (0) keeps minContractPrice filter active", async () => {
+    (mockBotConfig as any).minContractPrice = 15;
+    mockBotConfig.flatBetSizeCents = 500;
+    mockBotConfig.highConfidenceThreshold = 0; // disabled
+    mockBotConfig.highConfidenceBetSizeCents = 1000;
+    const service = new ExecutionService(stubKalshi);
+
+    // Even a 0.99 confidence signal cannot bypass when the threshold is disabled
+    const signal = makeSignal({
+      estimatedProb: 0.92, marketPrice: 0.01, edge: 0.27, side: "yes", confidence: 0.99,
+    });
+    const { orderId, skipReason } = await service.executeSignal(signal, 20000);
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("min");
+  });
+});
+
+describe("executeSignal skip reason propagation", () => {
+  test("returns specific reason for max-positions skip", async () => {
+    mockBotConfig.maxOpenPositions = 1;
+    const db = getDb();
+    db.insert(positions).values({
+      ticker: "OTHER-TICKER", side: "yes", quantity: 1, avgEntryPrice: 50,
+      costBasis: 50, marketValue: 50, unrealizedPnl: 0,
+      openedAt: "2026-03-04T00:00:00Z", updatedAt: "2026-03-04T00:00:00Z",
+    }).run();
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(makeSignal(), 10000);
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("max positions");
+  });
+
+  test("returns specific reason for cooldown skip", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal();
+    recordExit(signal.ticker);
+    const { orderId, skipReason } = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("cooldown");
+  });
+
+  test("returns specific reason for negative-edge Kelly skip", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const signal = makeSignal({ estimatedProb: 0.3, marketPrice: 0.5, edge: -0.2, side: "yes" });
+    const { orderId, skipReason } = await service.executeSignal(signal, 10000);
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("Kelly");
+  });
+
+  test("success returns orderId and null skipReason", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(makeSignal(), 10000);
+    expect(orderId).toBeString();
+    expect(skipReason).toBeNull();
   });
 });
 
@@ -724,7 +826,7 @@ describe("loss-based re-entry guard", () => {
     // The signal edgeThreshold is 0.15, so 1.5x = 0.225
     const signal = makeSignal({ edge: 0.18, edgeThreshold: 0.15 });
 
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeNull(); // blocked by loss guard
   });
 
@@ -737,7 +839,7 @@ describe("loss-based re-entry guard", () => {
     // Signal with high edge (above 1.5x threshold)
     const signal = makeSignal({ edge: 0.30, edgeThreshold: 0.15 });
 
-    const orderId = await service.executeSignal(signal, 10000);
+    const { orderId } = await service.executeSignal(signal, 10000);
     expect(orderId).toBeString();
     expect(orderId).toStartWith("dry-");
   });

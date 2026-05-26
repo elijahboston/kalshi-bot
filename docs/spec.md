@@ -126,6 +126,7 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/conviction-sizing.md`](improvements/conviction-sizing.md) | 2026-04-23: shift from Kelly-as-sizer to flat $5 bets behind a strict edge+confidence gate; activate historical-prior blend. Includes the post-funding knob list. |
 | [`improvements/confidence-tier-sizing.md`](improvements/confidence-tier-sizing.md) | 2026-05-23: scale flat bets to $10 on signals with `confidence ≥ 0.95` — data shows that bucket is 56% win / +$8.4k while 0.90–0.95 is 32% / –$5.6k, so only the top band tiers up. |
 | [`improvements/calibration-deep-dive-2026-05.md`](improvements/calibration-deep-dive-2026-05.md) | 2026-05-26: two compounding estimator bugs explained the post-restart NO bleed — historicalHitRate ignored bracket arguments (pulled toward wrong baseline) and CDF/counting blend was inverted (crushed the correct CDF estimate). Both fixed. |
+| [`improvements/execution-unblock-2026-05-26.md`](improvements/execution-unblock-2026-05-26.md) | 2026-05-26: audit found 99% of actionable signals (incl. 100% of tails) being silently dropped. Bypassed `minContractPrice` for high-conf signals, disabled profit reserve in dry_run, and propagated specific skip reasons to `signals.skip_reason` for future debuggability. |
 
 ---
 
