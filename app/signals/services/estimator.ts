@@ -1,4 +1,4 @@
-import { getDb, stationBias, calibration, eq, and, gte } from "@kcb/db";
+import { getDb, stationBias, calibration, markets, eq, and, gte, sql } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { createLogger } from "@kcb/engine";
 import type { Market } from "@kcb/db";
@@ -208,11 +208,17 @@ export class ProbabilityEstimator {
         normalCdf(market.bracketLow!, corrMean, sigmaUsed);
     }
 
-    // Blend counting and CDF based on ensemble size
-    const countingWeight = isPrecipCategory
-      ? 1.0
+    // Blend CDF and counting, weighted by ensemble size. With many members
+    // (>=100), the sigma estimate is reliable and the normal-CDF integral over
+    // a tight bracket is much smoother than the raw count of members landing
+    // inside that bracket. With few members, sigma is shaky so we lean on
+    // counting instead. Previously the weighting was inverted (counting
+    // dominated at large ensembles), which crushed CDF's correct ~30-40%
+    // estimates on tight near-mean brackets down to counting's noisy 5-10%.
+    const cdfWeight = isPrecipCategory
+      ? 0
       : Math.min(1, correctedValues.length / 200);
-    const rawProbability = countingWeight * countingProb + (1 - countingWeight) * cdfProb;
+    const rawProbability = cdfWeight * cdfProb + (1 - cdfWeight) * countingProb;
 
     // Historical-prior blend. When the estimator's ensemble+CDF view conflicts
     // with observed historical hit rates for the same station/category/bracket,
@@ -222,7 +228,7 @@ export class ProbabilityEstimator {
       market.stationId,
       market.category,
       market.bracketLow,
-      market.bracketHigh ?? market.bracketLow
+      market.bracketHigh
     );
     const priorWeight = getConfig().bot.historicalPriorWeight;
     let blendedProbability = rawProbability;
@@ -326,15 +332,24 @@ export class ProbabilityEstimator {
   }
 
   /**
-   * Compute historical hit rate from resolved calibration records
-   * for the same station, category, and bracket range.
-   * Returns null if fewer than 5 data points are available.
+   * Compute historical hit rate from resolved calibration records for the same
+   * station, category, and *similar bracket position*. Joins with the markets
+   * table to filter by bracket center proximity (±BRACKET_HIST_TOLERANCE °F).
+   * Tail markets are filtered separately by threshold proximity.
+   *
+   * Returns null if fewer than 5 matching data points are available.
+   *
+   * Why this filter exists: without it, the function pooled YES rates across
+   * every bracket at a station — including the long tail of far-from-mean
+   * brackets that almost never hit YES — yielding ~17% baseline across the
+   * board. That stale baseline then dragged the historical-prior blend toward
+   * NO regardless of the bracket actually being priced.
    */
   async getHistoricalHitRate(
     stationId: string,
     category: string,
     bracketLow: number,
-    bracketHigh: number
+    bracketHigh: number | null
   ): Promise<number | null> {
     const config = getConfig();
     const db = getDb();
@@ -342,16 +357,26 @@ export class ProbabilityEstimator {
       Date.now() - config.calibration.calibrationWindowDays * 86400_000
     ).toISOString();
 
+    const isTail = bracketHigh == null;
+    const queryCenter = isTail ? bracketLow : (bracketLow + bracketHigh) / 2;
+    const tolerance = BRACKET_HIST_TOLERANCE_F;
+
+    const proximityClause = isTail
+      ? sql`${markets.bracketHigh} IS NULL AND ABS(${markets.bracketLow} - ${queryCenter}) <= ${tolerance}`
+      : sql`${markets.bracketHigh} IS NOT NULL AND ABS((${markets.bracketLow} + ${markets.bracketHigh}) / 2.0 - ${queryCenter}) <= ${tolerance}`;
+
     const rows = await db
       .select({
         actualOutcome: calibration.actualOutcome,
       })
       .from(calibration)
+      .innerJoin(markets, eq(calibration.ticker, markets.ticker))
       .where(
         and(
           eq(calibration.stationId, stationId),
           eq(calibration.category, category),
-          gte(calibration.resolvedAt, cutoff)
+          gte(calibration.resolvedAt, cutoff),
+          proximityClause
         )
       );
 
@@ -361,6 +386,11 @@ export class ProbabilityEstimator {
     return hits / rows.length;
   }
 }
+
+/** Window (°F) for matching "similar" brackets in getHistoricalHitRate. ±3°F
+ * captures ~5–6 adjacent 1°F brackets per station — enough sample size while
+ * keeping the population climatologically relevant to the query bracket. */
+const BRACKET_HIST_TOLERANCE_F = 3;
 
 // ── Helpers ────────────────────────────────────────────────
 

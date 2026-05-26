@@ -8,7 +8,7 @@ import {
   localHourAtStation,
   estimateDiurnalOffset,
 } from "./estimator";
-import { runMigrations, getDb, calibration, stationBias } from "@kcb/db";
+import { runMigrations, getDb, calibration, stationBias, markets } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 
 // Use real in-memory DB — DO NOT mock @kcb/db, it leaks globally
@@ -18,6 +18,7 @@ beforeEach(() => {
   const db = getDb();
   db.delete(calibration).run();
   db.delete(stationBias).run();
+  db.delete(markets).run();
 });
 
 describe("mean", () => {
@@ -111,6 +112,31 @@ function makeCalibrationRow(overrides: Partial<any> = {}) {
   };
 }
 
+/** Insert a markets row matching the given ticker/bracket so that the
+ *  bracket-filtered getHistoricalHitRate join finds it. Defaults match the
+ *  default makeCalibrationRow ticker + 30-31°F bracket. */
+function seedMarketRow(overrides: Partial<any> = {}) {
+  const db = getDb();
+  const row = {
+    ticker: "KXHIGHNY-25FEB19-B30",
+    eventTicker: "KXHIGHNY-25FEB19",
+    seriesTicker: "KXHIGHNY",
+    title: "test market",
+    category: "high_temp",
+    stationId: "KNYC",
+    targetDate: "2025-02-19",
+    bracketLow: 30,
+    bracketHigh: 31,
+    marketType: "bracket",
+    status: "settled",
+    discoveredAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+  db.insert(markets).values(row).onConflictDoNothing().run();
+  return row;
+}
+
 function makeMarket() {
   return {
     ticker: "KXHIGHNY-25FEB19-B30",
@@ -196,6 +222,7 @@ describe("ProbabilityEstimator — historical prior blend", () => {
 
   test("weight=0 leaves probability unchanged even when historical rate exists", async () => {
     const db = getDb();
+    seedMarketRow();
     for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
     }
@@ -212,6 +239,7 @@ describe("ProbabilityEstimator — historical prior blend", () => {
 
   test("weight>0 blends raw probability toward historical hit rate", async () => {
     const db = getDb();
+    seedMarketRow();
     for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
     }
@@ -243,6 +271,7 @@ describe("ProbabilityEstimator — historical prior blend", () => {
 
   test("weight clamped to [0, 1]", async () => {
     const db = getDb();
+    seedMarketRow();
     for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
     }
@@ -259,8 +288,9 @@ describe("ProbabilityEstimator — historical prior blend", () => {
 });
 
 describe("getHistoricalHitRate", () => {
-  test("returns null when fewer than 5 calibration rows", async () => {
+  test("returns null when fewer than 5 matching calibration rows", async () => {
     const db = getDb();
+    seedMarketRow();
     for (let i = 0; i < 3; i++) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: i % 2 })).run();
     }
@@ -272,6 +302,7 @@ describe("getHistoricalHitRate", () => {
 
   test("returns hit rate when sufficient data", async () => {
     const db = getDb();
+    seedMarketRow();
     // 3 hits out of 5
     for (const outcome of [1, 1, 1, 0, 0]) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
@@ -284,6 +315,7 @@ describe("getHistoricalHitRate", () => {
 
   test("returns 1.0 when all outcomes are YES", async () => {
     const db = getDb();
+    seedMarketRow();
     for (let i = 0; i < 5; i++) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: 1 })).run();
     }
@@ -295,6 +327,7 @@ describe("getHistoricalHitRate", () => {
 
   test("returns 0.0 when all outcomes are NO", async () => {
     const db = getDb();
+    seedMarketRow();
     for (let i = 0; i < 5; i++) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: 0 })).run();
     }
@@ -308,6 +341,111 @@ describe("getHistoricalHitRate", () => {
     const estimator = new ProbabilityEstimator();
     const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
     expect(result).toBeNull();
+  });
+
+  test("filters out brackets whose center is outside the ±3°F tolerance", async () => {
+    const db = getDb();
+    // Seed 6 rows: 3 close brackets (center 30.5, within tolerance of query 30.5)
+    // and 3 far brackets (center 50.5, far outside ±3°F). Far rows are all YES;
+    // close rows are all NO. Only the close NO rows should be counted.
+    seedMarketRow({ ticker: "KXHIGHNY-CLOSE-B30", bracketLow: 30, bracketHigh: 31 });
+    seedMarketRow({ ticker: "KXHIGHNY-FAR-B50", bracketLow: 50, bracketHigh: 51 });
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `close-${i}`,
+        ticker: "KXHIGHNY-CLOSE-B30",
+        actualOutcome: 0, // NO
+      })).run();
+    }
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `far-${i}`,
+        ticker: "KXHIGHNY-FAR-B50",
+        actualOutcome: 1, // YES — should be filtered out
+      })).run();
+    }
+
+    const estimator = new ProbabilityEstimator();
+    // Query center = 30.5. Tolerance ±3°F → matches B30 (center 30.5),
+    // excludes B50 (center 50.5, distance 20°F).
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(0); // only close NO rows counted
+  });
+
+  test("includes brackets at the edge of the ±3°F tolerance", async () => {
+    const db = getDb();
+    // Query bracket 30-31 (center 30.5). Edge bracket 33-34 (center 33.5,
+    // distance 3.0) should match. Edge bracket 34-35 (center 34.5, distance
+    // 4.0) should NOT match.
+    seedMarketRow({ ticker: "KXHIGHNY-EDGE-B33", bracketLow: 33, bracketHigh: 34 });
+    seedMarketRow({ ticker: "KXHIGHNY-OUT-B34", bracketLow: 34, bracketHigh: 35 });
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `edge-${i}`, ticker: "KXHIGHNY-EDGE-B33", actualOutcome: 1,
+      })).run();
+    }
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `out-${i}`, ticker: "KXHIGHNY-OUT-B34", actualOutcome: 0,
+      })).run();
+    }
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(1.0); // only EDGE bracket rows (all YES) counted
+  });
+
+  test("tail markets only match other tails by threshold proximity", async () => {
+    const db = getDb();
+    // Tail query: bracketLow=79, bracketHigh=null (upper_tail >79°)
+    // Should match: other tail markets within ±3°F of threshold
+    // Should NOT match: regular bracket markets even at similar position
+    seedMarketRow({
+      ticker: "KXHIGHNY-TAIL-T79", bracketLow: 79, bracketHigh: null, marketType: "upper_tail",
+    });
+    seedMarketRow({
+      ticker: "KXHIGHNY-BRACKET-B79", bracketLow: 79, bracketHigh: 80, marketType: "bracket",
+    });
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `tail-${i}`, ticker: "KXHIGHNY-TAIL-T79", actualOutcome: 1,
+      })).run();
+    }
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `brk-${i}`, ticker: "KXHIGHNY-BRACKET-B79", actualOutcome: 0,
+      })).run();
+    }
+
+    const estimator = new ProbabilityEstimator();
+    // Tail query with bracketHigh=null
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 79, null);
+    expect(result).toBe(1.0); // only tail rows counted, all YES
+  });
+
+  test("bracket query excludes tail-market rows", async () => {
+    const db = getDb();
+    // Mirror of the above: bracket query should NOT pick up tail-market rows.
+    seedMarketRow({
+      ticker: "KXHIGHNY-B30", bracketLow: 30, bracketHigh: 31, marketType: "bracket",
+    });
+    seedMarketRow({
+      ticker: "KXHIGHNY-T31", bracketLow: 31, bracketHigh: null, marketType: "upper_tail",
+    });
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `brk-${i}`, ticker: "KXHIGHNY-B30", actualOutcome: 0,
+      })).run();
+    }
+    for (let i = 0; i < 5; i++) {
+      db.insert(calibration).values(makeCalibrationRow({
+        id: `tail-${i}`, ticker: "KXHIGHNY-T31", actualOutcome: 1,
+      })).run();
+    }
+
+    const estimator = new ProbabilityEstimator();
+    const result = await estimator.getHistoricalHitRate("KNYC", "high_temp", 30, 31);
+    expect(result).toBe(0.0); // only bracket rows counted, all NO
   });
 });
 
