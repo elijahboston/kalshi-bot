@@ -131,11 +131,13 @@ export class ProbabilityEstimator {
 
     // Step 3.5: Determine sigma for CDF computation
     // Blend empirical sigma (std of historical forecast errors) with ensemble spread,
-    // weighted by sample size. Pure-empirical at n>=50, pure-ensemble at n=0. The
-    // residuals fit on a small bias-correction window are systematically tighter
-    // than out-of-sample errors (overfit to the same data the bias was estimated on),
-    // so weighting toward ensemble at small n widens sigma where the empirical
-    // estimate is least trustworthy.
+    // weighted by sample size, capped at MAX_EMPIRICAL_SIGMA_WEIGHT. The residuals
+    // fit on a small bias-correction window are systematically tighter than
+    // out-of-sample errors (overfit to the same data the bias was estimated on).
+    // Per 2026-05-27 validation, even at n>=50 the empirical sigma consistently
+    // underestimates real forecast variability — the cap keeps 30% ensemble
+    // spread permanently in the blend, preventing the CDF from collapsing to
+    // overconfident point estimates on tight near-mean brackets.
     let sigmaSource: "empirical" | "ensemble" = "ensemble";
     let sigmaUsed = corrStd;
     let empiricalSigmaWeight: number | null = null;
@@ -144,7 +146,7 @@ export class ProbabilityEstimator {
     if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize > 0) {
       const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
       if (empiricalSigma != null && empiricalSigma > 0) {
-        const w = Math.min(1, biasCorrection.sampleSize / 50);
+        const w = Math.min(MAX_EMPIRICAL_SIGMA_WEIGHT, biasCorrection.sampleSize / 50);
         sigmaUsed = w * empiricalSigma + (1 - w) * corrStd;
         sigmaSource = w >= 0.5 ? "empirical" : "ensemble";
         empiricalSigmaWeight = w;
@@ -391,6 +393,13 @@ export class ProbabilityEstimator {
  * captures ~5–6 adjacent 1°F brackets per station — enough sample size while
  * keeping the population climatologically relevant to the query bracket. */
 const BRACKET_HIST_TOLERANCE_F = 3;
+
+/** Cap on empirical-sigma blend weight. The empirical std is residuals-on-its-
+ * own-bias-window — systematically tighter than out-of-sample forecast error.
+ * Capping at 0.7 keeps 30% ensemble spread permanently in the blend, which
+ * prevents the CDF from collapsing to overconfident estimates on tight
+ * near-mean brackets (the dominant failure mode of the post-restart bot). */
+const MAX_EMPIRICAL_SIGMA_WEIGHT = 0.7;
 
 // ── Helpers ────────────────────────────────────────────────
 

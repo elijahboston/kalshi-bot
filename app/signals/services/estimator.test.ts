@@ -691,7 +691,7 @@ describe("ProbabilityEstimator — precip/snow", () => {
 });
 
 describe("ProbabilityEstimator — empirical sigma blend", () => {
-  test("blends empirical + ensemble sigma weighted by sample size (n=50 → fully empirical)", async () => {
+  test("blends empirical + ensemble sigma at n=50, capped at MAX_EMPIRICAL_SIGMA_WEIGHT (0.7)", async () => {
     const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
@@ -700,7 +700,7 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
       forecastHorizonDays: 1,
       meanBias: 0.5,
       stdBias: 1.2, // empirical forecast error std
-      sampleSize: 50, // saturates the blend at full empirical weight
+      sampleSize: 50, // would saturate at 1.0 without the cap
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
@@ -711,8 +711,12 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
     const result = await estimator.estimate(makeMarket(), ensemble);
 
     expect(result.reasoning.sigmaSource).toBe("empirical");
-    expect(result.reasoning.empiricalSigmaWeight).toBe(1);
-    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.2, 6);
+    // Weight capped at 0.7 — keeps 30% ensemble spread in the blend to prevent
+    // empirical-overfit from collapsing sigma on tight near-mean brackets.
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.7, 6);
+    // Sigma is a weighted blend: 0.7 × empirical(1.2) + 0.3 × corrStd(ensemble)
+    const corrStd = std([28, 29, 29, 30, 30, 30, 31, 31, 32, 33].map((v) => v - 0.5));
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.7 * 1.2 + 0.3 * corrStd, 6);
     expect(result.reasoning.cdfProbability).toBeGreaterThan(0.2);
   });
 
@@ -812,7 +816,7 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
     expect(result.reasoning.sigmaSource).toBe("ensemble");
   });
 
-  test("empirical sigma concentrates probability on correct bracket (n=50 saturated)", async () => {
+  test("MAX_EMPIRICAL_SIGMA_WEIGHT cap kicks in at n=35 (n/50=0.7)", async () => {
     const db = getDb();
     db.insert(stationBias).values({
       id: "KNYC_high_temp_1",
@@ -821,7 +825,36 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
       forecastHorizonDays: 1,
       meanBias: 0,
       stdBias: 1.0,
-      sampleSize: 50, // fully empirical
+      sampleSize: 200, // arbitrary high — w would be min(1, 200/50)=1 without cap
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [27, 28, 29, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), ensemble);
+
+    // Cap is 0.7 regardless of how large n grows.
+    expect(result.reasoning.empiricalSigmaWeight).toBeCloseTo(0.7, 6);
+    expect(result.reasoning.sigmaSource).toBe("empirical"); // w >= 0.5 keeps the label
+    const corrStd = std(ensemble);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.7 * 1.0 + 0.3 * corrStd, 6);
+    // Blended sigma must be strictly between empirical (1.0) and ensemble (~2.16)
+    expect(result.reasoning.sigmaUsed).toBeGreaterThan(1.0);
+    expect(result.reasoning.sigmaUsed).toBeLessThan(corrStd);
+  });
+
+  test("empirical sigma + capped blend concentrates probability on correct bracket (n=50)", async () => {
+    const db = getDb();
+    db.insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 1.0,
+      sampleSize: 50, // would be fully empirical without the cap
       windowDays: 30,
       updatedAt: new Date().toISOString(),
     }).run();
@@ -832,9 +865,12 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
 
     const result = await estimator.estimate(makeMarket(), ensemble);
 
-    // With sigma=1.0 and mean=30.5, P(30 <= X < 31) should be ~38%
-    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.0, 6);
-    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.3);
+    // With cap at 0.7: sigmaUsed = 0.7 × 1.0 + 0.3 × std(ensemble)
+    const corrStd = std([30, 30, 30.5, 30.5, 31, 31]);
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.7 + 0.3 * corrStd, 6);
+    // Slightly wider than pure-empirical (1.0) → CDF P(bracket) shifts down a
+    // bit, but should still be the dominant probability for a centered mean.
+    expect(result.reasoning.cdfProbability).toBeGreaterThan(0.25);
   });
 });
 
