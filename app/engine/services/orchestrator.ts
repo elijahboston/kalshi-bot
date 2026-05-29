@@ -140,7 +140,14 @@ export async function initOrchestrator(): Promise<void> {
           observation = observationCache.get(market.stationId) ?? undefined;
         }
 
-        const estimate = await estimator.estimate(market, ensembleValues, observation);
+        const marketPriceForEstimator =
+          market.lastYesPrice != null ? market.lastYesPrice / 100 : undefined;
+        const estimate = await estimator.estimate(
+          market,
+          ensembleValues,
+          observation,
+          marketPriceForEstimator
+        );
         estimates.push({ market, estimate });
       } catch (err) {
         log.warn(

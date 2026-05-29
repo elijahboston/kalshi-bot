@@ -287,6 +287,89 @@ describe("ProbabilityEstimator — historical prior blend", () => {
   });
 });
 
+describe("ProbabilityEstimator — market prior blend", () => {
+  const originalWeight = getConfig().bot.marketPriorWeight;
+
+  afterEach(() => {
+    getConfig().bot.marketPriorWeight = originalWeight;
+  });
+
+  test("weight=0 leaves probability unchanged even when marketPrice is provided", async () => {
+    getConfig().bot.marketPriorWeight = 0;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw prob ~0
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.75);
+
+    expect(result.reasoning.marketPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6); // unchanged tail floor
+  });
+
+  test("weight>0 blends probability toward market price", async () => {
+    getConfig().bot.marketPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    // Ensemble centered well below bracket → raw prob ~0, post-floor 0.03
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.75);
+
+    expect(result.reasoning.marketPriorBlend).not.toBeNull();
+    expect(result.reasoning.marketPriorBlend!.weight).toBe(0.5);
+    expect(result.reasoning.marketPriorBlend!.marketPrice).toBe(0.75);
+    // before = ~0, after = 0.5 * ~0 + 0.5 * 0.75 = ~0.375 (above the 0.03 floor)
+    expect(result.probability).toBeGreaterThan(0.35);
+    expect(result.probability).toBeLessThan(0.40);
+  });
+
+  test("marketPrice undefined → no blend applied", async () => {
+    getConfig().bot.marketPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble); // no marketPrice arg
+
+    expect(result.reasoning.marketPriorBlend).toBeNull();
+    expect(result.probability).toBeCloseTo(0.03, 6);
+  });
+
+  test("weight clamped to [0, 1]", async () => {
+    getConfig().bot.marketPriorWeight = 2; // nonsense, should clamp to 1
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14];
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.75);
+
+    expect(result.reasoning.marketPriorBlend!.weight).toBe(1);
+    // weight=1 → probability fully follows the market price
+    expect(result.probability).toBeCloseTo(0.75, 6);
+  });
+
+  test("blend composes after historical-prior blend", async () => {
+    const db = getDb();
+    seedMarketRow();
+    for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
+      db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
+    }
+    getConfig().bot.historicalPriorWeight = 0.3;
+    getConfig().bot.marketPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw prob ~0
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.9);
+
+    // First: historical blend lifts raw ~0 toward 0.5 (hit rate) at weight 0.3
+    //   → ~0.15
+    // Then: market blend pulls toward 0.9 at weight 0.5
+    //   → 0.5 * 0.15 + 0.5 * 0.9 = ~0.525
+    expect(result.reasoning.historicalPriorBlend).not.toBeNull();
+    expect(result.reasoning.marketPriorBlend).not.toBeNull();
+    expect(result.reasoning.marketPriorBlend!.probabilityBefore).toBeGreaterThan(0.13);
+    expect(result.reasoning.marketPriorBlend!.probabilityBefore).toBeLessThan(0.17);
+    expect(result.probability).toBeGreaterThan(0.50);
+    expect(result.probability).toBeLessThan(0.55);
+  });
+});
+
 describe("getHistoricalHitRate", () => {
   test("returns null when fewer than 5 matching calibration rows", async () => {
     const db = getDb();

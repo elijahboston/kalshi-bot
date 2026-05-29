@@ -8,6 +8,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
+## 2026-05-29
+
+### `estimator` — Blend market price as a final-stage Bayesian prior
+- **Change:** New runtime knob `market_prior_weight` (default 0). When > 0 and a market price is available, the estimator's final probability is blended toward the market: `final = (1−w) × pModel + w × pMarket`. Applied after the historical-prior blend, before the tail floor. Reasoning trace gains `marketPriorBlend`.
+- **Why:** 14-day audit shows the market's Brier (0.134) beats the model's (0.143), and the bot's "extreme edge" 50pp+ bucket (79 trades) ran 19% win rate / −$64 — the more confident the model was that the market was wrong, the more it lost. A uniform blend at w=0.3 maps that disastrous tail into the historically-profitable 30–50pp range without disturbing small-edge trades.
+- **Doc:** [`improvements/market-prior-2026-05-29.md`](improvements/market-prior-2026-05-29.md)
+
 ## 2026-05-27
 
 ### `estimator` — Cap empirical sigma weight at 0.7 + raise historical prior to 0.5

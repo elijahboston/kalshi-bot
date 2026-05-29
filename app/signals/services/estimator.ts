@@ -53,6 +53,8 @@ export interface ReasoningTrace {
   historicalHitRate: number | null;
   /** Historical-prior blend applied (null when weight=0 or hit rate unavailable) */
   historicalPriorBlend: { weight: number; rawProbability: number; blendedProbability: number } | null;
+  /** Market-prior blend applied (null when weight=0 or marketPrice not provided) */
+  marketPriorBlend: { weight: number; marketPrice: number; probabilityBefore: number; probabilityAfter: number } | null;
 }
 
 export class ProbabilityEstimator {
@@ -67,11 +69,13 @@ export class ProbabilityEstimator {
    * precipitation distributions are zero-inflated and skewed, not Gaussian.
    *
    * @param observation Optional same-day observation to tighten sigma
+   * @param marketPrice Optional market-implied P(YES) in [0, 1] used as a final-stage Bayesian prior (gated by config.bot.marketPriorWeight)
    */
   async estimate(
     market: Market,
     ensembleValues: number[],
-    observation?: ObservationAdjustment
+    observation?: ObservationAdjustment,
+    marketPrice?: number
   ): Promise<EstimateResult> {
     const isTail = market.marketType === "upper_tail" || market.marketType === "lower_tail";
     if (!market.stationId || market.bracketLow == null || (!isTail && market.bracketHigh == null)) {
@@ -245,6 +249,27 @@ export class ProbabilityEstimator {
       };
     }
 
+    // Market-prior blend. The market is empirically better-calibrated than the
+    // estimator on tight near-mean brackets (Brier 0.134 vs 0.143 over the
+    // 2026-05 audit window). Pulling the model toward market price shrinks the
+    // disastrous "extreme edge" tail (50pp+ implied edge bucket: 19% win rate,
+    // -$64 PnL) without sacrificing the productive 30-50pp band. Gated by
+    // config.bot.marketPriorWeight (0 = disabled). See
+    // improvements/market-prior-2026-05-29.md.
+    const marketPriorWeight = getConfig().bot.marketPriorWeight;
+    let marketPriorBlend: ReasoningTrace["marketPriorBlend"] = null;
+    if (marketPriorWeight > 0 && marketPrice != null) {
+      const clampedWeight = Math.min(1, Math.max(0, marketPriorWeight));
+      const before = blendedProbability;
+      blendedProbability = (1 - clampedWeight) * before + clampedWeight * marketPrice;
+      marketPriorBlend = {
+        weight: clampedWeight,
+        marketPrice,
+        probabilityBefore: before,
+        probabilityAfter: blendedProbability,
+      };
+    }
+
     // Tail-probability floor. Without empirical bias data we can't trust narrow
     // sigma values, so clamp the returned probability away from 0/1. The raw
     // cdfProb/countingProb in the reasoning trace are untouched for debugging.
@@ -287,6 +312,7 @@ export class ProbabilityEstimator {
       countingProbability: countingProb,
       historicalHitRate,
       historicalPriorBlend,
+      marketPriorBlend,
     };
 
     log.debug(
