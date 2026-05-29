@@ -145,14 +145,16 @@ export function EquityCurve() {
   if (data.length === 0) {
     return (
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 px-5 pb-2 pt-4">
+        <CardHeader className="px-5 pb-2 pt-4">
           <CardTitle className="text-sm font-semibold">Equity Curve</CardTitle>
-          <SpanToggle value={equitySpan} onChange={setEquitySpan} />
         </CardHeader>
-        <CardContent className="flex h-[200px] items-center justify-center text-sm text-muted-foreground">
-          {equitySpan === "all"
-            ? "Waiting for balance history..."
-            : `No balance history in the last ${equitySpan === "7d" ? "7 days" : "30 days"}.`}
+        <CardContent className="flex flex-col items-center justify-center gap-3 px-5 pb-4 pt-2">
+          <div className="flex h-[200px] items-center justify-center text-sm text-muted-foreground">
+            {equitySpan === "all"
+              ? "Waiting for balance history..."
+              : `No balance history in the last ${equitySpan === "7d" ? "7 days" : "30 days"}.`}
+          </div>
+          <SpanToggle value={equitySpan} onChange={setEquitySpan} />
         </CardContent>
       </Card>
     )
@@ -160,9 +162,8 @@ export function EquityCurve() {
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 px-5 pb-2 pt-4">
+      <CardHeader className="px-5 pb-2 pt-4">
         <CardTitle className="text-sm font-semibold">Equity Curve</CardTitle>
-        <SpanToggle value={equitySpan} onChange={setEquitySpan} />
       </CardHeader>
       <CardContent className="px-2 pb-3 pt-0">
         <ResponsiveContainer width="100%" height={300}>
@@ -185,15 +186,18 @@ export function EquityCurve() {
             <Area type="monotone" dataKey="position" stackId="1" stroke="hsl(200, 70%, 70%)" strokeWidth={1.5} fill="url(#gradPosition)" animationDuration={600} />
           </AreaChart>
         </ResponsiveContainer>
-        <div className="flex items-center justify-center gap-5 pt-2">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-block h-2 w-3 rounded-sm bg-[hsl(200,70%,50%)]" />
-            <span className="text-[11px] text-muted-foreground">Cash</span>
+        <div className="flex items-center justify-between gap-4 px-3 pt-2">
+          <div className="flex items-center gap-5">
+            <div className="flex items-center gap-1.5">
+              <span className="inline-block h-2 w-3 rounded-sm bg-[hsl(200,70%,50%)]" />
+              <span className="text-[11px] text-muted-foreground">Cash</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="inline-block h-2 w-3 rounded-sm bg-[hsl(200,70%,70%)]" />
+              <span className="text-[11px] text-muted-foreground">Position Value</span>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-block h-2 w-3 rounded-sm bg-[hsl(200,70%,70%)]" />
-            <span className="text-[11px] text-muted-foreground">Position Value</span>
-          </div>
+          <SpanToggle value={equitySpan} onChange={setEquitySpan} />
         </div>
       </CardContent>
     </Card>
