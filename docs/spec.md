@@ -116,6 +116,8 @@ Drill into any subsystem here. Each doc is self-contained.
 
 Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improvements/). Read these first when working on accuracy, performance, or UI polish.
 
+**For a chronological summary of *what the bot actually does differently over time* — estimator, sizing, execution, calibration changes — see [`algorithm-changelog.md`](algorithm-changelog.md). Update it whenever you ship an algorithm change.**
+
 | Doc | What's inside |
 |-----|---------------|
 | [`improvements/forecast-sharpening.md`](improvements/forecast-sharpening.md) | Five changes to close the gap with top bots — **all done**: HRRR ingestion, sniper mode, empirical sigma, same-day observations, horizon-weighted model blending. Includes Monte Carlo ROI simulations. |
