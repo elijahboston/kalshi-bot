@@ -206,11 +206,17 @@ export async function initOrchestrator(): Promise<void> {
         edge = noEdge;
       }
 
-      // Get effective threshold (adaptive per-bucket)
-      const edgeThreshold = await getEffectiveThreshold(
+      // Get effective threshold (adaptive per-bucket) + per-station surcharge.
+      // The surcharge requires historically loss-making stations to clear a
+      // bigger edge bar — see improvements/per-station-surcharge-2026-05-29.md.
+      const baseThreshold = await getEffectiveThreshold(
         estimate.probability,
         market.seriesTicker
       );
+      const stationSurcharge = market.stationId
+        ? (config.bot.stationEdgeSurcharge[market.stationId] ?? 0)
+        : 0;
+      const edgeThreshold = baseThreshold + stationSurcharge;
 
       // Determine recommendation
       let recommendation: "buy_yes" | "buy_no" | "scout" | "skip" = "skip";
@@ -255,7 +261,10 @@ export async function initOrchestrator(): Promise<void> {
         recommendation = "scout";
         skipReason = `scout mode (${forecastHorizonHours!.toFixed(1)}h > ${sniperHorizon}h sniper window)`;
       } else if (edge < edgeThreshold) {
-        skipReason = `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢`;
+        skipReason =
+          stationSurcharge > 0
+            ? `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(baseThreshold * 100).toFixed(1)}¢ + ${(stationSurcharge * 100).toFixed(0)}¢ ${market.stationId} surcharge`
+            : `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢`;
       } else if (estimate.confidence < config.bot.minConfidence) {
         skipReason = `confidence ${estimate.confidence.toFixed(2)} < ${config.bot.minConfidence}`;
       } else if (!tailGate.allowed) {

@@ -1,5 +1,5 @@
-import { test, expect, beforeEach } from "bun:test";
-import { loadConfig } from "./index";
+import { test, expect, beforeEach, describe } from "bun:test";
+import { loadConfig, parseStationSurcharge } from "./index";
 
 // Clear any env overrides so we test pure defaults
 beforeEach(() => {
@@ -101,4 +101,54 @@ test("profit reserve env vars override defaults", () => {
   const config = loadConfig();
   expect(config.bot.seedCapital).toBe(10000);
   expect(config.bot.profitReservePct).toBe(0.75);
+});
+
+describe("parseStationSurcharge", () => {
+  test("empty / null / undefined → empty map", () => {
+    expect(parseStationSurcharge("")).toEqual({});
+    expect(parseStationSurcharge(null)).toEqual({});
+    expect(parseStationSurcharge(undefined)).toEqual({});
+  });
+
+  test("malformed JSON → empty map", () => {
+    expect(parseStationSurcharge("not json")).toEqual({});
+    expect(parseStationSurcharge("{KORD: 0.1}")).toEqual({});
+  });
+
+  test("non-object JSON → empty map", () => {
+    expect(parseStationSurcharge("42")).toEqual({});
+    expect(parseStationSurcharge("[1,2,3]")).toEqual({});
+    expect(parseStationSurcharge("null")).toEqual({});
+  });
+
+  test("parses valid station map", () => {
+    expect(parseStationSurcharge('{"KORD":0.15,"KLAX":0.10}')).toEqual({
+      KORD: 0.15,
+      KLAX: 0.1,
+    });
+  });
+
+  test("string values are coerced when numeric, dropped when not", () => {
+    expect(parseStationSurcharge('{"KORD":"0.10","KLAX":"bogus"}')).toEqual({
+      KORD: 0.1,
+    });
+  });
+
+  test("non-finite values are dropped", () => {
+    // JSON.stringify drops NaN/Infinity, but we still guard against runtime parsers
+    expect(parseStationSurcharge('{"KORD":1e9999}')).toEqual({});
+  });
+});
+
+test("stationEdgeSurcharge defaults to empty map", () => {
+  delete process.env.STATION_EDGE_SURCHARGE;
+  const config = loadConfig();
+  expect(config.bot.stationEdgeSurcharge).toEqual({});
+});
+
+test("STATION_EDGE_SURCHARGE env var populates the map", () => {
+  process.env.STATION_EDGE_SURCHARGE = '{"KORD":0.15,"KNYC":0.10}';
+  const config = loadConfig();
+  expect(config.bot.stationEdgeSurcharge).toEqual({ KORD: 0.15, KNYC: 0.1 });
+  delete process.env.STATION_EDGE_SURCHARGE;
 });

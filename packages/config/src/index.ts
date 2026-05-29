@@ -70,6 +70,8 @@ export interface BotConfig {
     marketPriorWeight: number;
     /** Max contract entry price (0-1) for tail markets (upper_tail/lower_tail). 0 = gate disabled. Tails historically bled — see improvements/tail-gate-2026-05-29.md. */
     tailMaxEntryPrice: number;
+    /** Per-station edge surcharge added to the adaptive edge threshold. Map of stationId → surcharge in [0, 1]. Stations missing from the map get 0. Used to require larger edge from historically loss-making stations — see improvements/per-station-surcharge-2026-05-29.md. */
+    stationEdgeSurcharge: Record<string, number>;
   };
 
   /** Calibration parameters */
@@ -128,6 +130,23 @@ function envNum(key: string, fallback: number): number {
   return Number.isNaN(n) ? fallback : n;
 }
 
+/** Parse a stationId→number JSON map. Returns {} for empty / malformed input. */
+export function parseStationSurcharge(raw: string | undefined | null): Record<string, number> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (!Number.isNaN(n) && Number.isFinite(n)) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** Map runtime_config DB keys to config paths */
 const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => void> = {
   dry_run: (c, v) => { c.bot.dryRun = v === "true" || v === "1"; },
@@ -161,6 +180,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   historical_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.historicalPriorWeight = n; },
   market_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorWeight = n; },
   tail_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.tailMaxEntryPrice = n; },
+  station_edge_surcharge: (c, v) => { c.bot.stationEdgeSurcharge = parseStationSurcharge(v); },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -212,6 +232,7 @@ export function loadConfig(): BotConfig {
       historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0.3), // blend toward observed historical hit rate
       marketPriorWeight: envNum("MARKET_PRIOR_WEIGHT", 0), // ship dark; activate via runtime_config row
       tailMaxEntryPrice: envNum("TAIL_MAX_ENTRY_PRICE", 0), // ship dark; runtime row sets 0.10
+      stationEdgeSurcharge: parseStationSurcharge(env("STATION_EDGE_SURCHARGE")), // ship empty; runtime row populates
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

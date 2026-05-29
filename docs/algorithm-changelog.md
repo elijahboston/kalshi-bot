@@ -10,6 +10,11 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ## 2026-05-29
 
+### `execution` — Per-station edge surcharge
+- **Change:** New runtime knob `station_edge_surcharge` (JSON stationId → surcharge map). Orchestrator adds the matching surcharge to the adaptive base threshold before gating. Stations missing from the map get 0. Combined threshold persists to `signals.edge_threshold`; skip reason names the surcharge.
+- **Why:** 60-day per-station PnL shows three durable losers (KORD −36% ROI, KLAX −40%, KNYC −19%) against three winners (KMIA +11%, KAUS +9%, KDEN 0%). Removing stations is too blunt; a soft surcharge lets them keep trading but only on the cleanest signals. Initial runtime values: KLAX/KORD +0.15, KNYC +0.10.
+- **Doc:** [`improvements/per-station-surcharge-2026-05-29.md`](improvements/per-station-surcharge-2026-05-29.md)
+
 ### `execution` — Tail-market entry gate by contract price
 - **Change:** New runtime knob `tail_max_entry_price` (default 0). When > 0, signals on `upper_tail` / `lower_tail` markets are blocked unless the contract price the bot would pay is ≤ the cap. Logic lives in new pure helper `evaluateTailGate` in `@kcb/signals`; orchestrator inserts it into the Phase 3 decision ladder with a queryable `signals.skip_reason`.
 - **Why:** Tails ran 11% win rate / −$38 over the audit window (9 trades, losses spanning 20–62¢ entries). The estimator isn't reliable enough on tails to take mid-priced positions. Restricting to deep-cheap entries (cap initially set to 0.10 in runtime_config) caps per-contract downside and forces correctness on rare events rather than coin-flip mid-priced tails.
