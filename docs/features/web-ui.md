@@ -94,7 +94,7 @@ All endpoints are on `http://localhost:3100`. WebSocket is `ws://localhost:3100/
 |-----------|----------------------|-------------------------|
 | **Status Bar** | `GET /api/status`, `GET /api/balance`, `GET /api/config` | `bot:status`, `balance:update` |
 | **KPI Row** | `GET /api/performance`, `GET /api/performance/win-rates` | `balance:update`, `market:resolved` |
-| **Equity Curve** | `GET /api/balance/history?limit=200` | `balance:update` (append point) |
+| **Equity Curve** | `GET /api/balance/history?limit=200&span=30d` (default; user toggle 7D/30D/All re-fetches with new `span`) | `balance:update` (refetch with current `span`) |
 | **Weekly Win-Rate Heatmap** | `GET /api/performance/daily-win-rates?days=84` | `market:resolved` (refetch) |
 | **Daily P&L** | `GET /api/performance/daily-pnl?days=14` | `market:resolved` (refetch) |
 | **Active Markets** | `GET /api/markets?status=open&limit=50` | `market:discovered`, `market:priceUpdate`, `signal:new` (merge edge/conf/estimate into row) |
@@ -183,7 +183,7 @@ Paste the following prompt into v0 to generate the frontend boilerplate:
 > - `GET /api/status` → bot state
 > - `GET /api/config` → bot config (for sniper horizon)
 > - `GET /api/balance` → current cash/portfolio
-> - `GET /api/balance/history?limit=200` → equity points `[{ totalEquity, balance, recordedAt }]`
+> - `GET /api/balance/history?limit=200&span=30d` → equity points `[{ totalEquity, balance, recordedAt }]`. `span` accepts `7d`, `30d`, or `all`; omitted = all. Default view = 30D, with in-UI toggle for 7D/30D/All. Selection is not persisted across reloads.
 > - `GET /api/positions` → `[{ ticker, side, quantity, avgEntryPrice, unrealizedPnl, ... }]`
 > - `GET /api/orders?limit=50` → `[{ orderId, ticker, action, side, limitPrice, quantity, filledQuantity, status, kellyFraction, dryRun, createdAt }]`
 > - `GET /api/signals?limit=20` → `[{ id, ticker, side, edge, confidence, recommendation, estimatedProb, marketPrice, createdAt }]`

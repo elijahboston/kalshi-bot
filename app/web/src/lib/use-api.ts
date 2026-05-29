@@ -20,6 +20,8 @@ import type {
   WsMessage,
 } from "./types"
 
+export type EquitySpan = "7d" | "30d" | "all"
+
 export interface ApiState {
   /** Connection & loading state */
   connected: boolean
@@ -34,6 +36,7 @@ export interface ApiState {
   signals: Signal[]
   orders: Order[]
   equityHistory: BalancePoint[]
+  equitySpan: EquitySpan
 
   /** Performance */
   performance: Performance | null
@@ -48,6 +51,10 @@ export interface ApiState {
   events: WsMessage[]
 }
 
+export interface ApiContextValue extends ApiState {
+  setEquitySpan: (span: EquitySpan) => void
+}
+
 const INITIAL_STATE: ApiState = {
   connected: false,
   loading: true,
@@ -59,6 +66,7 @@ const INITIAL_STATE: ApiState = {
   signals: [],
   orders: [],
   equityHistory: [],
+  equitySpan: "30d",
   performance: null,
   winRates: [],
   dailyPnl: [],
@@ -79,7 +87,7 @@ async function fetchJson<T>(path: string): Promise<T> {
  * Main data hook. Fires parallel REST fetches on mount,
  * opens a WebSocket, and routes incoming events to state.
  */
-export function useApi(): ApiState {
+export function useApi(): ApiContextValue {
   const [state, setState] = useState<ApiState>(INITIAL_STATE)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef(1000) // backoff start
@@ -90,6 +98,11 @@ export function useApi(): ApiState {
       if (mountedRef.current) setState((s) => ({ ...s, ...p }))
     },
     [],
+  )
+
+  const setEquitySpan = useCallback(
+    (span: EquitySpan) => patch({ equitySpan: span }),
+    [patch],
   )
 
   // ── REST initial load ──────────────────────────────────────
@@ -107,7 +120,7 @@ export function useApi(): ApiState {
         return Promise.allSettled([
           fetchJson<BotConfig>("/api/config"),
           fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
-          fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
+          fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}&span=30d`),
           fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
           fetchJson<Market[]>("/api/markets?status=open&limit=50"),
           fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`),
@@ -192,6 +205,7 @@ export function useApi(): ApiState {
       perfRefetchTimer.current = null
       const dryRun = stateRef.current.status?.dryRun
       const modeParam = dryRun == null ? "all" : dryRun ? "true" : "false"
+      const span = stateRef.current.equitySpan
       Promise.allSettled([
         fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`),
         fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
@@ -199,7 +213,7 @@ export function useApi(): ApiState {
         fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`),
         fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
         fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
-        fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}`),
+        fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}&span=${span}`),
         fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
       ]).then(([perf, bal, res, pnl, wr, dwr, eq, pos]) => {
         if (!mountedRef.current) return
@@ -342,5 +356,36 @@ export function useApi(): ApiState {
     }
   }, [patch])
 
-  return state
+  // ── Equity span refetch ────────────────────────────────────
+  // Refetch /api/balance/history when span or mode changes. Initialized to
+  // match the initial fetch (span=30d + current dryRun) so the first run
+  // after the initial load doesn't fire a duplicate request.
+  const lastHistoryFetchRef = useRef<{ span: EquitySpan; dryRun: boolean | null }>({
+    span: "30d",
+    dryRun: null,
+  })
+  useEffect(() => {
+    if (state.loading) return
+    const dryRun = state.status?.dryRun ?? null
+    const last = lastHistoryFetchRef.current
+    if (last.dryRun === null) {
+      // First post-load invocation: initial fetch already supplied this combo.
+      lastHistoryFetchRef.current = { span: state.equitySpan, dryRun }
+      return
+    }
+    if (last.span === state.equitySpan && last.dryRun === dryRun) return
+    lastHistoryFetchRef.current = { span: state.equitySpan, dryRun }
+    const modeParam = dryRun == null ? "all" : dryRun ? "true" : "false"
+    fetchJson<BalancePoint[]>(
+      `/api/balance/history?limit=200&dryRun=${modeParam}&span=${state.equitySpan}`,
+    )
+      .then((eq) => {
+        if (mountedRef.current) patch({ equityHistory: eq })
+      })
+      .catch(() => {
+        // Leave previous history in place on failure.
+      })
+  }, [state.equitySpan, state.status?.dryRun, state.loading, patch])
+
+  return { ...state, setEquitySpan }
 }

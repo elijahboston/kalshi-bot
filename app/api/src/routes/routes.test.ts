@@ -495,3 +495,69 @@ describe("dryRun query filter", () => {
     expect(live.body[0].pnl).toBe(200);
   });
 });
+
+describe("balance history span filter", () => {
+  const now = Date.now();
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+
+  function seedBalanceAt(
+    id: string,
+    balance: number,
+    dryRun: boolean,
+    recordedAt: string,
+  ) {
+    const db = getDb();
+    db.insert(balanceHistory).values({
+      id,
+      balance,
+      totalEquity: balance,
+      openPositions: 0,
+      realizedPnl: 0,
+      recordedAt,
+      dryRun,
+    }).run();
+  }
+
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(balanceHistory).run();
+
+    seedBalanceAt("bh-now", 100, true, iso(0));
+    seedBalanceAt("bh-5d", 200, true, iso(5 * 86_400_000));
+    seedBalanceAt("bh-20d", 300, true, iso(20 * 86_400_000));
+    seedBalanceAt("bh-60d", 400, true, iso(60 * 86_400_000));
+  });
+
+  test("span=7d returns rows within last 7 days", async () => {
+    const { status, body } = await get("/api/balance/history?span=7d&limit=100");
+    expect(status).toBe(200);
+    expect(body.map((r: any) => r.balance).sort((a: number, b: number) => a - b)).toEqual([100, 200]);
+  });
+
+  test("span=30d returns rows within last 30 days", async () => {
+    const { body } = await get("/api/balance/history?span=30d&limit=100");
+    expect(body.map((r: any) => r.balance).sort((a: number, b: number) => a - b)).toEqual([100, 200, 300]);
+  });
+
+  test("span=all returns every row", async () => {
+    const { body } = await get("/api/balance/history?span=all&limit=100");
+    expect(body).toHaveLength(4);
+  });
+
+  test("omitted span behaves like all", async () => {
+    const { body } = await get("/api/balance/history?limit=100");
+    expect(body).toHaveLength(4);
+  });
+
+  test("span and dryRun combine", async () => {
+    seedBalanceAt("bh-live-3d", 999, false, iso(3 * 86_400_000));
+    seedBalanceAt("bh-live-40d", 888, false, iso(40 * 86_400_000));
+
+    const { body } = await get("/api/balance/history?span=7d&dryRun=true&limit=100");
+    // Only paper rows in last 7 days
+    expect(body.map((r: any) => r.balance).sort((a: number, b: number) => a - b)).toEqual([100, 200]);
+
+    const live = await get("/api/balance/history?span=7d&dryRun=false&limit=100");
+    expect(live.body.map((r: any) => r.balance)).toEqual([999]);
+  });
+});

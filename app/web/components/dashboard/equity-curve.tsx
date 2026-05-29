@@ -10,6 +10,42 @@ import {
 } from "recharts"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { useApiContext } from "@/src/lib/api-context"
+import type { EquitySpan } from "@/src/lib/use-api"
+import { cn } from "@/lib/utils"
+
+const SPANS: { value: EquitySpan; label: string }[] = [
+  { value: "7d", label: "7D" },
+  { value: "30d", label: "30D" },
+  { value: "all", label: "All" },
+]
+
+interface SpanToggleProps {
+  value: EquitySpan
+  onChange: (span: EquitySpan) => void
+}
+
+function SpanToggle({ value, onChange }: SpanToggleProps) {
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5">
+      {SPANS.map((s) => (
+        <button
+          key={s.value}
+          type="button"
+          onClick={() => onChange(s.value)}
+          aria-pressed={value === s.value}
+          className={cn(
+            "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+            value === s.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 interface DataPoint {
   time: string
@@ -80,7 +116,7 @@ function ChartTooltip({ active, payload, label }: CustomTooltipProps) {
 }
 
 export function EquityCurve() {
-  const { equityHistory } = useApiContext()
+  const { equityHistory, equitySpan, setEquitySpan } = useApiContext()
 
   const data: DataPoint[] = useMemo(() => {
     return equityHistory.map((p) => {
@@ -109,11 +145,14 @@ export function EquityCurve() {
   if (data.length === 0) {
     return (
       <Card>
-        <CardHeader className="px-5 pb-2 pt-4">
+        <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 px-5 pb-2 pt-4">
           <CardTitle className="text-sm font-semibold">Equity Curve</CardTitle>
+          <SpanToggle value={equitySpan} onChange={setEquitySpan} />
         </CardHeader>
         <CardContent className="flex h-[200px] items-center justify-center text-sm text-muted-foreground">
-          Waiting for balance history...
+          {equitySpan === "all"
+            ? "Waiting for balance history..."
+            : `No balance history in the last ${equitySpan === "7d" ? "7 days" : "30 days"}.`}
         </CardContent>
       </Card>
     )
@@ -123,7 +162,7 @@ export function EquityCurve() {
     <Card className="overflow-hidden">
       <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 px-5 pb-2 pt-4">
         <CardTitle className="text-sm font-semibold">Equity Curve</CardTitle>
-        <span className="text-xs text-muted-foreground">{data.length} snapshots</span>
+        <SpanToggle value={equitySpan} onChange={setEquitySpan} />
       </CardHeader>
       <CardContent className="px-2 pb-3 pt-0">
         <ResponsiveContainer width="100%" height={300}>

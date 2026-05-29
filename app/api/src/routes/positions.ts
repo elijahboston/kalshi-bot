@@ -1,5 +1,5 @@
 import Elysia, { t } from "elysia";
-import { getDb, positions, balanceHistory, desc, eq } from "@kcb/db";
+import { getDb, positions, balanceHistory, desc, eq, gte, and } from "@kcb/db";
 import type { SQL } from "drizzle-orm";
 
 type DryRunCol = typeof balanceHistory.dryRun | typeof positions.dryRun;
@@ -9,6 +9,14 @@ function dryRunFilter(raw: string | undefined, col: DryRunCol): SQL | null {
   if (raw === "true" || raw === "1") return eq(col, true);
   if (raw === "false" || raw === "0") return eq(col, false);
   return null;
+}
+
+function spanFilter(span: string | undefined): SQL | null {
+  if (span == null || span === "all") return null;
+  const days = span === "7d" ? 7 : span === "30d" ? 30 : null;
+  if (days == null) return null;
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+  return gte(balanceHistory.recordedAt, cutoff);
 }
 
 export const positionRoutes = new Elysia({ prefix: "/api" })
@@ -54,7 +62,11 @@ export const positionRoutes = new Elysia({ prefix: "/api" })
       const db = getDb();
       const limit = Math.min(query.limit ?? 200, 1000);
 
-      const dryFilter = dryRunFilter(query.dryRun, balanceHistory.dryRun);
+      const filters = [
+        dryRunFilter(query.dryRun, balanceHistory.dryRun),
+        spanFilter(query.span),
+      ].filter((f): f is SQL => f != null);
+
       const base = db
         .select({
           totalEquity: balanceHistory.totalEquity,
@@ -65,7 +77,14 @@ export const positionRoutes = new Elysia({ prefix: "/api" })
         })
         .from(balanceHistory);
 
-      const all = (dryFilter ? base.where(dryFilter) : base)
+      const where =
+        filters.length === 0
+          ? null
+          : filters.length === 1
+            ? filters[0]
+            : and(...filters)!;
+
+      const all = (where ? base.where(where) : base)
         .orderBy(balanceHistory.recordedAt)
         .all();
 
@@ -77,6 +96,9 @@ export const positionRoutes = new Elysia({ prefix: "/api" })
       query: t.Object({
         limit: t.Optional(t.Numeric()),
         dryRun: t.Optional(t.String()),
+        span: t.Optional(
+          t.Union([t.Literal("7d"), t.Literal("30d"), t.Literal("all")]),
+        ),
       }),
     },
   );

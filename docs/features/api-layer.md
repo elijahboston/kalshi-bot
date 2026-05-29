@@ -93,7 +93,7 @@ All endpoints return JSON. Derived from what each TUI view currently displays.
 |--------|------|-------------|--------|
 | `GET` | `/api/positions` | All open positions with unrealized PnL | `positions` table |
 | `GET` | `/api/balance` | Current cash + portfolio equity | `balanceHistory` table (latest row) |
-| `GET` | `/api/balance/history` | Equity history for charting. Query param: `?limit=200` | `balanceHistory` table |
+| `GET` | `/api/balance/history` | Equity history for charting. Query params: `?limit=200`, `?dryRun=true\|false\|all`, `?span=7d\|30d\|all` (default: no time filter) | `balanceHistory` table |
 
 #### Orders & Trades
 | Method | Path | Description | Source |
