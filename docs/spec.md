@@ -131,6 +131,7 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/execution-unblock-2026-05-26.md`](improvements/execution-unblock-2026-05-26.md) | 2026-05-26: audit found 99% of actionable signals (incl. 100% of tails) being silently dropped. Bypassed `minContractPrice` for high-conf signals, disabled profit reserve in dry_run, and propagated specific skip reasons to `signals.skip_reason` for future debuggability. |
 | [`improvements/sigma-cap-prior-bump-2026-05-27.md`](improvements/sigma-cap-prior-bump-2026-05-27.md) | 2026-05-27: overnight validation showed estimator still ~57pp off on tight near-mean brackets despite yesterday's fixes. Capped `empiricalSigmaWeight` at 0.7 to keep ensemble spread in the blend, and raised `historical_prior_weight` to 0.5 now that the bracket-filtered prior is trustworthy. |
 | [`improvements/market-prior-2026-05-29.md`](improvements/market-prior-2026-05-29.md) | 2026-05-29: 14-day audit shows market Brier (0.134) beats model Brier (0.143) and the 50pp+ implied-edge bucket bleeds (19% win, −$64). Adds gated `market_prior_weight` to blend market price into estimator output as a final-stage prior. |
+| [`improvements/tail-gate-2026-05-29.md`](improvements/tail-gate-2026-05-29.md) | 2026-05-29: tail markets ran 11% win / −$38 over 9 trades since the May unblock. Adds gated `tail_max_entry_price` to restrict tail entries to deep-cheap (≤10¢) contracts where per-trade downside is capped. |
 
 ---
 

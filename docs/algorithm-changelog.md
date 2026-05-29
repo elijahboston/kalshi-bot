@@ -10,6 +10,11 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ## 2026-05-29
 
+### `execution` — Tail-market entry gate by contract price
+- **Change:** New runtime knob `tail_max_entry_price` (default 0). When > 0, signals on `upper_tail` / `lower_tail` markets are blocked unless the contract price the bot would pay is ≤ the cap. Logic lives in new pure helper `evaluateTailGate` in `@kcb/signals`; orchestrator inserts it into the Phase 3 decision ladder with a queryable `signals.skip_reason`.
+- **Why:** Tails ran 11% win rate / −$38 over the audit window (9 trades, losses spanning 20–62¢ entries). The estimator isn't reliable enough on tails to take mid-priced positions. Restricting to deep-cheap entries (cap initially set to 0.10 in runtime_config) caps per-contract downside and forces correctness on rare events rather than coin-flip mid-priced tails.
+- **Doc:** [`improvements/tail-gate-2026-05-29.md`](improvements/tail-gate-2026-05-29.md)
+
 ### `estimator` — Blend market price as a final-stage Bayesian prior
 - **Change:** New runtime knob `market_prior_weight` (default 0). When > 0 and a market price is available, the estimator's final probability is blended toward the market: `final = (1−w) × pModel + w × pMarket`. Applied after the historical-prior blend, before the tail floor. Reasoning trace gains `marketPriorBlend`.
 - **Why:** 14-day audit shows the market's Brier (0.134) beats the model's (0.143), and the bot's "extreme edge" 50pp+ bucket (79 trades) ran 19% win rate / −$64 — the more confident the model was that the market was wrong, the more it lost. A uniform blend at w=0.3 maps that disastrous tail into the historically-profitable 30–50pp range without disturbing small-edge trades.

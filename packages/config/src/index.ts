@@ -68,6 +68,8 @@ export interface BotConfig {
     historicalPriorWeight: number;
     /** Weight (0-1) for blending market price into the estimator's final probability (0 = disabled). The market is empirically better-calibrated than the model — see improvements/market-prior-2026-05-29.md. */
     marketPriorWeight: number;
+    /** Max contract entry price (0-1) for tail markets (upper_tail/lower_tail). 0 = gate disabled. Tails historically bled — see improvements/tail-gate-2026-05-29.md. */
+    tailMaxEntryPrice: number;
   };
 
   /** Calibration parameters */
@@ -158,6 +160,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   high_confidence_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.highConfidenceBetSizeCents = n; },
   historical_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.historicalPriorWeight = n; },
   market_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorWeight = n; },
+  tail_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.tailMaxEntryPrice = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -208,6 +211,7 @@ export function loadConfig(): BotConfig {
       highConfidenceBetSizeCents: envNum("HIGH_CONFIDENCE_BET_SIZE_CENTS", 1000), // $10 on high-conf signals
       historicalPriorWeight: envNum("HISTORICAL_PRIOR_WEIGHT", 0.3), // blend toward observed historical hit rate
       marketPriorWeight: envNum("MARKET_PRIOR_WEIGHT", 0), // ship dark; activate via runtime_config row
+      tailMaxEntryPrice: envNum("TAIL_MAX_ENTRY_PRICE", 0), // ship dark; runtime row sets 0.10
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

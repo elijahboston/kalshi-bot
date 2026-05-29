@@ -7,7 +7,7 @@ import { registerTick, startLoop, stopLoop, getLoopState } from "./loop";
 import { discoverMarkets } from "./discovery";
 import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService, NwsService } from "@kcb/data";
-import { ProbabilityEstimator, getEffectiveThreshold } from "@kcb/signals";
+import { ProbabilityEstimator, getEffectiveThreshold, evaluateTailGate } from "@kcb/signals";
 import type { EstimateResult, ObservationAdjustment } from "@kcb/signals";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld, restoreAntiChurnState } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
@@ -236,6 +236,19 @@ export async function initOrchestrator(): Promise<void> {
         forecastHorizonHours == null ||
         forecastHorizonHours <= sniperHorizon;
 
+      // Tail-market entry gate. Tails historically bled on mid-priced contracts
+      // (audit window: 11% win, -$38 across 9 resolved trades, losses spanning
+      // 20-62¢ entries). When enabled, only allow tail entries whose contract
+      // price is ≤ tailMaxEntryPrice. See improvements/tail-gate-2026-05-29.md.
+      const tailGate = side
+        ? evaluateTailGate({
+            market,
+            side,
+            marketPrice,
+            tailMaxEntryPrice: config.bot.tailMaxEntryPrice,
+          })
+        : { allowed: true as const };
+
       if (!side || edge <= 0) {
         skipReason = "no edge";
       } else if (!inSniperWindow) {
@@ -245,6 +258,8 @@ export async function initOrchestrator(): Promise<void> {
         skipReason = `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢`;
       } else if (estimate.confidence < config.bot.minConfidence) {
         skipReason = `confidence ${estimate.confidence.toFixed(2)} < ${config.bot.minConfidence}`;
+      } else if (!tailGate.allowed) {
+        skipReason = tailGate.reason ?? "tail gate blocked";
       } else {
         recommendation = side === "yes" ? "buy_yes" : "buy_no";
       }
