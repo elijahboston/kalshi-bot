@@ -1,5 +1,32 @@
-import { test, expect, describe } from "bun:test";
-import { getBucket, BUCKETS } from "./adaptive-threshold";
+import { test, expect, describe, beforeEach } from "bun:test";
+import { getBucket, BUCKETS, computeBucketThreshold, persistAdaptiveThresholds } from "./adaptive-threshold";
+import { runMigrations, getDb, calibration, adaptiveThresholds } from "@kcb/db";
+import { getConfig } from "@kcb/config";
+
+runMigrations();
+
+beforeEach(() => {
+  const db = getDb();
+  db.delete(calibration).run();
+  db.delete(adaptiveThresholds).run();
+});
+
+function makeCalibrationRow(overrides: Partial<any> = {}) {
+  return {
+    id: crypto.randomUUID(),
+    ticker: "KXHIGHNY-25FEB19-B30",
+    seriesTicker: "KXHIGHNY",
+    category: "high_temp",
+    stationId: "KNYC",
+    predictedProb: 0.15,
+    actualOutcome: 0,
+    marketPrice: 0.5,
+    edge: 0.1,
+    traded: false,
+    resolvedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
 
 describe("BUCKETS", () => {
   test("has 6 buckets", () => {
@@ -69,5 +96,79 @@ describe("getBucket", () => {
     expect(getBucket(0.4).label).toBe("0.3-0.5");
     expect(getBucket(0.6).label).toBe("0.5-0.7");
     expect(getBucket(0.85).label).toBe("0.7-1.0");
+  });
+});
+
+describe("computeBucketThreshold", () => {
+  test("returns null when sample size < 5", () => {
+    expect(computeBucketThreshold([1, 0, 1, 0], 0.5, 0.2, 0.05)).toBeNull();
+  });
+
+  test("well-calibrated bucket gets tightened threshold (×0.9)", () => {
+    // hitRate = 0.5, bucketMid = 0.5 → error = 0 → well-calibrated
+    const result = computeBucketThreshold([1, 1, 1, 0, 0, 0], 0.5, 0.2, 0.05);
+    expect(result).not.toBeNull();
+    expect(result!.threshold).toBeCloseTo(0.18, 4);
+    expect(result!.calibrationError).toBe(0);
+    expect(result!.sampleSize).toBe(6);
+  });
+
+  test("miscalibrated bucket gets bumped threshold", () => {
+    // bucketMid 0.15, hitRate 0/10 = 0 → error 0.15, exceeds 0.05
+    // threshold = 0.2 × 1.15 = 0.23
+    const actuals = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const result = computeBucketThreshold(actuals, 0.15, 0.2, 0.05);
+    expect(result).not.toBeNull();
+    expect(result!.calibrationError).toBeCloseTo(0.15, 4);
+    expect(result!.threshold).toBeCloseTo(0.23, 4);
+  });
+});
+
+describe("persistAdaptiveThresholds", () => {
+  test("returns 0 when calibration table is empty", async () => {
+    const written = await persistAdaptiveThresholds();
+    expect(written).toBe(0);
+  });
+
+  test("returns 0 when no series has >= 5 records", async () => {
+    const db = getDb();
+    for (let i = 0; i < 4; i++) {
+      db.insert(calibration).values(makeCalibrationRow()).run();
+    }
+    const written = await persistAdaptiveThresholds();
+    expect(written).toBe(0);
+  });
+
+  test("writes one row per (series, bucket) with sufficient data", async () => {
+    const db = getDb();
+    // 10 rows all in bucket 0.1-0.2, all actualOutcome=0 (miscalibrated)
+    for (let i = 0; i < 10; i++) {
+      db.insert(calibration).values(makeCalibrationRow({ predictedProb: 0.15, actualOutcome: 0 })).run();
+    }
+    const written = await persistAdaptiveThresholds();
+    // 1 series (KXHIGHNY) + __global__ alias = 2 series, 1 populated bucket each
+    expect(written).toBe(2);
+
+    const rows = await db.select().from(adaptiveThresholds);
+    expect(rows.length).toBe(2);
+    const seriesRow = rows.find((r) => r.seriesTicker === "KXHIGHNY")!;
+    expect(seriesRow.bucketLabel).toBe("0.1-0.2");
+    expect(seriesRow.sampleSize).toBe(10);
+    // miscalibrated → bumped
+    expect(seriesRow.edgeThreshold).toBeGreaterThan(getConfig().bot.edgeThreshold);
+  });
+
+  test("upserts existing rows on second call", async () => {
+    const db = getDb();
+    for (let i = 0; i < 6; i++) {
+      db.insert(calibration).values(makeCalibrationRow({ predictedProb: 0.15, actualOutcome: i % 2 })).run();
+    }
+    await persistAdaptiveThresholds();
+    await persistAdaptiveThresholds();
+
+    const rows = await db.select().from(adaptiveThresholds);
+    // Both calls should converge on the same id; upsert means no duplicates.
+    const ids = new Set(rows.map((r) => r.id));
+    expect(ids.size).toBe(rows.length);
   });
 });

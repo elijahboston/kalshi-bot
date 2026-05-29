@@ -133,6 +133,7 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/market-prior-2026-05-29.md`](improvements/market-prior-2026-05-29.md) | 2026-05-29: 14-day audit shows market Brier (0.134) beats model Brier (0.143) and the 50pp+ implied-edge bucket bleeds (19% win, −$64). Adds gated `market_prior_weight` to blend market price into estimator output as a final-stage prior. |
 | [`improvements/tail-gate-2026-05-29.md`](improvements/tail-gate-2026-05-29.md) | 2026-05-29: tail markets ran 11% win / −$38 over 9 trades since the May unblock. Adds gated `tail_max_entry_price` to restrict tail entries to deep-cheap (≤10¢) contracts where per-trade downside is capped. |
 | [`improvements/per-station-surcharge-2026-05-29.md`](improvements/per-station-surcharge-2026-05-29.md) | 2026-05-29: 60-day per-station PnL shows 3 durable losers (KORD −36% ROI, KLAX −40%, KNYC −19%) vs 3 winners. Adds JSON-map `station_edge_surcharge` runtime knob — stacks on adaptive threshold; initial values KLAX/KORD +0.15, KNYC +0.10. |
+| [`improvements/adaptive-threshold-persistence-2026-05-29.md`](improvements/adaptive-threshold-persistence-2026-05-29.md) | 2026-05-29: `adaptive_thresholds` table was empty even though the gate-adjustment logic in `getEffectiveThreshold` has been running per-signal since launch. Adds `persistAdaptiveThresholds` writer called from reconciliation — observability only, runtime decision unchanged. |
 
 ---
 

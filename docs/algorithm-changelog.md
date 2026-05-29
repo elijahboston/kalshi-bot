@@ -10,6 +10,11 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ## 2026-05-29
 
+### `calibration` — Persist adaptive thresholds to DB every reconcile cycle
+- **Change:** New helpers `computeBucketThreshold` (pure) and `persistAdaptiveThresholds` (DB upsert) in `@kcb/signals`. Reconciliation calls the latter once per tick. The `adaptive_thresholds` table is populated per (series, bucket) plus a `__global__` aggregate. Runtime decision still uses on-the-fly `getEffectiveThreshold` — this is observability only.
+- **Why:** The 2026-05-26 audit flagged `adaptive_thresholds` as "empty since launch." Investigation found the *logic* was running per-signal but only the manual CLI `retrain` command wrote the table. Without persistence we couldn't see what bar each signal had to clear, only the combined value persisted to `signals.edge_threshold`.
+- **Doc:** [`improvements/adaptive-threshold-persistence-2026-05-29.md`](improvements/adaptive-threshold-persistence-2026-05-29.md)
+
 ### `execution` — Per-station edge surcharge
 - **Change:** New runtime knob `station_edge_surcharge` (JSON stationId → surcharge map). Orchestrator adds the matching surcharge to the adaptive base threshold before gating. Stations missing from the map get 0. Combined threshold persists to `signals.edge_threshold`; skip reason names the surcharge.
 - **Why:** 60-day per-station PnL shows three durable losers (KORD −36% ROI, KLAX −40%, KNYC −19%) against three winners (KMIA +11%, KAUS +9%, KDEN 0%). Removing stations is too blunt; a soft surcharge lets them keep trading but only on the cleanest signals. Initial runtime values: KLAX/KORD +0.15, KNYC +0.10.

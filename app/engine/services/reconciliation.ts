@@ -16,6 +16,7 @@ import {
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
+import { persistAdaptiveThresholds } from "@kcb/signals";
 import { bus, createLogger } from "../events";
 import { uuid, now } from "@kcb/shared";
 
@@ -41,6 +42,7 @@ export class ReconciliationService {
       await this.syncSettlements();
       await this.checkResolutions();
       await this.repairCalibrationPnl();
+      await persistAdaptiveThresholds();
       await this.snapshotBalance();
     } catch (err) {
       log.error(
