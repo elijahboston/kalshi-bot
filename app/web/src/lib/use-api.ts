@@ -120,7 +120,6 @@ export function useApi(): ApiContextValue {
         return Promise.allSettled([
           fetchJson<BotConfig>("/api/config"),
           fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
-          fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}&span=30d`),
           fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
           fetchJson<Market[]>("/api/markets?status=open&limit=50"),
           fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`),
@@ -139,7 +138,6 @@ export function useApi(): ApiContextValue {
         const [
           config,
           balance,
-          equityHistory,
           positions,
           markets,
           signals,
@@ -157,8 +155,6 @@ export function useApi(): ApiContextValue {
           loading: false,
           config: config.status === "fulfilled" ? config.value : null,
           balance: balance.status === "fulfilled" ? balance.value : null,
-          equityHistory:
-            equityHistory.status === "fulfilled" ? equityHistory.value : [],
           positions:
             positions.status === "fulfilled" ? positions.value : [],
           markets: markets.status === "fulfilled" ? markets.value : [],
@@ -199,13 +195,39 @@ export function useApi(): ApiContextValue {
     stateRef.current = state
   }, [state])
 
+  // Sequence number for /api/balance/history requests. Every fetch captures
+  // the seq at request time; on response, we only apply it if the seq is
+  // still current. This prevents stale responses (from toggling spans rapidly
+  // or from a WS-driven refetch racing a user click) from overwriting fresh
+  // data.
+  const historySeqRef = useRef(0)
+
+  const refetchHistory = useCallback(() => {
+    const dryRun = stateRef.current.status?.dryRun
+    if (dryRun == null) return
+    const span = stateRef.current.equitySpan
+    const seq = ++historySeqRef.current
+    const modeParam = dryRun ? "true" : "false"
+    fetchJson<BalancePoint[]>(
+      `/api/balance/history?limit=200&dryRun=${modeParam}&span=${span}`,
+    )
+      .then((eq) => {
+        if (!mountedRef.current) return
+        // Drop stale response if a newer fetch has been queued.
+        if (seq !== historySeqRef.current) return
+        patch({ equityHistory: eq })
+      })
+      .catch(() => {
+        // Leave previous history in place on failure.
+      })
+  }, [patch])
+
   const refetchPerformance = useCallback(() => {
     if (perfRefetchTimer.current) return
     perfRefetchTimer.current = setTimeout(() => {
       perfRefetchTimer.current = null
       const dryRun = stateRef.current.status?.dryRun
       const modeParam = dryRun == null ? "all" : dryRun ? "true" : "false"
-      const span = stateRef.current.equitySpan
       Promise.allSettled([
         fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`),
         fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
@@ -213,9 +235,8 @@ export function useApi(): ApiContextValue {
         fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`),
         fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
         fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
-        fetchJson<BalancePoint[]>(`/api/balance/history?limit=200&dryRun=${modeParam}&span=${span}`),
         fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
-      ]).then(([perf, bal, res, pnl, wr, dwr, eq, pos]) => {
+      ]).then(([perf, bal, res, pnl, wr, dwr, pos]) => {
         if (!mountedRef.current) return
         patch({
           performance: perf.status === "fulfilled" ? perf.value : stateRef.current.performance,
@@ -224,12 +245,14 @@ export function useApi(): ApiContextValue {
           dailyPnl: pnl.status === "fulfilled" ? pnl.value : stateRef.current.dailyPnl,
           winRates: wr.status === "fulfilled" ? wr.value : stateRef.current.winRates,
           dailyWinRates: dwr.status === "fulfilled" ? dwr.value : stateRef.current.dailyWinRates,
-          equityHistory: eq.status === "fulfilled" ? eq.value : stateRef.current.equityHistory,
           positions: pos.status === "fulfilled" ? pos.value : stateRef.current.positions,
         })
       })
+      // History is fetched separately so it has its own seq-tracked lifecycle
+      // and can't be overwritten by a stale request from a previous span.
+      refetchHistory()
     }, 500)
-  }, [patch])
+  }, [patch, refetchHistory])
 
   useEffect(() => {
     function connect() {
@@ -356,36 +379,16 @@ export function useApi(): ApiContextValue {
     }
   }, [patch])
 
-  // ── Equity span refetch ────────────────────────────────────
-  // Refetch /api/balance/history when span or mode changes. Initialized to
-  // match the initial fetch (span=30d + current dryRun) so the first run
-  // after the initial load doesn't fire a duplicate request.
-  const lastHistoryFetchRef = useRef<{ span: EquitySpan; dryRun: boolean | null }>({
-    span: "30d",
-    dryRun: null,
-  })
+  // ── Equity history refetch ─────────────────────────────────
+  // Fire on any change to span or mode after initial load completes. The
+  // seq-tracking inside refetchHistory ensures stale responses (from an
+  // older span or a concurrent WS-driven refetch) don't overwrite fresh
+  // ones.
   useEffect(() => {
     if (state.loading) return
-    const dryRun = state.status?.dryRun ?? null
-    const last = lastHistoryFetchRef.current
-    if (last.dryRun === null) {
-      // First post-load invocation: initial fetch already supplied this combo.
-      lastHistoryFetchRef.current = { span: state.equitySpan, dryRun }
-      return
-    }
-    if (last.span === state.equitySpan && last.dryRun === dryRun) return
-    lastHistoryFetchRef.current = { span: state.equitySpan, dryRun }
-    const modeParam = dryRun == null ? "all" : dryRun ? "true" : "false"
-    fetchJson<BalancePoint[]>(
-      `/api/balance/history?limit=200&dryRun=${modeParam}&span=${state.equitySpan}`,
-    )
-      .then((eq) => {
-        if (mountedRef.current) patch({ equityHistory: eq })
-      })
-      .catch(() => {
-        // Leave previous history in place on failure.
-      })
-  }, [state.equitySpan, state.status?.dryRun, state.loading, patch])
+    if (state.status?.dryRun == null) return
+    refetchHistory()
+  }, [state.equitySpan, state.status?.dryRun, state.loading, refetchHistory])
 
   return { ...state, setEquitySpan }
 }
