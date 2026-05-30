@@ -72,6 +72,8 @@ export interface BotConfig {
     tailMaxEntryPrice: number;
     /** Per-station edge surcharge added to the adaptive edge threshold. Map of stationId → surcharge in [0, 1]. Stations missing from the map get 0. Used to require larger edge from historically loss-making stations — see improvements/per-station-surcharge-2026-05-29.md. */
     stationEdgeSurcharge: Record<string, number>;
+    /** Maximum horizon (days) to warm multi-day forecast cache + backfill actuals for. 0 = disabled (only same-day forecasts stored). Enables multi-horizon station_bias rows — see improvements/multi-horizon-bias-2026-05-29.md. */
+    multiHorizonBiasMaxDays: number;
   };
 
   /** Calibration parameters */
@@ -181,6 +183,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   market_prior_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorWeight = n; },
   tail_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.tailMaxEntryPrice = n; },
   station_edge_surcharge: (c, v) => { c.bot.stationEdgeSurcharge = parseStationSurcharge(v); },
+  multi_horizon_bias_max_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.multiHorizonBiasMaxDays = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -233,6 +236,7 @@ export function loadConfig(): BotConfig {
       marketPriorWeight: envNum("MARKET_PRIOR_WEIGHT", 0), // ship dark; activate via runtime_config row
       tailMaxEntryPrice: envNum("TAIL_MAX_ENTRY_PRICE", 0), // ship dark; runtime row sets 0.10
       stationEdgeSurcharge: parseStationSurcharge(env("STATION_EDGE_SURCHARGE")), // ship empty; runtime row populates
+      multiHorizonBiasMaxDays: envNum("MULTI_HORIZON_BIAS_MAX_DAYS", 0), // ship dark; runtime row sets to 3
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

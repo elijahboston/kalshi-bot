@@ -17,6 +17,7 @@ import {
 import { getConfig } from "@kcb/config";
 import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
 import { persistAdaptiveThresholds } from "@kcb/signals";
+import { EnsembleService } from "@kcb/data";
 import { bus, createLogger } from "../events";
 import { uuid, now } from "@kcb/shared";
 
@@ -24,9 +25,14 @@ const log = createLogger("reconciliation");
 
 export class ReconciliationService {
   private kalshi: KalshiClient;
+  private ensembleService: EnsembleService;
+  /** Timestamp gates to rate-limit periodic background work. */
+  private lastMultiHorizonWarmAt = 0;
+  private lastActualsBackfillAt = 0;
 
-  constructor(kalshiClient?: KalshiClient) {
+  constructor(kalshiClient?: KalshiClient, ensembleService?: EnsembleService) {
     this.kalshi = kalshiClient || new KalshiClient();
+    this.ensembleService = ensembleService || new EnsembleService();
   }
 
   /** Run all reconciliation steps in sequence */
@@ -43,6 +49,8 @@ export class ReconciliationService {
       await this.checkResolutions();
       await this.repairCalibrationPnl();
       await persistAdaptiveThresholds();
+      await this.warmMultiHorizonForecasts();
+      await this.backfillHistoricalForecastActuals();
       await this.snapshotBalance();
     } catch (err) {
       log.error(
@@ -1179,6 +1187,119 @@ export class ReconciliationService {
     });
 
     return true;
+  }
+
+  /**
+   * Warm the weather_forecasts cache for future horizons so multi-day
+   * station_bias rows can populate over time. Without this, the cache only
+   * stores horizon=1 rows (the bot trades same-day in sniper mode), so
+   * recomputeStationBias only ever produces horizon=1 bias entries. Gated by
+   * config.bot.multiHorizonBiasMaxDays (0 = disabled). Rate-limited to once
+   * per hour to keep external API quota in check (~6 stations × N horizons
+   * × Open-Meteo fetches).
+   */
+  async warmMultiHorizonForecasts(): Promise<number> {
+    const config = getConfig();
+    const maxDays = config.bot.multiHorizonBiasMaxDays ?? 0;
+    if (maxDays < 2) return 0;
+
+    const HOUR_MS = 60 * 60 * 1000;
+    if (Date.now() - this.lastMultiHorizonWarmAt < HOUR_MS) return 0;
+    this.lastMultiHorizonWarmAt = Date.now();
+
+    const stations = config.bot.enabledStations ?? [];
+    const todayMs = Date.now();
+    let warmed = 0;
+
+    for (const stationId of stations) {
+      for (let h = 2; h <= maxDays; h++) {
+        const target = new Date(todayMs + h * 86400_000)
+          .toISOString()
+          .slice(0, 10);
+        try {
+          await this.ensembleService.getEnsembleValues(
+            stationId,
+            target,
+            "high_temp",
+            h * 24
+          );
+          warmed++;
+        } catch (err) {
+          log.debug(
+            `Multi-horizon warm failed for ${stationId} h=${h}: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+    }
+
+    if (warmed > 0) {
+      log.info(`Warmed ${warmed} multi-horizon forecast row(s)`);
+    }
+    return warmed;
+  }
+
+  /**
+   * Backfill actual_value on weather_forecasts rows for past target dates that
+   * weren't tied to a traded market (so the existing market-resolution
+   * backfill never touched them). Needed so warmMultiHorizonForecasts'd rows
+   * become usable training data for recomputeStationBias. Capped per cycle to
+   * avoid hammering NWS, and rate-limited to once per hour.
+   */
+  async backfillHistoricalForecastActuals(limit = 50): Promise<number> {
+    const config = getConfig();
+    if ((config.bot.multiHorizonBiasMaxDays ?? 0) < 2) return 0;
+
+    const HOUR_MS = 60 * 60 * 1000;
+    if (Date.now() - this.lastActualsBackfillAt < HOUR_MS) return 0;
+    this.lastActualsBackfillAt = Date.now();
+
+    const db = getDb();
+    const yesterday = new Date(Date.now() - 86400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    const stale = await db
+      .select()
+      .from(weatherForecasts)
+      .where(
+        and(
+          sql`${weatherForecasts.targetDate} < ${yesterday}`,
+          sql`${weatherForecasts.actualValue} IS NULL`
+        )
+      )
+      .limit(limit);
+
+    if (stale.length === 0) return 0;
+
+    let filled = 0;
+    const touchedStations = new Set<string>();
+    for (const f of stale) {
+      const actual = await this.fetchNwsActualValue(
+        f.stationId,
+        f.targetDate,
+        f.forecastType
+      );
+      if (actual == null) continue;
+      await db
+        .update(weatherForecasts)
+        .set({ actualValue: actual })
+        .where(eq(weatherForecasts.id, f.id));
+      filled++;
+      touchedStations.add(f.stationId);
+    }
+
+    if (filled > 0) {
+      log.info(
+        `Backfilled actual_value on ${filled} historical forecast row(s)`
+      );
+      // Refresh station_bias for any station whose rows just gained an actual
+      // — otherwise the multi-horizon bias entries wouldn't appear until the
+      // next market resolution for that station.
+      for (const stationId of touchedStations) {
+        await this.recomputeStationBias(stationId);
+      }
+    }
+    return filled;
   }
 
   /**

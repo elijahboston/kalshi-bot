@@ -10,6 +10,11 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ## 2026-05-29
 
+### `calibration` — Multi-horizon station_bias warming + actuals backfill
+- **Change:** New runtime knob `multi_horizon_bias_max_days` (default 0 = disabled). When ≥ 2, reconciliation calls two new periodic tasks: `warmMultiHorizonForecasts` (fetch + cache `today+2..today+N` ensembles for each enabled station) and `backfillHistoricalForecastActuals` (NWS backfill of past-target-date forecast rows). Both rate-limited to once per hour. With these populated, `recomputeStationBias` produces horizon 2..N rows that the estimator can use.
+- **Why:** `station_bias` had only 6 rows (horizon=1 only) because the bot trades same-day in sniper mode and only same-day forecasts get cached. Multi-day market estimates run with zero bias correction. Sets up the data for any future strategy looking past 12h; no current-PnL impact while sniper mode dominates.
+- **Doc:** [`improvements/multi-horizon-bias-2026-05-29.md`](improvements/multi-horizon-bias-2026-05-29.md)
+
 ### `calibration` — Persist adaptive thresholds to DB every reconcile cycle
 - **Change:** New helpers `computeBucketThreshold` (pure) and `persistAdaptiveThresholds` (DB upsert) in `@kcb/signals`. Reconciliation calls the latter once per tick. The `adaptive_thresholds` table is populated per (series, bucket) plus a `__global__` aggregate. Runtime decision still uses on-the-fly `getEffectiveThreshold` — this is observability only.
 - **Why:** The 2026-05-26 audit flagged `adaptive_thresholds` as "empty since launch." Investigation found the *logic* was running per-signal but only the manual CLI `retrain` command wrote the table. Without persistence we couldn't see what bar each signal had to clear, only the combined value persisted to `signals.edge_threshold`.

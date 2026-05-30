@@ -134,6 +134,7 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 | [`improvements/tail-gate-2026-05-29.md`](improvements/tail-gate-2026-05-29.md) | 2026-05-29: tail markets ran 11% win / −$38 over 9 trades since the May unblock. Adds gated `tail_max_entry_price` to restrict tail entries to deep-cheap (≤10¢) contracts where per-trade downside is capped. |
 | [`improvements/per-station-surcharge-2026-05-29.md`](improvements/per-station-surcharge-2026-05-29.md) | 2026-05-29: 60-day per-station PnL shows 3 durable losers (KORD −36% ROI, KLAX −40%, KNYC −19%) vs 3 winners. Adds JSON-map `station_edge_surcharge` runtime knob — stacks on adaptive threshold; initial values KLAX/KORD +0.15, KNYC +0.10. |
 | [`improvements/adaptive-threshold-persistence-2026-05-29.md`](improvements/adaptive-threshold-persistence-2026-05-29.md) | 2026-05-29: `adaptive_thresholds` table was empty even though the gate-adjustment logic in `getEffectiveThreshold` has been running per-signal since launch. Adds `persistAdaptiveThresholds` writer called from reconciliation — observability only, runtime decision unchanged. |
+| [`improvements/multi-horizon-bias-2026-05-29.md`](improvements/multi-horizon-bias-2026-05-29.md) | 2026-05-29: `station_bias` only had horizon=1 rows because sniper-mode trading only caches same-day forecasts. Adds gated `multi_horizon_bias_max_days` runtime knob — warms ensemble cache for `today+2..today+N` and NWS-backfills actuals so multi-horizon bias entries populate over time. |
 
 ---
 
