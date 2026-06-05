@@ -287,15 +287,37 @@ describe("ProbabilityEstimator — historical prior blend", () => {
   });
 });
 
-describe("ProbabilityEstimator — market prior blend", () => {
-  const originalWeight = getConfig().bot.marketPriorWeight;
+describe("ProbabilityEstimator — market prior blend (adaptive ramp)", () => {
+  const original = {
+    marketPriorWeight: getConfig().bot.marketPriorWeight,
+    marketPriorMaxWeight: getConfig().bot.marketPriorMaxWeight,
+    marketPriorRampStart: getConfig().bot.marketPriorRampStart,
+    marketPriorRampEnd: getConfig().bot.marketPriorRampEnd,
+    historicalPriorWeight: getConfig().bot.historicalPriorWeight,
+  };
 
-  afterEach(() => {
-    getConfig().bot.marketPriorWeight = originalWeight;
+  // Pin the ramp knobs to the documented defaults so each test is hermetic
+  // against runtime config drift (the live values may differ from the schema
+  // defaults). Individual tests override what they need to exercise.
+  beforeEach(() => {
+    const bot = getConfig().bot;
+    bot.marketPriorWeight = 0.3;
+    bot.marketPriorMaxWeight = 0.7;
+    bot.marketPriorRampStart = 0.3;
+    bot.marketPriorRampEnd = 0.6;
+    bot.historicalPriorWeight = 0;
   });
 
-  test("weight=0 leaves probability unchanged even when marketPrice is provided", async () => {
-    getConfig().bot.marketPriorWeight = 0;
+  afterEach(() => {
+    Object.assign(getConfig().bot, original);
+  });
+
+  test("weight=0 leaves probability unchanged regardless of other ramp knobs", async () => {
+    const bot = getConfig().bot;
+    bot.marketPriorWeight = 0; // outer gate off → ship-dark
+    bot.marketPriorMaxWeight = 0.9; // should be ignored entirely
+    bot.marketPriorRampStart = 0.0;
+    bot.marketPriorRampEnd = 0.1;
 
     const estimator = new ProbabilityEstimator();
     const ensemble = [10, 11, 12, 13, 14]; // raw prob ~0
@@ -305,25 +327,78 @@ describe("ProbabilityEstimator — market prior blend", () => {
     expect(result.probability).toBeCloseTo(0.03, 6); // unchanged tail floor
   });
 
-  test("weight>0 blends probability toward market price", async () => {
-    getConfig().bot.marketPriorWeight = 0.5;
+  test("disagreement ≤ rampStart → weight stays at base (0.3)", async () => {
+    // Construct a tiny disagreement: set marketPrice equal to the model's
+    // pre-blend probability (~0.03 floor) so |pModel − pMarket| ≈ 0 ≤ rampStart.
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw prob ~0, floored to 0.03
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.03);
+
+    const blend = result.reasoning.marketPriorBlend!;
+    expect(blend).not.toBeNull();
+    expect(blend.baseWeight).toBe(0.3);
+    expect(blend.disagreement).toBeLessThanOrEqual(0.3);
+    expect(blend.weight).toBeCloseTo(0.3, 6); // base, no ramp
+  });
+
+  test("disagreement = ramp midpoint (0.45) → weight ≈ 0.5", async () => {
+    // Disagreement is measured against the *pre-floor* blended probability,
+    // which is exactly 0 for this far-below-bracket ensemble (the 0.03 tail
+    // floor is applied only after the market blend). So marketPrice 0.45 yields
+    // disagreement 0.45 = midpoint of [0.30, 0.60] → t=0.5 → weight 0.5.
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // raw (pre-floor) prob = 0
+    const marketPrice = 0.45; // disagreement = 0.45 − 0 = 0.45
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, marketPrice);
+
+    const blend = result.reasoning.marketPriorBlend!;
+    expect(blend.probabilityBefore).toBeCloseTo(0, 6);
+    expect(blend.disagreement).toBeCloseTo(0.45, 6);
+    expect(blend.weight).toBeCloseTo(0.5, 6);
+    // probabilityAfter = (1-0.5)*0 + 0.5*0.45 = 0.225
+    expect(blend.probabilityAfter).toBeCloseTo(0.225, 6);
+  });
+
+  test("disagreement ≥ rampEnd → weight saturates at max (0.7)", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [10, 11, 12, 13, 14]; // pre-blend ~0.03
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.8);
+
+    const blend = result.reasoning.marketPriorBlend!;
+    expect(blend.disagreement).toBeGreaterThanOrEqual(0.6);
+    expect(blend.weight).toBeCloseTo(0.7, 6);
+    expect(blend.marketPrice).toBe(0.8);
+  });
+
+  test("marketPriorMaxWeight < base → effective max = base (flat, never decreases)", async () => {
+    const bot = getConfig().bot;
+    bot.marketPriorWeight = 0.5;
+    bot.marketPriorMaxWeight = 0.2; // nonsensically below base → must clamp up to base
 
     const estimator = new ProbabilityEstimator();
-    // Ensemble centered well below bracket → raw prob ~0, post-floor 0.03
+    const ensemble = [10, 11, 12, 13, 14];
+    // Large disagreement (would ramp if max>base) but max is pinned to base.
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.9);
+
+    const blend = result.reasoning.marketPriorBlend!;
+    expect(blend.baseWeight).toBe(0.5);
+    expect(blend.weight).toBeCloseTo(0.5, 6); // flat — ramp can't pull below base
+  });
+
+  test("base weight clamped to [0, 1] (out-of-range → 1, fully follows market)", async () => {
+    const bot = getConfig().bot;
+    bot.marketPriorWeight = 2; // nonsense → clamp01 → 1; max(base, ...) = 1
+    bot.marketPriorMaxWeight = 0.7;
+
+    const estimator = new ProbabilityEstimator();
     const ensemble = [10, 11, 12, 13, 14];
     const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.75);
 
-    expect(result.reasoning.marketPriorBlend).not.toBeNull();
-    expect(result.reasoning.marketPriorBlend!.weight).toBe(0.5);
-    expect(result.reasoning.marketPriorBlend!.marketPrice).toBe(0.75);
-    // before = ~0, after = 0.5 * ~0 + 0.5 * 0.75 = ~0.375 (above the 0.03 floor)
-    expect(result.probability).toBeGreaterThan(0.35);
-    expect(result.probability).toBeLessThan(0.40);
+    expect(result.reasoning.marketPriorBlend!.weight).toBeCloseTo(1, 6);
+    expect(result.probability).toBeCloseTo(0.75, 6); // weight=1 → fully market
   });
 
   test("marketPrice undefined → no blend applied", async () => {
-    getConfig().bot.marketPriorWeight = 0.5;
-
     const estimator = new ProbabilityEstimator();
     const ensemble = [10, 11, 12, 13, 14];
     const result = await estimator.estimate(makeMarket(), ensemble); // no marketPrice arg
@@ -332,41 +407,74 @@ describe("ProbabilityEstimator — market prior blend", () => {
     expect(result.probability).toBeCloseTo(0.03, 6);
   });
 
-  test("weight clamped to [0, 1]", async () => {
-    getConfig().bot.marketPriorWeight = 2; // nonsense, should clamp to 1
-
+  test("trace exposes baseWeight, disagreement, and effective weight", async () => {
     const estimator = new ProbabilityEstimator();
-    const ensemble = [10, 11, 12, 13, 14];
-    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.75);
+    const ensemble = [10, 11, 12, 13, 14]; // raw (pre-floor) prob = 0
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.45);
 
-    expect(result.reasoning.marketPriorBlend!.weight).toBe(1);
-    // weight=1 → probability fully follows the market price
-    expect(result.probability).toBeCloseTo(0.75, 6);
+    const blend = result.reasoning.marketPriorBlend!;
+    expect(blend.baseWeight).toBe(0.3);
+    expect(blend.disagreement).toBeCloseTo(0.45, 6);
+    expect(blend.weight).toBeCloseTo(0.5, 6);
+    expect(blend.marketPrice).toBe(0.45);
+    expect(blend.probabilityBefore).toBeCloseTo(0, 6);
+    // probabilityAfter is internally consistent with the reported weight.
+    const expectedAfter =
+      (1 - blend.weight) * blend.probabilityBefore + blend.weight * blend.marketPrice;
+    expect(blend.probabilityAfter).toBeCloseTo(expectedAfter, 6);
   });
 
-  test("blend composes after historical-prior blend", async () => {
+  test("disagreement is measured AFTER the historical-prior blend", async () => {
     const db = getDb();
     seedMarketRow();
     for (const outcome of [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]) {
       db.insert(calibration).values(makeCalibrationRow({ actualOutcome: outcome })).run();
     }
     getConfig().bot.historicalPriorWeight = 0.3;
-    getConfig().bot.marketPriorWeight = 0.5;
 
     const estimator = new ProbabilityEstimator();
     const ensemble = [10, 11, 12, 13, 14]; // raw prob ~0
+    // Historical blend lifts ~0 toward 0.5 at weight 0.3 → before ≈ 0.15.
+    // marketPrice 0.9 → disagreement ≈ 0.75 ≥ rampEnd → weight saturates at 0.7.
     const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.9);
 
-    // First: historical blend lifts raw ~0 toward 0.5 (hit rate) at weight 0.3
-    //   → ~0.15
-    // Then: market blend pulls toward 0.9 at weight 0.5
-    //   → 0.5 * 0.15 + 0.5 * 0.9 = ~0.525
+    const blend = result.reasoning.marketPriorBlend!;
     expect(result.reasoning.historicalPriorBlend).not.toBeNull();
-    expect(result.reasoning.marketPriorBlend).not.toBeNull();
-    expect(result.reasoning.marketPriorBlend!.probabilityBefore).toBeGreaterThan(0.13);
-    expect(result.reasoning.marketPriorBlend!.probabilityBefore).toBeLessThan(0.17);
-    expect(result.probability).toBeGreaterThan(0.50);
-    expect(result.probability).toBeLessThan(0.55);
+    expect(blend.probabilityBefore).toBeGreaterThan(0.13);
+    expect(blend.probabilityBefore).toBeLessThan(0.17);
+    expect(blend.disagreement).toBeGreaterThanOrEqual(0.6);
+    expect(blend.weight).toBeCloseTo(0.7, 6);
+    // after ≈ 0.3*0.15 + 0.7*0.9 = ~0.675
+    expect(result.probability).toBeGreaterThan(0.64);
+    expect(result.probability).toBeLessThan(0.71);
+  });
+
+  test("KNYC 2026-06-05 scenario: model ~0.19 vs market 0.80 → final ~0.62, NO edge < 0.25", async () => {
+    // Reconstruct the loss the ramp targets. We need a raw model prob ≈ 0.19 on
+    // a bracket with market 0.80. Use a 21-member ensemble where 4/21 land in
+    // the 30–31 bracket (counting ≈ 0.19) and the CDF agrees closely, so the
+    // pre-blend probability is ≈ 0.19 (no empirical bias seeded → CDF/counting
+    // blend, no historical prior). Disagreement 0.80 − 0.19 = 0.61 ≥ rampEnd
+    // → weight 0.7 → blended ≈ 0.3*0.19 + 0.7*0.80 ≈ 0.617.
+    const estimator = new ProbabilityEstimator();
+    // 4 members in [30,31): four 30.5's; the rest sit well outside the bracket
+    // and roughly symmetric around it so the normal CDF over [30,31) ≈ counting.
+    const ensemble = [
+      30.5, 30.5, 30.5, 30.5, // 4 inside
+      26, 26.5, 27, 27.5, 28, 28.5, 29, 29.5, // below
+      32, 32.5, 33, 33.5, 34, 34.5, 35, 35.5, 36, // above
+    ];
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.8);
+
+    const blend = result.reasoning.marketPriorBlend!;
+    // Pre-blend model probability is in the low-0.2s (the "false edge" zone).
+    expect(blend.probabilityBefore).toBeLessThan(0.25);
+    expect(blend.weight).toBeCloseTo(0.7, 6); // saturated by the large disagreement
+    // Final probability lands near 0.62 and, critically, above 0.55 so the NO
+    // edge (0.80 − p) drops below the 0.25 disagreement cap → correctly dropped.
+    expect(result.probability).toBeCloseTo(0.617, 2);
+    expect(result.probability).toBeGreaterThan(0.55);
+    expect(0.8 - result.probability).toBeLessThan(0.25);
   });
 });
 

@@ -1414,3 +1414,395 @@ describe("multi-horizon forecast warmer + backfill (gating)", () => {
     getConfig().bot.multiHorizonBiasMaxDays = origMax;
   });
 });
+
+// ── N1: settlement-truth ground-truth repair ───────────────────
+// win-rate-80-addendum-2026-06-05.md Finding 1 / N1: Kalshi settlement is the
+// authoritative truth. actual_value must be derived from the settled YES
+// bracket (interval-censored but unbiased) in preference to the obs-max path,
+// which disagreed with settlement ~70% of days. NEVER mock @kcb/db — real
+// in-memory DB + a fetch swap for the obs fallback.
+import { localDayWindowUtc } from "./reconciliation";
+
+function seedYesMarket(opts: {
+  ticker: string;
+  stationId: string;
+  targetDate: string;
+  category?: string;
+  marketType?: "bracket" | "upper_tail" | "lower_tail";
+  bracketLow: number | null;
+  bracketHigh?: number | null;
+  result?: "yes" | "no";
+}) {
+  const db = getDb();
+  db.insert(marketsTable).values({
+    ticker: opts.ticker,
+    eventTicker: "EVT",
+    seriesTicker: "KXHIGHNY",
+    title: opts.ticker,
+    category: opts.category ?? "high_temp",
+    stationId: opts.stationId,
+    targetDate: opts.targetDate,
+    bracketLow: opts.bracketLow,
+    bracketHigh: opts.bracketHigh ?? null,
+    marketType: opts.marketType ?? "bracket",
+    status: "finalized",
+    result: opts.result ?? "yes",
+    discoveredAt: "2026-04-19T08:00:00Z",
+    updatedAt: "2026-04-21T08:00:00Z",
+  }).run();
+}
+
+describe("deriveSettlementActual — settlement-derived truth (N1)", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(marketsTable).run();
+  });
+
+  const stationId = "KNYC";
+  const targetDate = "2026-04-20";
+
+  test("bracket YES → bracket midpoint", async () => {
+    seedYesMarket({
+      ticker: "KXHIGHNY-26APR20-B72.5",
+      stationId,
+      targetDate,
+      marketType: "bracket",
+      bracketLow: 72,
+      bracketHigh: 73,
+    });
+    const svc = new ReconciliationService({} as never);
+    const r = await (svc as any).deriveSettlementActual(stationId, targetDate, "high_temp");
+    expect(r).toEqual({ value: 72.5, source: "settlement" });
+  });
+
+  test("upper_tail YES → bracketLow + 0.5", async () => {
+    seedYesMarket({
+      ticker: "KXHIGHNY-26APR20-T80",
+      stationId,
+      targetDate,
+      marketType: "upper_tail",
+      bracketLow: 80,
+      bracketHigh: null,
+    });
+    const svc = new ReconciliationService({} as never);
+    const r = await (svc as any).deriveSettlementActual(stationId, targetDate, "high_temp");
+    expect(r).toEqual({ value: 80.5, source: "settlement" });
+  });
+
+  test("lower_tail YES → bracketLow − 0.5", async () => {
+    seedYesMarket({
+      ticker: "KXHIGHNY-26APR20-T60",
+      stationId,
+      targetDate,
+      marketType: "lower_tail",
+      bracketLow: 60,
+      bracketHigh: null,
+    });
+    const svc = new ReconciliationService({} as never);
+    const r = await (svc as any).deriveSettlementActual(stationId, targetDate, "high_temp");
+    expect(r).toEqual({ value: 59.5, source: "settlement" });
+  });
+
+  test("no settled YES row → null", async () => {
+    // A market exists but resolved NO — must not be treated as settlement truth.
+    seedYesMarket({
+      ticker: "KXHIGHNY-26APR20-B72.5",
+      stationId,
+      targetDate,
+      marketType: "bracket",
+      bracketLow: 72,
+      bracketHigh: 73,
+      result: "no",
+    });
+    const svc = new ReconciliationService({} as never);
+    const r = await (svc as any).deriveSettlementActual(stationId, targetDate, "high_temp");
+    expect(r).toBeNull();
+  });
+
+  test("category mismatch → null (does not borrow another category's bracket)", async () => {
+    seedYesMarket({
+      ticker: "KXLOWNY-26APR20-B50.5",
+      stationId,
+      targetDate,
+      category: "low_temp",
+      marketType: "bracket",
+      bracketLow: 50,
+      bracketHigh: 51,
+    });
+    const svc = new ReconciliationService({} as never);
+    const r = await (svc as any).deriveSettlementActual(stationId, targetDate, "high_temp");
+    expect(r).toBeNull();
+  });
+});
+
+describe("backfillActualValue — settlement priority over obs (N1)", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(weatherForecasts).run();
+    db.delete(signals).run();
+    db.delete(marketsTable).run();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const ticker = "KXHIGHNY-26APR20-B72.5";
+  const stationId = "KNYC";
+  const targetDate = "2026-04-20";
+  const category = "high_temp";
+
+  test("settled YES market wins: actual = midpoint, source = 'settlement' even when obs differs", async () => {
+    const db = getDb();
+    // Existing forecast row awaiting an actual.
+    db.insert(weatherForecasts).values({
+      id: "wf-1",
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: category,
+      forecastHorizon: 1,
+      pointForecast: 71.5,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: null,
+      actualSource: null,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    // Settled YES bracket 72–73 → midpoint 72.5 (the truth).
+    seedYesMarket({
+      ticker,
+      stationId,
+      targetDate,
+      marketType: "bracket",
+      bracketLow: 72,
+      bracketHigh: 73,
+    });
+
+    // Obs would say 68°F (20°C) — deliberately different; must be ignored.
+    mockNwsResponse(20.0);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row.actualValue).toBe(72.5);
+    expect(row.actualSource).toBe("settlement");
+  });
+
+  test("falls back to obs_max when there is no settled YES market", async () => {
+    const db = getDb();
+    db.insert(weatherForecasts).values({
+      id: "wf-2",
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: category,
+      forecastHorizon: 1,
+      pointForecast: 71.5,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: null,
+      actualSource: null,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    // No YES market seeded. Obs returns 22.2°C → 72.0°F (a complete past day).
+    mockNwsResponse(22.2);
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row.actualValue).toBeCloseTo(71.96, 1);
+    expect(row.actualSource).toBe("obs_max");
+  });
+
+  test("synthesized row from signal trace carries source = 'settlement'", async () => {
+    const db = getDb();
+    // No forecast row → synthesize from the signal trace.
+    db.insert(signals).values({
+      id: "sig-1",
+      ticker,
+      seriesTicker: "KXHIGHNY",
+      estimatedProb: 0.2,
+      confidence: 0.5,
+      marketPrice: 0.3,
+      edge: -0.1,
+      edgeThreshold: 0.05,
+      recommendation: "skip",
+      reasoning: JSON.stringify({
+        stationId,
+        targetDate,
+        forecastHorizon: 1,
+        rawEnsembleStats: { mean: 71.2, std: 2.5, count: 120 },
+        correctedEnsembleStats: { mean: 72.0, std: 2.5 },
+      }),
+      createdAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    seedYesMarket({
+      ticker,
+      stationId,
+      targetDate,
+      marketType: "bracket",
+      bracketLow: 72,
+      bracketHigh: 73,
+    });
+
+    // Make any obs fetch throw — settlement must win without touching the network.
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as typeof fetch;
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row.source).toBe("backfilled");
+    expect(row.actualValue).toBe(72.5);
+    expect(row.actualSource).toBe("settlement");
+  });
+});
+
+describe("localDayWindowUtc — local calendar day window (N1 Task 2)", () => {
+  test("America/New_York (EDT, UTC−4 in April) maps the local day to 04:00Z–04:00Z next day", () => {
+    const { startUtc, endUtc } = localDayWindowUtc("2026-04-20", "America/New_York");
+    // Local midnight 2026-04-20 00:00 EDT = 2026-04-20T04:00:00Z.
+    expect(startUtc.toISOString()).toBe("2026-04-20T04:00:00.000Z");
+    // Next local midnight 2026-04-21 00:00 EDT = 2026-04-21T04:00:00Z.
+    expect(endUtc.toISOString()).toBe("2026-04-21T04:00:00.000Z");
+  });
+
+  test("America/Chicago (CDT, UTC−5 in April) maps to 05:00Z–05:00Z next day", () => {
+    const { startUtc, endUtc } = localDayWindowUtc("2026-04-20", "America/Chicago");
+    expect(startUtc.toISOString()).toBe("2026-04-20T05:00:00.000Z");
+    expect(endUtc.toISOString()).toBe("2026-04-21T05:00:00.000Z");
+  });
+
+  test("window is exactly 24h on a non-DST-transition day", () => {
+    const { startUtc, endUtc } = localDayWindowUtc("2026-06-15", "America/Denver");
+    expect(endUtc.getTime() - startUtc.getTime()).toBe(24 * 60 * 60 * 1000);
+  });
+
+  test("spring-forward day (2026-03-08, America/New_York) is 23h local", () => {
+    // DST starts 2026-03-08; the local day loses an hour → 23h wide in UTC terms.
+    const { startUtc, endUtc } = localDayWindowUtc("2026-03-08", "America/New_York");
+    expect(startUtc.toISOString()).toBe("2026-03-08T05:00:00.000Z"); // EST (−5)
+    expect(endUtc.toISOString()).toBe("2026-03-09T04:00:00.000Z"); // EDT (−4)
+    expect(endUtc.getTime() - startUtc.getTime()).toBe(23 * 60 * 60 * 1000);
+  });
+
+  test("UTC-day window would have started 4h earlier (the bug it fixes)", () => {
+    // The legacy query started at {date}T00:00:00Z. For KNYC that pulls in
+    // 20:00–00:00 of the PREVIOUS local evening. Assert the new start is later.
+    const { startUtc } = localDayWindowUtc("2026-04-20", "America/New_York");
+    const legacyStart = new Date("2026-04-20T00:00:00Z");
+    expect(startUtc.getTime()).toBeGreaterThan(legacyStart.getTime());
+    expect((startUtc.getTime() - legacyStart.getTime()) / 3600_000).toBe(4);
+  });
+});
+
+describe("checkGroundTruthHealth — N11 mismatch telemetry", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(marketsTable).run();
+    db.delete(weatherForecasts).run();
+  });
+
+  function seedHealthRow(opts: {
+    id: string;
+    stationId: string;
+    targetDate: string;
+    bracketLow: number;
+    bracketHigh: number;
+    actualValue: number;
+  }) {
+    const db = getDb();
+    db.insert(marketsTable).values({
+      ticker: `M-${opts.id}`,
+      eventTicker: "EVT",
+      seriesTicker: "KXHIGHNY",
+      title: `M-${opts.id}`,
+      category: "high_temp",
+      stationId: opts.stationId,
+      targetDate: opts.targetDate,
+      bracketLow: opts.bracketLow,
+      bracketHigh: opts.bracketHigh,
+      marketType: "bracket",
+      status: "finalized",
+      result: "yes",
+      discoveredAt: "2026-06-01T08:00:00Z",
+      updatedAt: "2026-06-02T08:00:00Z",
+    }).run();
+    db.insert(weatherForecasts).values({
+      id: `wf-${opts.id}`,
+      stationId: opts.stationId,
+      targetDate: opts.targetDate,
+      source: "multi_ensemble",
+      forecastType: "high_temp",
+      forecastHorizon: 1,
+      pointForecast: opts.bracketLow,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: opts.actualValue,
+      actualSource: "obs_max",
+      fetchedAt: "2026-06-02T08:00:00Z",
+    }).run();
+  }
+
+  // Captures the metric the method computes by intercepting its log line.
+  // bus.on returns an unsubscribe fn (there is no bus.off); emit is synchronous.
+  async function runAndCaptureHealth(svc: ReconciliationService): Promise<string | null> {
+    const { bus } = require("../events");
+    let captured: string | null = null;
+    const unsub = bus.on("log", (e: { module: string; message: string }) => {
+      if (e.module === "reconciliation" && e.message.startsWith("ground-truth health:")) {
+        captured = e.message;
+      }
+    });
+    (svc as any).lastGroundTruthHealthAt = 0; // bypass rate-limit
+    await (svc as any).checkGroundTruthHealth();
+    unsub();
+    return captured;
+  }
+
+  // Today is 2026-06-05 per the harness; keep target dates inside the 14d
+  // window. Each seeded (station, target_date) gets a DISTINCT date so the
+  // (station, date) join is 1:1 — mirroring production, where exactly one
+  // bracket market per station per day resolves YES.
+
+  test("all actuals inside bracket → 100%", async () => {
+    seedHealthRow({ id: "a", stationId: "KNYC", targetDate: "2026-06-01", bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
+    seedHealthRow({ id: "b", stationId: "KNYC", targetDate: "2026-06-02", bracketLow: 80, bracketHigh: 81, actualValue: 80.1 });
+
+    const svc = new ReconciliationService({} as never);
+    const msg = await runAndCaptureHealth(svc);
+    expect(msg).toContain("100.0% inside YES bracket");
+    expect(msg).toContain("n=2");
+    expect(msg).toContain("KNYC 100% (2/2)");
+  });
+
+  test("half inside, half outside → 50%", async () => {
+    seedHealthRow({ id: "in", stationId: "KORD", targetDate: "2026-06-01", bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
+    // 71.0 is below the [72,73) bracket → outside (the corrupted-actual case).
+    seedHealthRow({ id: "out", stationId: "KORD", targetDate: "2026-06-02", bracketLow: 72, bracketHigh: 73, actualValue: 71.0 });
+
+    const svc = new ReconciliationService({} as never);
+    const msg = await runAndCaptureHealth(svc);
+    expect(msg).toContain("50.0% inside YES bracket");
+    expect(msg).toContain("KORD 50% (1/2)");
+  });
+
+  test("upper bound is exclusive: actual == bracketHigh counts as outside", async () => {
+    seedHealthRow({ id: "edge", stationId: "KNYC", targetDate: "2026-06-03", bracketLow: 72, bracketHigh: 73, actualValue: 73.0 });
+    const svc = new ReconciliationService({} as never);
+    const msg = await runAndCaptureHealth(svc);
+    expect(msg).toContain("0.0% inside YES bracket");
+  });
+});

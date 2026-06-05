@@ -53,8 +53,20 @@ export interface ReasoningTrace {
   historicalHitRate: number | null;
   /** Historical-prior blend applied (null when weight=0 or hit rate unavailable) */
   historicalPriorBlend: { weight: number; rawProbability: number; blendedProbability: number } | null;
-  /** Market-prior blend applied (null when weight=0 or marketPrice not provided) */
-  marketPriorBlend: { weight: number; marketPrice: number; probabilityBefore: number; probabilityAfter: number } | null;
+  /**
+   * Market-prior blend applied (null when weight=0 or marketPrice not provided).
+   * `weight` is the *effective* applied weight after the disagreement ramp;
+   * `baseWeight` is the flat floor (config.bot.marketPriorWeight); `disagreement`
+   * is |pModel − marketPrice| measured immediately before this blend.
+   */
+  marketPriorBlend: {
+    weight: number;
+    baseWeight: number;
+    disagreement: number;
+    marketPrice: number;
+    probabilityBefore: number;
+    probabilityAfter: number;
+  } | null;
 }
 
 export class ProbabilityEstimator {
@@ -249,21 +261,49 @@ export class ProbabilityEstimator {
       };
     }
 
-    // Market-prior blend. The market is empirically better-calibrated than the
-    // estimator on tight near-mean brackets (Brier 0.134 vs 0.143 over the
-    // 2026-05 audit window). Pulling the model toward market price shrinks the
-    // disastrous "extreme edge" tail (50pp+ implied edge bucket: 19% win rate,
-    // -$64 PnL) without sacrificing the productive 30-50pp band. Gated by
-    // config.bot.marketPriorWeight (0 = disabled). See
-    // improvements/market-prior-2026-05-29.md.
-    const marketPriorWeight = getConfig().bot.marketPriorWeight;
+    // Market-prior blend with a *disagreement-adaptive* weight. The market is
+    // empirically better-calibrated than the estimator on tight near-mean
+    // brackets (Brier 0.134 vs 0.143 over the 2026-05 audit window), and the
+    // model's worst errors are exactly its boldest disagreements: the 40–60pp
+    // implied-edge bucket wins only ~19% (-$93 PnL across 109 trades). A flat
+    // weight of 0.3 is too weak to neutralize those false edges.
+    //
+    // So instead of a constant pull we ramp the weight UP with disagreement:
+    //   - at |pModel − pMarket| ≤ rampStart (0.30): stay at the base 0.3, so
+    //     small-edge trades are left unblunted;
+    //   - between rampStart and rampEnd (0.60): linearly interpolate base → max;
+    //   - at ≥ rampEnd: clamp to max (0.7), aggressively dragging "wild" model
+    //     outputs back toward the market.
+    //
+    // Worked example — KNYC 2026-06-05 (the loss that motivated this):
+    //   model raw 0.19, market 0.80 → disagreement 0.61.
+    //   • Flat w=0.3: blended = 0.7·0.19 + 0.3·0.80 = 0.37 → NO edge
+    //     0.80−0.37 = 0.43 > 0.20 threshold → bot bets NO → loses (actual YES).
+    //     That 43pp "false edge" is the residual the flat weight leaves on.
+    //   • Adaptive w=0.7 (disagreement ≥ rampEnd): blended = 0.3·0.19 + 0.7·0.80
+    //     = 0.62 → NO edge 0.80−0.62 = 0.18 < 0.20 threshold → correctly dropped.
+    //
+    // Gated by config.bot.marketPriorWeight > 0 (0 = disabled, preserves
+    // ship-dark semantics) and only applies when a marketPrice is supplied.
+    // See win-rate-80-plan-2026-06-05.md §4.3 and market-prior-2026-05-29.md.
+    const config = getConfig();
+    const marketPriorWeight = config.bot.marketPriorWeight;
     let marketPriorBlend: ReasoningTrace["marketPriorBlend"] = null;
     if (marketPriorWeight > 0 && marketPrice != null) {
-      const clampedWeight = Math.min(1, Math.max(0, marketPriorWeight));
+      const base = clamp01(marketPriorWeight);
+      const max = Math.max(base, clamp01(config.bot.marketPriorMaxWeight));
+      const disagreement = Math.abs(blendedProbability - marketPrice); // measured BEFORE this blend
+      const rampStart = config.bot.marketPriorRampStart;
+      const rampEnd = Math.max(config.bot.marketPriorRampEnd, rampStart + 1e-9);
+      const t = Math.min(1, Math.max(0, (disagreement - rampStart) / (rampEnd - rampStart)));
+      const weight = base + (max - base) * t;
+
       const before = blendedProbability;
-      blendedProbability = (1 - clampedWeight) * before + clampedWeight * marketPrice;
+      blendedProbability = (1 - weight) * before + weight * marketPrice;
       marketPriorBlend = {
-        weight: clampedWeight,
+        weight,
+        baseWeight: base,
+        disagreement,
         marketPrice,
         probabilityBefore: before,
         probabilityAfter: blendedProbability,
@@ -428,6 +468,11 @@ const BRACKET_HIST_TOLERANCE_F = 3;
 const MAX_EMPIRICAL_SIGMA_WEIGHT = 0.7;
 
 // ── Helpers ────────────────────────────────────────────────
+
+/** Clamp a value into the [0, 1] probability/weight range. */
+export function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
+}
 
 export function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;

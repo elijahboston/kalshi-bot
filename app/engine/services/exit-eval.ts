@@ -16,6 +16,20 @@ export interface ExitEvaluationInput {
     stopLossMinEdge: number;
     exitTimeDaysBeforeClose: number;
     exitTimeMinEdge: number;
+    /**
+     * Winner-hold carve-out threshold, in PROBABILITY units (0-1). When our
+     * side's market price is at or above this level (i.e. the market agrees we
+     * have won) and the position is close to settlement and in profit, suppress
+     * edge-reversal and time-decay exits so the confirmed winner rides to
+     * settlement. Stop-loss still fires. Absent/0 disables the carve-out.
+     * Configured default: 0.90.
+     */
+    exitHoldWinnerPrice?: number;
+    /**
+     * Max hours-to-close for the winner-hold carve-out to apply. Defaults to 6
+     * when the carve-out is enabled (exitHoldWinnerPrice > 0) but this is absent.
+     */
+    exitHoldWinnerMaxHoursToClose?: number;
   };
 }
 
@@ -30,11 +44,41 @@ export interface ExitEvaluationInput {
  *     market noise (Kalshi binary contracts swing hard intraday).
  *  3. Time decay — inside the close window with edge too thin to justify
  *     holding to resolution.
+ *
+ * Winner-hold carve-out (N8, win-rate-80-addendum-2026-06-05.md, Finding 8):
+ * The exit counterfactual on 79 settled paper exits showed 65 exited positions
+ * would have WON at settlement (avg exit 88.6¢ — foregone ≈ $107), while 14
+ * would have lost (saved ≈ $176). Exits stay net-positive, so the logic
+ * remains — but when our side already trades like a confirmed winner near
+ * settlement we suppress the discretionary exits to recover most of that ~$107
+ * without giving back the ~$176 of dodged losses. Concretely, when our side's
+ * price ≥ exitHoldWinnerPrice (default 0.90), hours-to-close is within the
+ * carve-out window, AND the position is in profit, the edge-reversal and
+ * time-decay branches are skipped. Stop-loss is intentionally left untouched
+ * (an in-profit ≥90¢ position cannot trip it anyway, but ordering stays
+ * defensive). Absent/0 exitHoldWinnerPrice disables the carve-out entirely.
  */
 export function evaluateExit(input: ExitEvaluationInput): string | null {
   const { edge, position, currentSidePrice, closeTime, now, config } = input;
 
-  if (edge < config.exitEdgeThreshold) {
+  // Winner-hold determination (computed up front; consulted by the
+  // discretionary exit branches below).
+  const holdPrice = config.exitHoldWinnerPrice ?? 0;
+  const holdMaxHours = config.exitHoldWinnerMaxHoursToClose ?? 6;
+  let holdWinner = false;
+  if (holdPrice > 0 && closeTime) {
+    const hoursToClose = (new Date(closeTime).getTime() - now) / 3_600_000;
+    const liveUnrealized = position.quantity * currentSidePrice - position.costBasis;
+    // currentSidePrice is in CENTS (0-100); holdPrice is in probability units
+    // (0-1) — multiply by 100 to compare on the same scale.
+    holdWinner =
+      currentSidePrice >= holdPrice * 100 && // our side trades ≥ ~90¢ — market agrees we won
+      hoursToClose >= 0 &&
+      hoursToClose <= holdMaxHours &&
+      liveUnrealized > 0; // position is in profit
+  }
+
+  if (!holdWinner && edge < config.exitEdgeThreshold) {
     return `edge reversal (${(edge * 100).toFixed(1)}¢ < ${(config.exitEdgeThreshold * 100).toFixed(1)}¢ threshold)`;
   }
 
@@ -46,7 +90,7 @@ export function evaluateExit(input: ExitEvaluationInput): string | null {
     }
   }
 
-  if (closeTime) {
+  if (!holdWinner && closeTime) {
     const daysUntilClose = (new Date(closeTime).getTime() - now) / (1000 * 60 * 60 * 24);
     if (daysUntilClose <= config.exitTimeDaysBeforeClose && edge < config.exitTimeMinEdge) {
       return `time decay (${(daysUntilClose * 24).toFixed(1)}h to close, edge ${(edge * 100).toFixed(1)}¢ < ${(config.exitTimeMinEdge * 100).toFixed(0)}¢)`;

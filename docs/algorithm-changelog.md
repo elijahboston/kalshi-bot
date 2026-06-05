@@ -8,6 +8,28 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
+## 2026-06-05
+
+### `calibration` — Settlement-truth ground-truth repair + health telemetry
+- **Change:** `backfillActualValue` / `backfillHistoricalForecastActuals` now derive `weather_forecasts.actual_value` from the **Kalshi settlement** first (YES bracket midpoint; tails → threshold ± 0.5), tagging rows with new column `actual_source` (`settlement` | `obs_max`). The NWS-observation fallback now windows on the station's **local calendar day** (DST-correct, defers until the local day completes) instead of the UTC day. New hourly `checkGroundTruthHealth()` logs trailing-14d pct-of-actuals-inside-YES-bracket per station, warning under 90%. One-time `scripts/rebuild-ground-truth.ts` repaired 480 rows and rebuilt `station_bias`: pct-inside went **30.4% → 100%**; KORD bias −0.97 → −0.07 and KNYC +1.04 → +0.53 (phantom artifact removed), KMIA −2.65 → −2.78 (real bias preserved).
+- **Why:** Recorded actuals disagreed with Kalshi settlement on ~70% of days; per-station offset correlated almost perfectly with PnL (KNYC −1.07°F / −$69, KORD +0.78°F / −$70, KDEN ±0 / +$25). Bias and empirical sigma were being trained on corrupted ground truth, mis-anchoring corrected means by ~1°F (half a bracket) at exactly the losing stations — the upstream cause of the contra-market NO book.
+- **Doc:** [`improvements/win-rate-80-addendum-2026-06-05.md`](improvements/win-rate-80-addendum-2026-06-05.md) (N1, N11)
+
+### `estimator` — Adaptive market-prior weight (ramps with disagreement)
+- **Change:** The flat `market_prior_weight` (0.3) blend now ramps to `marketPriorMaxWeight` (0.7) as `|pModel − pMarket|` grows from `marketPriorRampStart` (0.30) to `marketPriorRampEnd` (0.60). Trace gains `baseWeight` / `disagreement` / effective `weight`. Outer ship-dark gate unchanged (`market_prior_weight > 0`).
+- **Why:** Flat w=0.3 left 40¢+ residual "false edges" when the model wildly disagreed with the market — exactly the trades that won 19%. Verified on the KNYC 2026-06-05 loss: raw 0.19 vs market 0.80 → old blend 0.37 (NO edge 0.43, traded, lost); new blend 0.62 (NO edge 0.18 < 0.20 threshold, correctly dropped).
+- **Doc:** [`improvements/win-rate-80-plan-2026-06-05.md`](improvements/win-rate-80-plan-2026-06-05.md) (#3)
+
+### `execution` — Winner-settle exit carve-out
+- **Change:** `evaluateExit` suppresses edge-reversal and time-decay exits when our side trades ≥ `exitHoldWinnerPrice` (0.90), close is ≤ `exitHoldWinnerMaxHoursToClose` (6h) away, and the position is in profit. Stop-loss unaffected.
+- **Why:** 65 of 79 settled paper exits foreclosed positions that would have won, selling at avg 88.6¢ what paid 100¢ at close (~$107 foregone); the 14 genuinely-saved exits (~$176) all involved different conditions. The carve-out keeps the saves and recovers the foregone wins.
+- **Doc:** [`improvements/win-rate-80-addendum-2026-06-05.md`](improvements/win-rate-80-addendum-2026-06-05.md) (N8)
+
+### `execution` — Win-rate-80 entry gates (concordance / side-vs-market / coin-flip / station health)
+- **Change:** New pure helper `evaluateEntryGates` in `@kcb/signals` (`app/signals/services/entry-gates.ts`), wired into the orchestrator Phase-3 ladder right after the tail gate. Four fail-fast sub-gates, each independently disabled by a 0/empty config value: (1) **station health** — block new entries on `disabledStations`; (2) **side-vs-market** — block `buy_no` when `marketPrice ≥ noSideMaxMarketPrice` (0.65) and `buy_yes` when `marketPrice ≤ yesSideMinMarketPrice` (0.35); (3) **concordance** — block when `|estimatedProb − marketPrice| > disagreementCap` (0.25); (4) **coin-flip dead zone** — block when `marketPrice ∈ [coinFlipZoneLow, coinFlipZoneHigh]` (0.40–0.60). Specific reason strings persist to `signals.skip_reason`.
+- **Why:** 109 of 200 paper trades were contra-market `buy_no` against a market pricing YES at 65–85¢ — they won 19.4% and lost ~$85. `|edge|>25pp` trades ran 47%; 45–55¢ markets ran 48.7% (coin flip minus spread). These hard gates strip the bot's anti-edge posture rather than tune it.
+- **Doc:** [`improvements/win-rate-80-plan-2026-06-05.md`](improvements/win-rate-80-plan-2026-06-05.md) (#1/#7), [`improvements/win-rate-80-addendum-2026-06-05.md`](improvements/win-rate-80-addendum-2026-06-05.md) (N7)
+
 ## 2026-05-29
 
 ### `calibration` — Multi-horizon station_bias warming + actuals backfill

@@ -16,5 +16,10 @@ export {
   persistAdaptiveThresholds,
   computeBucketThreshold,
 } from "./services/adaptive-threshold";
-export { evaluateTailGate } from "./services/entry-gates";
-export type { TailGateInput, TailGateResult } from "./services/entry-gates";
+export { evaluateTailGate, evaluateEntryGates } from "./services/entry-gates";
+export type {
+  TailGateInput,
+  TailGateResult,
+  EntryGateInput,
+  EntryGateResult,
+} from "./services/entry-gates";

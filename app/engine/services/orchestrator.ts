@@ -7,7 +7,7 @@ import { registerTick, startLoop, stopLoop, getLoopState } from "./loop";
 import { discoverMarkets } from "./discovery";
 import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService, NwsService } from "@kcb/data";
-import { ProbabilityEstimator, getEffectiveThreshold, evaluateTailGate } from "@kcb/signals";
+import { ProbabilityEstimator, getEffectiveThreshold, evaluateTailGate, evaluateEntryGates } from "@kcb/signals";
 import type { EstimateResult, ObservationAdjustment } from "@kcb/signals";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld, restoreAntiChurnState } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
@@ -255,6 +255,29 @@ export async function initOrchestrator(): Promise<void> {
           })
         : { allowed: true as const };
 
+      // Win-rate-80 entry gates. The bot loses by fading confident markets
+      // (buy_no into a ≥65¢ market won 19.4% / −$85), by acting on large
+      // model/market disagreement (|edge|>25pp ran 47%), and by trading
+      // coin-flip 45-55¢ markets (48.7% win). These hard gates strip that
+      // contra-market posture. See improvements/win-rate-80-plan-2026-06-05.md
+      // (#1/#7) and improvements/win-rate-80-addendum-2026-06-05.md (N7).
+      const entryGates = side
+        ? evaluateEntryGates({
+            side,
+            estimatedProb: estimate.probability,
+            marketPrice,
+            stationId: market.stationId,
+            config: {
+              disagreementCap: config.bot.disagreementCap,
+              noSideMaxMarketPrice: config.bot.noSideMaxMarketPrice,
+              yesSideMinMarketPrice: config.bot.yesSideMinMarketPrice,
+              coinFlipZoneLow: config.bot.coinFlipZoneLow,
+              coinFlipZoneHigh: config.bot.coinFlipZoneHigh,
+              disabledStations: config.bot.disabledStations,
+            },
+          })
+        : { allowed: true as const };
+
       if (!side || edge <= 0) {
         skipReason = "no edge";
       } else if (!inSniperWindow) {
@@ -269,6 +292,8 @@ export async function initOrchestrator(): Promise<void> {
         skipReason = `confidence ${estimate.confidence.toFixed(2)} < ${config.bot.minConfidence}`;
       } else if (!tailGate.allowed) {
         skipReason = tailGate.reason ?? "tail gate blocked";
+      } else if (!entryGates.allowed) {
+        skipReason = entryGates.reason ?? "entry gate blocked";
       } else {
         recommendation = side === "yes" ? "buy_yes" : "buy_no";
       }
@@ -391,6 +416,10 @@ export async function initOrchestrator(): Promise<void> {
             stopLossMinEdge: config.bot.stopLossMinEdge,
             exitTimeDaysBeforeClose: config.bot.exitTimeDaysBeforeClose,
             exitTimeMinEdge: config.bot.exitTimeMinEdge,
+            // Winner-hold carve-out (addendum N8): let near-settled winners ride
+            // instead of selling at ~89¢ for a position that pays 100¢ at close.
+            exitHoldWinnerPrice: config.bot.exitHoldWinnerPrice,
+            exitHoldWinnerMaxHoursToClose: config.bot.exitHoldWinnerMaxHoursToClose,
           },
         });
 

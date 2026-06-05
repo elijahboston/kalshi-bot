@@ -35,6 +35,10 @@ export const markets = sqliteTable("markets", {
   lastYesPrice: integer("last_yes_price"),
   /** Last known NO price in cents (0-100) */
   lastNoPrice: integer("last_no_price"),
+  /** Best YES bid in cents (0-100), from the ticker feed. Null until first ticker message. */
+  yesBid: integer("yes_bid"),
+  /** Best YES ask in cents (0-100), from the ticker feed. Null until first ticker message. */
+  yesAsk: integer("yes_ask"),
   /** When we first saw this market */
   discoveredAt: text("discovered_at").notNull(),
   /** Last time we updated this record */

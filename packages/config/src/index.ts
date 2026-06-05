@@ -74,6 +74,53 @@ export interface BotConfig {
     stationEdgeSurcharge: Record<string, number>;
     /** Maximum horizon (days) to warm multi-day forecast cache + backfill actuals for. 0 = disabled (only same-day forecasts stored). Enables multi-horizon station_bias rows — see improvements/multi-horizon-bias-2026-05-29.md. */
     multiHorizonBiasMaxDays: number;
+
+    // ── Win-rate-80 entry gates (win-rate-80-plan-2026-06-05.md #1/#7, addendum N7) ──
+    /** Max |estimatedProb − marketPrice| allowed on a contrarian entry. The market is better-calibrated than the model; large disagreement is evidence the model is wrong, not the market (the 50pp+ "edge" bucket ran 19% win rate). 0 = gate disabled. */
+    disagreementCap: number;
+    /** Block buy_no when marketPrice ≥ this (the market is saying YES — contra-NO bets won 19.4%). 0 = disabled. */
+    noSideMaxMarketPrice: number;
+    /** Block buy_yes when marketPrice ≤ this (mirror of noSideMaxMarketPrice). 0 = disabled. */
+    yesSideMinMarketPrice: number;
+    /** Coin-flip dead zone: skip contrarian entries when marketPrice ∈ [low, high] — 45-55¢ markets ran 48.7% win (coin flip minus spread). Both 0 = disabled. */
+    coinFlipZoneLow: number;
+    coinFlipZoneHigh: number;
+    /** Stations blocked from new entries (health gate). Tracked/estimated as usual so data keeps accruing for re-enable decisions. */
+    disabledStations: string[];
+
+    // ── Adaptive market prior (win-rate-80-plan-2026-06-05.md #3) ──
+    /** Max market-prior weight reached when model/market disagreement ≥ marketPriorRampEnd. Must be ≥ marketPriorWeight; equal = flat blend (ramp disabled). */
+    marketPriorMaxWeight: number;
+    /** Disagreement (|pModel − pMarket|) where the weight ramp starts. */
+    marketPriorRampStart: number;
+    /** Disagreement where the ramp reaches marketPriorMaxWeight. */
+    marketPriorRampEnd: number;
+
+    // ── Exit carve-out (addendum N8) ──
+    /** Suppress edge-reversal/time-decay exits when our side's market price ≥ this and the position is in profit near close — let confirmed winners settle (65/79 historical exits foreclosed wins at avg 88.6¢). Stop-loss still fires. 0 = disabled. */
+    exitHoldWinnerPrice: number;
+    /** The winner-hold carve-out only applies within this many hours of close. */
+    exitHoldWinnerMaxHoursToClose: number;
+
+    // ── Confirmation mode (win-rate-80-plan-2026-06-05.md #2) ──
+    /** Enable the confirmation signal pathway: take the popular side when the market is confident and the model agrees. Ships dark; enable via runtime_config. */
+    confirmationModeEnabled: boolean;
+    /** Market conviction required: buy YES when marketPrice ≥ this, buy NO when marketPrice ≤ (1 − this). */
+    confirmationMinMarketConviction: number;
+    /** Model agreement required: estimatedProb ≥ this for YES (≤ 1−this for NO). Replayed 2026-04→06: YES arm 15/15, NO arm 95.3%. */
+    confirmationMinModelAgreement: number;
+    /** Flat bet size in cents for confirmation entries (they bypass edge threshold — edge is structurally small). */
+    confirmationBetSizeCents: number;
+    /** Max contract price (0-1) the bot may pay on a confirmation entry — keeps minimum payoff ≥ (1 − this). */
+    confirmationMaxEntryPrice: number;
+
+    // ── Data-quality gates (addendum N4/N5/N6) ──
+    /** Skip same-day signals when HRRR contributed zero members inside the sniper window (addendum N5). */
+    requireHrrrInSniper: boolean;
+    /** Ensemble cache TTL (hours) when targetDate is today — fresher data near close (addendum N6). Scout-horizon TTL stays at the service default. */
+    sameDayEnsembleTtlHours: number;
+    /** Skip entries when the order book spread (yesAsk − yesBid) exceeds this many cents; 0 = disabled (addendum N4). */
+    maxSpreadCents: number;
   };
 
   /** Calibration parameters */
@@ -184,6 +231,25 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   tail_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.tailMaxEntryPrice = n; },
   station_edge_surcharge: (c, v) => { c.bot.stationEdgeSurcharge = parseStationSurcharge(v); },
   multi_horizon_bias_max_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.multiHorizonBiasMaxDays = n; },
+  disagreement_cap: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.disagreementCap = n; },
+  no_side_max_market_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.noSideMaxMarketPrice = n; },
+  yes_side_min_market_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.yesSideMinMarketPrice = n; },
+  coin_flip_zone_low: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.coinFlipZoneLow = n; },
+  coin_flip_zone_high: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.coinFlipZoneHigh = n; },
+  disabled_stations: (c, v) => { c.bot.disabledStations = v.split(",").map(s => s.trim()).filter(Boolean); },
+  market_prior_max_weight: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorMaxWeight = n; },
+  market_prior_ramp_start: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorRampStart = n; },
+  market_prior_ramp_end: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.marketPriorRampEnd = n; },
+  exit_hold_winner_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitHoldWinnerPrice = n; },
+  exit_hold_winner_max_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitHoldWinnerMaxHoursToClose = n; },
+  confirmation_mode_enabled: (c, v) => { c.bot.confirmationModeEnabled = v === "true" || v === "1"; },
+  confirmation_min_market_conviction: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMinMarketConviction = n; },
+  confirmation_min_model_agreement: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMinModelAgreement = n; },
+  confirmation_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationBetSizeCents = n; },
+  confirmation_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMaxEntryPrice = n; },
+  require_hrrr_in_sniper: (c, v) => { c.bot.requireHrrrInSniper = v === "true" || v === "1"; },
+  same_day_ensemble_ttl_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sameDayEnsembleTtlHours = n; },
+  max_spread_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxSpreadCents = n; },
 };
 
 /** Load config from environment variables with sensible defaults */
@@ -237,6 +303,32 @@ export function loadConfig(): BotConfig {
       tailMaxEntryPrice: envNum("TAIL_MAX_ENTRY_PRICE", 0), // ship dark; runtime row sets 0.10
       stationEdgeSurcharge: parseStationSurcharge(env("STATION_EDGE_SURCHARGE")), // ship empty; runtime row populates
       multiHorizonBiasMaxDays: envNum("MULTI_HORIZON_BIAS_MAX_DAYS", 0), // ship dark; runtime row sets to 3
+      // Win-rate-80 entry gates — active by default (paper mode). See win-rate-80-plan-2026-06-05.md.
+      disagreementCap: envNum("DISAGREEMENT_CAP", 0.25),
+      noSideMaxMarketPrice: envNum("NO_SIDE_MAX_MARKET_PRICE", 0.65),
+      yesSideMinMarketPrice: envNum("YES_SIDE_MIN_MARKET_PRICE", 0.35),
+      coinFlipZoneLow: envNum("COIN_FLIP_ZONE_LOW", 0.40),
+      coinFlipZoneHigh: envNum("COIN_FLIP_ZONE_HIGH", 0.60),
+      disabledStations: env("DISABLED_STATIONS")
+        ? env("DISABLED_STATIONS").split(",").map(s => s.trim()).filter(Boolean)
+        : [], // runtime row seeds KORD,KLAX,KNYC
+      // Adaptive market prior: w ramps base→max as |pModel − pMarket| goes rampStart→rampEnd
+      marketPriorMaxWeight: envNum("MARKET_PRIOR_MAX_WEIGHT", 0.7),
+      marketPriorRampStart: envNum("MARKET_PRIOR_RAMP_START", 0.30),
+      marketPriorRampEnd: envNum("MARKET_PRIOR_RAMP_END", 0.60),
+      // Exit carve-out: let confirmed winners ride to settlement (addendum N8)
+      exitHoldWinnerPrice: envNum("EXIT_HOLD_WINNER_PRICE", 0.90),
+      exitHoldWinnerMaxHoursToClose: envNum("EXIT_HOLD_WINNER_MAX_HOURS", 6),
+      // Confirmation mode — ships dark; runtime row enables after gate verification
+      confirmationModeEnabled: envBool("CONFIRMATION_MODE_ENABLED", false),
+      confirmationMinMarketConviction: envNum("CONFIRMATION_MIN_MARKET_CONVICTION", 0.80),
+      confirmationMinModelAgreement: envNum("CONFIRMATION_MIN_MODEL_AGREEMENT", 0.50),
+      confirmationBetSizeCents: envNum("CONFIRMATION_BET_SIZE_CENTS", 500),
+      confirmationMaxEntryPrice: envNum("CONFIRMATION_MAX_ENTRY_PRICE", 0.93),
+      // Data-quality gates (addendum N4/N5/N6)
+      requireHrrrInSniper: envBool("REQUIRE_HRRR_IN_SNIPER", true),
+      sameDayEnsembleTtlHours: envNum("SAME_DAY_ENSEMBLE_TTL_HOURS", 2),
+      maxSpreadCents: envNum("MAX_SPREAD_CENTS", 10),
     },
     calibration: {
       biasWindowDays: envNum("BIAS_WINDOW_DAYS", 30),

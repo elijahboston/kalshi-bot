@@ -23,12 +23,114 @@ import { uuid, now } from "@kcb/shared";
 
 const log = createLogger("reconciliation");
 
+/**
+ * IANA timezone per enabled station. Duplicated here (rather than imported from
+ * @kcb/signals) on purpose: engine → signals would be a backwards dependency.
+ * Keep in sync with STATION_TZ in app/signals/services/estimator.ts.
+ */
+const STATION_TZ: Record<string, string> = {
+  KNYC: "America/New_York",
+  KMIA: "America/New_York",
+  KORD: "America/Chicago",
+  KAUS: "America/Chicago",
+  KDEN: "America/Denver",
+  KLAX: "America/Los_Angeles",
+};
+
+const DEFAULT_TZ = "America/New_York";
+
+/**
+ * Compute the UTC instants bracketing a station's LOCAL calendar day.
+ *
+ * The legacy NWS obs query used `{date}T00:00:00Z → T23:59:59Z`, i.e. the UTC
+ * day. For US stations that window starts in the *previous* local evening
+ * (00–06Z) and clips the end of the local day, contaminating the max with the
+ * prior evening and undersampling the true afternoon peak — a primary cause of
+ * the ~70% ground-truth mismatch documented in win-rate-80-addendum-2026-06-05.md
+ * (Finding 1 / N1). This returns `[startUtc, endUtc)` covering exactly the
+ * station's local `targetDate` (00:00 local of targetDate up to, but excluding,
+ * 00:00 local of the following day), plus the UTC instant of the local midnight
+ * that ENDS the day (used to decide whether the day is complete).
+ */
+export function localDayWindowUtc(
+  targetDate: string,
+  tz: string,
+): { startUtc: Date; endUtc: Date } {
+  // The UTC offset (minutes) a timezone applies to a given instant. Positive
+  // means local is behind UTC (e.g. New_York = +240/+300). Derived by formatting
+  // a probe instant in the target tz and diffing the wall-clock from UTC.
+  const offsetMinutes = (atUtcMs: number): number => {
+    const d = new Date(atUtcMs);
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = fmt.formatToParts(d);
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+    // Wall-clock the tz reports for this instant, interpreted as if it were UTC.
+    const asUtc = Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      get("hour"),
+      get("minute"),
+      get("second"),
+    );
+    return (asUtc - atUtcMs) / 60000;
+  };
+
+  // Resolve the UTC instant of a given local wall-clock midnight. Start from the
+  // naive UTC guess, then correct by the offset that applies at that guess (one
+  // pass is exact except across the ~2 DST transitions/year; a second pass
+  // converges those).
+  const localMidnightUtc = (dateStr: string): number => {
+    const [y, m, d] = dateStr.split("-").map(Number) as [number, number, number];
+    let guess = Date.UTC(y, m - 1, d, 0, 0, 0);
+    for (let i = 0; i < 2; i++) {
+      const off = offsetMinutes(guess);
+      const corrected = Date.UTC(y, m - 1, d, 0, 0, 0) - off * 60000;
+      if (corrected === guess) break;
+      guess = corrected;
+    }
+    return guess;
+  };
+
+  const startMs = localMidnightUtc(targetDate);
+  // Next local day = targetDate + 1 (date arithmetic via UTC noon to dodge DST
+  // edge wobble, then re-resolve that day's local midnight).
+  const nextDateStr = new Date(
+    Date.UTC(
+      ...(targetDate.split("-").map(Number) as [number, number, number]).map(
+        (v, i) => (i === 1 ? v - 1 : v),
+      ) as [number, number, number],
+      12,
+    ) + 86400_000,
+  )
+    .toISOString()
+    .slice(0, 10);
+  const endMs = localMidnightUtc(nextDateStr);
+
+  return { startUtc: new Date(startMs), endUtc: new Date(endMs) };
+}
+
+/** Resolve a station's IANA timezone, defaulting to US Eastern. */
+function stationTz(stationId: string): string {
+  return STATION_TZ[stationId] ?? DEFAULT_TZ;
+}
+
 export class ReconciliationService {
   private kalshi: KalshiClient;
   private ensembleService: EnsembleService;
   /** Timestamp gates to rate-limit periodic background work. */
   private lastMultiHorizonWarmAt = 0;
   private lastActualsBackfillAt = 0;
+  private lastGroundTruthHealthAt = 0;
 
   constructor(kalshiClient?: KalshiClient, ensembleService?: EnsembleService) {
     this.kalshi = kalshiClient || new KalshiClient();
@@ -51,6 +153,7 @@ export class ReconciliationService {
       await persistAdaptiveThresholds();
       await this.warmMultiHorizonForecasts();
       await this.backfillHistoricalForecastActuals();
+      await this.checkGroundTruthHealth();
       await this.snapshotBalance();
     } catch (err) {
       log.error(
@@ -991,12 +1094,20 @@ export class ReconciliationService {
   }
 
   /**
-   * Try to backfill the actual observed value from NWS observations.
+   * Try to backfill the actual observed value for a resolved market.
    *
-   * When cached forecast rows exist, their `actual_value` is filled. When no
-   * row exists (cache evicted, DB reset, retention gap), a synthetic row is
-   * synthesized from the most recent signal's reasoning trace for this market
-   * so the station-bias feedback loop survives any retention issue.
+   * Priority (win-rate-80-addendum-2026-06-05.md N1): Kalshi settlement is the
+   * authoritative truth. We derive the official high from the settled YES
+   * bracket and store its center with `actual_source = 'settlement'`. Only when
+   * no YES settlement is available do we fall back to the NWS-observation path
+   * (`actual_source = 'obs_max'`), which is interval-biased and disagreed with
+   * settlement on ~70% of days — see `deriveSettlementActual` / Finding 1.
+   *
+   * When cached forecast rows exist, their `actual_value`/`actual_source` are
+   * filled. When no row exists (cache evicted, DB reset, retention gap), a
+   * synthetic row is synthesized from the most recent signal's reasoning trace
+   * for this market so the station-bias feedback loop survives any retention
+   * issue.
    */
   private async backfillActualValue(market: {
     ticker?: string;
@@ -1022,24 +1133,25 @@ export class ReconciliationService {
     const hasUnfilledRow = forecasts.some((f) => f.actualValue == null);
     if (hasAnyRow && !hasUnfilledRow) return;
 
-    const actual = await this.fetchNwsActualValue(
+    const resolved = await this.resolveActualValue(
       market.stationId,
       market.targetDate,
       market.category
     );
-    if (actual == null) return;
+    if (resolved == null) return;
+    const { value: actual, source } = resolved;
 
     if (hasUnfilledRow) {
       for (const f of forecasts) {
         if (f.actualValue == null) {
           await db
             .update(weatherForecasts)
-            .set({ actualValue: actual })
+            .set({ actualValue: actual, actualSource: source })
             .where(eq(weatherForecasts.id, f.id));
         }
       }
       log.debug(
-        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)}`
+        `Backfilled actual ${market.category} for ${market.stationId} on ${market.targetDate}: ${actual.toFixed(1)} (${source})`
       );
       return;
     }
@@ -1053,24 +1165,116 @@ export class ReconciliationService {
       market.stationId,
       market.targetDate,
       market.category,
-      actual
+      actual,
+      source
     );
     if (synthesized) {
       log.debug(
-        `Synthesized weather_forecast for ${market.stationId} ${market.targetDate} from signal trace: actual=${actual.toFixed(1)}`
+        `Synthesized weather_forecast for ${market.stationId} ${market.targetDate} from signal trace: actual=${actual.toFixed(1)} (${source})`
       );
     }
   }
 
-  /** Fetch observed value from NWS for a given station/date/category. */
+  /**
+   * Resolve the authoritative actual value for a station/date/category, with
+   * settlement-derived truth taking priority over the NWS-observation fallback.
+   * Returns `{ value, source }` or null if neither path can produce a number.
+   * Centralizes the N1 priority so every backfill caller behaves identically.
+   */
+  private async resolveActualValue(
+    stationId: string,
+    targetDate: string,
+    category: string
+  ): Promise<{ value: number; source: "settlement" | "obs_max" } | null> {
+    // 1. Primary: Kalshi settlement (interval-censored but unbiased).
+    const settled = await this.deriveSettlementActual(
+      stationId,
+      targetDate,
+      category
+    );
+    if (settled != null) return settled;
+
+    // 2. Fallback: max/min of NWS hourly observations over the local day.
+    const obs = await this.fetchNwsActualValue(stationId, targetDate, category);
+    if (obs != null) return { value: obs, source: "obs_max" };
+
+    return null;
+  }
+
+  /**
+   * Derive the official actual value from the settled YES Kalshi market for a
+   * station/date/category — the authoritative settlement truth (N1). Kalshi
+   * settles on the official NWS climate report, so the YES bracket is guaranteed
+   * to contain the true high; its center is an unbiased estimator (vs. the
+   * obs-max path which lands inside the YES bracket only ~30% of the time).
+   *
+   * - bracket    YES → midpoint (bracketLow + bracketHigh) / 2
+   * - upper_tail YES (actual > bracketLow) → bracketLow + 0.5
+   * - lower_tail YES (actual < bracketLow) → bracketLow − 0.5
+   * - no settled YES row → null (unsettled or data gap → caller falls back)
+   */
+  private async deriveSettlementActual(
+    stationId: string,
+    targetDate: string,
+    category: string
+  ): Promise<{ value: number; source: "settlement" } | null> {
+    const db = getDb();
+
+    const [yesMarket] = await db
+      .select()
+      .from(markets)
+      .where(
+        and(
+          eq(markets.stationId, stationId),
+          eq(markets.targetDate, targetDate),
+          eq(markets.category, category),
+          eq(markets.result, "yes")
+        )
+      )
+      .limit(1);
+
+    if (!yesMarket || yesMarket.bracketLow == null) return null;
+
+    if (yesMarket.marketType === "upper_tail") {
+      return { value: yesMarket.bracketLow + 0.5, source: "settlement" };
+    }
+    if (yesMarket.marketType === "lower_tail") {
+      return { value: yesMarket.bracketLow - 0.5, source: "settlement" };
+    }
+    // bracket: need an upper bound for the midpoint.
+    if (yesMarket.bracketHigh == null) return null;
+    return {
+      value: (yesMarket.bracketLow + yesMarket.bracketHigh) / 2,
+      source: "settlement",
+    };
+  }
+
+  /**
+   * Fetch observed value from NWS for a given station/date/category (obs_max
+   * fallback path, used only when settlement truth is unavailable — N1).
+   *
+   * Windows on the station's LOCAL calendar day (via its IANA timezone) rather
+   * than the UTC day: the legacy `T00:00:00Z → T23:59:59Z` window pulled the
+   * previous local evening into the max and clipped the afternoon peak, a
+   * primary driver of the obs-vs-settlement disagreement (Finding 1). Also
+   * refuses to run until the local day is COMPLETE (now past the local midnight
+   * that ends targetDate) — backfilling mid-afternoon would record a partial-day
+   * max as the daily high. Returns null in that case so a later pass retries.
+   */
   private async fetchNwsActualValue(
     stationId: string,
     targetDate: string,
     category: string
   ): Promise<number | null> {
     try {
+      const tz = stationTz(stationId);
+      const { startUtc, endUtc } = localDayWindowUtc(targetDate, tz);
+
+      // Local day not finished yet → defer (avoid recording a partial-day max).
+      if (Date.now() < endUtc.getTime()) return null;
+
       const res = await fetch(
-        `https://api.weather.gov/stations/${stationId}/observations?start=${targetDate}T00:00:00Z&end=${targetDate}T23:59:59Z`,
+        `https://api.weather.gov/stations/${stationId}/observations?start=${startUtc.toISOString()}&end=${endUtc.toISOString()}`,
         { headers: { "User-Agent": "KalshiClimateBot/1.0" } }
       );
       if (!res.ok) return null;
@@ -1143,7 +1347,8 @@ export class ReconciliationService {
     stationId: string,
     targetDate: string,
     category: string,
-    actual: number
+    actual: number,
+    actualSource: "settlement" | "obs_max" = "obs_max"
   ): Promise<boolean> {
     const db = getDb();
 
@@ -1183,6 +1388,7 @@ export class ReconciliationService {
       ensembleMean: trace.rawEnsembleStats?.mean ?? null,
       ensembleStd: trace.rawEnsembleStats?.std ?? null,
       actualValue: actual,
+      actualSource,
       fetchedAt: now(),
     });
 
@@ -1274,15 +1480,18 @@ export class ReconciliationService {
     let filled = 0;
     const touchedStations = new Set<string>();
     for (const f of stale) {
-      const actual = await this.fetchNwsActualValue(
+      // Same settlement-first priority as the market-resolution backfill (N1):
+      // a settled YES bracket wins over the obs-max fallback. Multi-horizon rows
+      // for a station+date often coexist with that date's settled markets.
+      const resolved = await this.resolveActualValue(
         f.stationId,
         f.targetDate,
         f.forecastType
       );
-      if (actual == null) continue;
+      if (resolved == null) continue;
       await db
         .update(weatherForecasts)
-        .set({ actualValue: actual })
+        .set({ actualValue: resolved.value, actualSource: resolved.source })
         .where(eq(weatherForecasts.id, f.id));
       filled++;
       touchedStations.add(f.stationId);
@@ -1303,9 +1512,98 @@ export class ReconciliationService {
   }
 
   /**
-   * Recompute rolling station bias for all horizons of a station.
+   * N11 ground-truth mismatch telemetry (win-rate-80-addendum-2026-06-05.md).
+   *
+   * Finding 1 — our recorded `actual_value` disagreed with the Kalshi YES
+   * settlement on ~70% of days — went undetected for ~3 months. This is the
+   * permanent regression alarm: over the trailing 14 days, for every settled
+   * YES bracket market joined to a weather_forecasts row on (station, date),
+   * compute the fraction whose `actual_value` lies inside [bracketLow,
+   * bracketHigh). Logs a per-station summary at info and warns when the overall
+   * rate < 90%. Deliberately NOT a `bot:error` bus event — that would spam the
+   * TUI; we keep it queryable via the stable `ground-truth health:` log prefix.
+   *
+   * Rate-limited to once per hour (same pattern as warmMultiHorizonForecasts).
    */
-  private async recomputeStationBias(stationId: string): Promise<void> {
+  async checkGroundTruthHealth(): Promise<void> {
+    const HOUR_MS = 60 * 60 * 1000;
+    if (Date.now() - this.lastGroundTruthHealthAt < HOUR_MS) return;
+    this.lastGroundTruthHealthAt = Date.now();
+
+    const db = getDb();
+    const cutoff = new Date(Date.now() - 14 * 86400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    // Settled YES bracket markets in the window, joined to their forecast rows.
+    // Only `bracket` markets have a finite [low, high) to test containment on;
+    // tails have no upper bound so they're excluded from the metric.
+    const rows = await db
+      .select({
+        stationId: markets.stationId,
+        bracketLow: markets.bracketLow,
+        bracketHigh: markets.bracketHigh,
+        actualValue: weatherForecasts.actualValue,
+      })
+      .from(markets)
+      .innerJoin(
+        weatherForecasts,
+        and(
+          eq(weatherForecasts.stationId, markets.stationId),
+          eq(weatherForecasts.targetDate, markets.targetDate)
+        )
+      )
+      .where(
+        and(
+          eq(markets.result, "yes"),
+          eq(markets.marketType, "bracket"),
+          sql`${markets.targetDate} >= ${cutoff}`,
+          sql`${weatherForecasts.actualValue} IS NOT NULL`,
+          sql`${markets.bracketLow} IS NOT NULL`,
+          sql`${markets.bracketHigh} IS NOT NULL`
+        )
+      );
+
+    if (rows.length === 0) return;
+
+    const perStation = new Map<string, { inside: number; total: number }>();
+    let insideAll = 0;
+    for (const r of rows) {
+      const station = r.stationId ?? "unknown";
+      const inside =
+        r.actualValue! >= r.bracketLow! && r.actualValue! < r.bracketHigh!;
+      const s = perStation.get(station) ?? { inside: 0, total: 0 };
+      s.total += 1;
+      if (inside) {
+        s.inside += 1;
+        insideAll += 1;
+      }
+      perStation.set(station, s);
+    }
+
+    const overallPct = (insideAll / rows.length) * 100;
+    const perStationStr = [...perStation.entries()]
+      .map(
+        ([st, s]) =>
+          `${st} ${((s.inside / s.total) * 100).toFixed(0)}% (${s.inside}/${s.total})`
+      )
+      .join(", ");
+
+    const summary = `ground-truth health: ${overallPct.toFixed(1)}% inside YES bracket over 14d (n=${rows.length}) — ${perStationStr}`;
+    if (overallPct < 90) {
+      log.warn(summary);
+    } else {
+      log.info(summary);
+    }
+  }
+
+  /**
+   * Recompute rolling station bias for all horizons of a station.
+   * Public + DB-only (no network): the one-time ground-truth rebuild
+   * (scripts/rebuild-ground-truth.ts, N1 step 5) calls this directly after
+   * wiping station_bias and repairing actuals from settlement.
+   */
+  async recomputeStationBias(stationId: string): Promise<void> {
     const config = getConfig();
     const db = getDb();
     const windowDays = config.calibration.biasWindowDays;

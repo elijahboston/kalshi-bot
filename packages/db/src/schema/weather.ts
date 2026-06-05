@@ -29,6 +29,10 @@ export const weatherForecasts = sqliteTable("weather_forecasts", {
   ensembleStd: real("ensemble_std"),
   /** Actual observed value (filled after resolution) */
   actualValue: real("actual_value"),
+  /** Provenance of actualValue: "settlement" (derived from the Kalshi YES bracket — primary),
+   * "cli" (NWS CLI climate report), or "obs_max" (max of hourly NWS observations — legacy,
+   * known to disagree with settlement ~70% of days; see win-rate-80-addendum-2026-06-05.md N1). */
+  actualSource: text("actual_source"),
   /** When this forecast was fetched */
   fetchedAt: text("fetched_at").notNull(),
 });
