@@ -17,6 +17,90 @@ import { uuid, now, seriesCategory } from "@kcb/shared";
 const log = createLogger("orchestrator");
 
 /**
+ * A signal the bot intends to act on this tick (passed Phase 3's ladder/
+ * confirmation filters). Lifted to module scope so the N2 argmax helper
+ * ({@link selectArgmaxPerEvent}) and its unit test can share the shape.
+ */
+export interface ActionableSignal {
+  id: string;
+  ticker: string;
+  seriesTicker: string;
+  /** Event this market belongs to — drives the N2 argmax-per-event selection. */
+  eventTicker: string;
+  estimatedProb: number;
+  confidence: number;
+  marketPrice: number;
+  edge: number;
+  edgeThreshold: number;
+  recommendation: string;
+  side: "yes" | "no" | null;
+  kellyFraction: number | null;
+  ensembleSize: number;
+  reasoning: string;
+}
+
+/**
+ * Argmax-per-event selection for CONTRARIAN entries (addendum N2 §3). The
+ * event-coherent vector means at most ONE bracket of an event resolves YES, so
+ * stacking several correlated contrarian NO bets across one event (Finding 3 —
+ * up to 4 `no,no,no,no` per event) is structurally unsound. Among an event's
+ * `buy_yes`/`buy_no` signals keep only the highest-edge one; demote the rest.
+ *
+ * `confirm_yes`/`confirm_no` are EXEMPT: multiple confirmations within an event
+ * are jointly coherent (each says "this popular bracket resolves YES"), and at
+ * most one can pay — they don't stack correlated risk the way contrarian bets do.
+ *
+ * Pure function (no DB / no mutation of inputs) so it's unit-testable in
+ * isolation. The caller persists the demotions (recommendation→skip, acted=false,
+ * skipReason) and drops the demoted signals from the execution list.
+ *
+ * @returns `kept` — the surviving signals (winners + all exempt confirmations);
+ *   `demoted` — losing contrarian signals paired with the winner that beat them.
+ */
+export function selectArgmaxPerEvent(signals: ActionableSignal[]): {
+  kept: ActionableSignal[];
+  demoted: Array<{ signal: ActionableSignal; winner: ActionableSignal }>;
+} {
+  const isContrarian = (s: ActionableSignal) =>
+    s.recommendation === "buy_yes" || s.recommendation === "buy_no";
+
+  // Highest-edge contrarian signal per event. Ties resolve to the first seen
+  // (stable — input order is the Phase 3 evaluation order).
+  const winnerByEvent = new Map<string, ActionableSignal>();
+  for (const s of signals) {
+    if (!isContrarian(s)) continue;
+    const cur = winnerByEvent.get(s.eventTicker);
+    if (!cur || s.edge > cur.edge) winnerByEvent.set(s.eventTicker, s);
+  }
+
+  const kept: ActionableSignal[] = [];
+  const demoted: Array<{ signal: ActionableSignal; winner: ActionableSignal }> = [];
+  for (const s of signals) {
+    if (!isContrarian(s)) {
+      kept.push(s); // confirmations (and anything non-contrarian) pass through
+      continue;
+    }
+    const winner = winnerByEvent.get(s.eventTicker)!;
+    if (winner.id === s.id) kept.push(s);
+    else demoted.push({ signal: s, winner });
+  }
+  return { kept, demoted };
+}
+
+/**
+ * The exact skip-reason format written to demoted contrarian signals' DB rows
+ * (addendum N2). Shared between the orchestrator and tests so the wording can't
+ * drift. Cents shown to one decimal: e.g.
+ * "event argmax: KXHIGHNY-26JUN05-B81 has higher edge (6.2¢ > 3.1¢)".
+ */
+export function argmaxSkipReason(winner: ActionableSignal, loser: ActionableSignal): string {
+  return (
+    `event argmax: ${winner.ticker} has higher edge ` +
+    `(${(winner.edge * 100).toFixed(1)}¢ > ${(loser.edge * 100).toFixed(1)}¢)`
+  );
+}
+
+/**
  * The orchestrator wires together the pipeline stages and
  * registers the tick function with the main loop.
  *
@@ -101,65 +185,109 @@ export async function initOrchestrator(): Promise<void> {
     // Cache same-day observations per station to avoid redundant NWS calls
     const observationCache = new Map<string, ObservationAdjustment | null>();
 
-    for (const market of activeMarkets) {
-      if (!market.stationId || !market.category) continue;
-      // Tails (upper_tail/lower_tail) intentionally store bracketHigh=null —
-      // bracketLow is the threshold and the estimator branches on marketType.
-      // Only brackets need both bounds populated.
-      if (market.bracketLow == null) continue;
-      const isTail =
-        market.marketType === "upper_tail" || market.marketType === "lower_tail";
-      if (!isTail && market.bracketHigh == null) continue;
+    // Filter to estimable markets, then group by event (addendum N2). Tails
+    // intentionally store bracketHigh=null (bracketLow is the threshold); only
+    // brackets need both bounds. Markets missing station/category are dropped.
+    const estimable = activeMarkets.filter((m) => {
+      if (!m.stationId || !m.category) return false;
+      if (m.bracketLow == null) return false;
+      const isTail = m.marketType === "upper_tail" || m.marketType === "lower_tail";
+      if (!isTail && m.bracketHigh == null) return false;
+      return true;
+    });
 
+    const eventGroups = new Map<string, Market[]>();
+    for (const m of estimable) {
+      const arr = eventGroups.get(m.eventTicker);
+      if (arr) arr.push(m);
+      else eventGroups.set(m.eventTicker, [m]);
+    }
+
+    const eventCoherent = config.bot.eventCoherentEstimation;
+
+    for (const group of eventGroups.values()) {
+      // One ensemble fetch / observation lookup / price map per event. Use the
+      // group's MIN forecast-horizon (the soonest-closing bracket) so a same-day
+      // event uses the freshest sniper-window pool for the whole group.
+      const ref = group[0]!;
       try {
-        // Compute forecast horizon in hours for HRRR/blending
-        const forecastHorizonHours = market.closeTime
-          ? Math.max(0, (new Date(market.closeTime).getTime() - Date.now()) / (1000 * 60 * 60))
-          : market.targetDate
-            ? Math.max(0, (new Date(market.targetDate + "T23:59:00Z").getTime() - Date.now()) / (1000 * 60 * 60))
-            : undefined;
+        const horizons = group.map((m) => forecastHorizonHoursOf(m)).filter((h): h is number => h != null);
+        const groupHorizonHours = horizons.length > 0 ? Math.min(...horizons) : undefined;
 
-        const category = market.category as Parameters<typeof ensembleService.getEnsembleValues>[2];
+        const category = ref.category as Parameters<typeof ensembleService.getEnsembleValues>[2];
         // Source-attributed fetch (addendum N5): sourceMix records member counts
         // per model so the HRRR sniper gate and post-hoc win-rate splits can see
         // which sources actually fed each estimate.
         const { values: ensembleValues, sourceMix } =
           await ensembleService.getEnsembleWithSources(
-            market.stationId,
-            market.targetDate!,
+            ref.stationId!,
+            ref.targetDate!,
             category,
-            forecastHorizonHours
+            groupHorizonHours
           );
 
         // Fetch same-day observation for temperature markets (improvement #4)
         let observation: ObservationAdjustment | undefined;
         if (
-          market.category === "high_temp" &&
-          forecastHorizonHours != null &&
-          forecastHorizonHours <= 24
+          ref.category === "high_temp" &&
+          groupHorizonHours != null &&
+          groupHorizonHours <= 24
         ) {
-          if (!observationCache.has(market.stationId)) {
-            const obs = await nwsService.getLatestObservation(market.stationId);
+          if (!observationCache.has(ref.stationId!)) {
+            const obs = await nwsService.getLatestObservation(ref.stationId!);
             observationCache.set(
-              market.stationId,
+              ref.stationId!,
               obs ? { observedTemp: obs.tempF, observedAt: obs.timestamp } : null
             );
           }
-          observation = observationCache.get(market.stationId) ?? undefined;
+          observation = observationCache.get(ref.stationId!) ?? undefined;
         }
 
-        const marketPriceForEstimator = marketMid(market);
-        const estimate = await estimator.estimate(
-          market,
-          ensembleValues,
-          observation,
-          marketPriceForEstimator,
-          sourceMix
-        );
-        estimates.push({ market, estimate, sourceMix });
+        // Book mid per ticker (N4) for the vector market-prior blend.
+        const marketPrices = new Map<string, number>();
+        for (const m of group) {
+          const mid = marketMid(m);
+          if (mid != null) marketPrices.set(m.ticker, mid);
+        }
+
+        if (eventCoherent) {
+          // Event-coherent path (N2): one shared distribution → a P(YES) vector
+          // that sums to the partition's coverage. Push each market's result into
+          // `estimates` exactly as the legacy loop did (Phase 3 unchanged).
+          const eventResults = await estimator.estimateEvent(
+            group,
+            ensembleValues,
+            observation,
+            marketPrices,
+            sourceMix
+          );
+          for (const m of group) {
+            const est = eventResults.get(m.ticker);
+            if (est) estimates.push({ market: m, estimate: est, sourceMix });
+          }
+        } else {
+          // Legacy per-market path (kill switch off): byte-identical to the
+          // prior behavior — each market estimated independently.
+          for (const m of group) {
+            try {
+              const estimate = await estimator.estimate(
+                m,
+                ensembleValues,
+                observation,
+                marketPrices.get(m.ticker),
+                sourceMix
+              );
+              estimates.push({ market: m, estimate, sourceMix });
+            } catch (err) {
+              log.warn(
+                `Estimation failed for ${m.ticker}: ${err instanceof Error ? err.message : err}`
+              );
+            }
+          }
+        }
       } catch (err) {
         log.warn(
-          `Estimation failed for ${market.ticker}: ${err instanceof Error ? err.message : err}`
+          `Estimation failed for event ${ref.eventTicker}: ${err instanceof Error ? err.message : err}`
         );
       }
     }
@@ -170,22 +298,6 @@ export async function initOrchestrator(): Promise<void> {
 
     // Phase 3: Evaluate — Compare estimates to prices, generate signals
     log.debug("Phase 3: Signal evaluation");
-
-    interface ActionableSignal {
-      id: string;
-      ticker: string;
-      seriesTicker: string;
-      estimatedProb: number;
-      confidence: number;
-      marketPrice: number;
-      edge: number;
-      edgeThreshold: number;
-      recommendation: string;
-      side: "yes" | "no" | null;
-      kellyFraction: number | null;
-      ensembleSize: number;
-      reasoning: string;
-    }
 
     const actionableSignals: ActionableSignal[] = [];
 
@@ -408,6 +520,7 @@ export async function initOrchestrator(): Promise<void> {
           id: signalId,
           ticker: market.ticker,
           seriesTicker: market.seriesTicker,
+          eventTicker: market.eventTicker,
           estimatedProb: estimate.probability,
           confidence: estimate.confidence,
           marketPrice,
@@ -430,6 +543,35 @@ export async function initOrchestrator(): Promise<void> {
           estimatedProb: estimate.probability,
           marketPrice,
         });
+      }
+    }
+
+    // Phase 3 (argmax-per-event, addendum N2 §3): an event-coherent vector means
+    // at most one bracket resolves YES, so the bot must not stack several
+    // correlated contrarian bets across one event (Finding 3). Keep only the
+    // highest-edge buy_yes/buy_no per event; demote the rest to skip. Confirmation
+    // signals are exempt (jointly coherent). Gated by eventCoherentEstimation so
+    // the legacy per-market path is byte-identical when the kill switch is off.
+    if (config.bot.eventCoherentEstimation && actionableSignals.length > 0) {
+      const { demoted } = selectArgmaxPerEvent(actionableSignals);
+      for (const { signal, winner } of demoted) {
+        const reason = argmaxSkipReason(winner, signal);
+        await db
+          .update(signals)
+          .set({ recommendation: "skip", acted: false, skipReason: reason })
+          .where(eq(signals.id, signal.id));
+        log.debug(`${signal.ticker}: demoted by ${reason}`);
+      }
+      if (demoted.length > 0) {
+        const demotedIds = new Set(demoted.map((d) => d.signal.id));
+        for (let i = actionableSignals.length - 1; i >= 0; i--) {
+          if (demotedIds.has(actionableSignals[i]!.id)) actionableSignals.splice(i, 1);
+        }
+        log.info(
+          `Event argmax demoted ${demoted.length} correlated contrarian signal(s) across ${
+            new Set(demoted.map((d) => d.signal.eventTicker)).size
+          } event(s)`
+        );
       }
     }
 
@@ -662,6 +804,26 @@ export async function initOrchestrator(): Promise<void> {
   });
 
   log.info("Orchestrator initialized — ready to start");
+}
+
+/**
+ * Forecast horizon in hours for a market: time to closeTime when present, else
+ * to end-of-target-day (23:59Z). Floored at 0. Returns undefined when neither
+ * closeTime nor targetDate is set. Used to pick a group's min horizon for the
+ * ensemble fetch (addendum N2) and mirrors the per-market computation Phase 3
+ * still does inline for the sniper-window gate.
+ */
+function forecastHorizonHoursOf(market: Market): number | undefined {
+  if (market.closeTime) {
+    return Math.max(0, (new Date(market.closeTime).getTime() - Date.now()) / (1000 * 60 * 60));
+  }
+  if (market.targetDate) {
+    return Math.max(
+      0,
+      (new Date(market.targetDate + "T23:59:00Z").getTime() - Date.now()) / (1000 * 60 * 60)
+    );
+  }
+  return undefined;
 }
 
 /**

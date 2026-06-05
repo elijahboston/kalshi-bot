@@ -2,6 +2,110 @@ import { createLogger } from "@kcb/engine";
 
 const log = createLogger("nws");
 
+/**
+ * IANA timezone per enabled station, used to resolve a station's LOCAL calendar
+ * day for same-day observation windowing (N3, win-rate-80-addendum-2026-06-05.md
+ * Finding 5 / item N3).
+ *
+ * Duplicated here on purpose: this module lives in @kcb/data, while
+ * reconciliation.ts (@kcb/engine) and estimator.ts (@kcb/signals) each carry
+ * their own copies. Importing from either would invert the dependency direction
+ * (data must not depend on engine/signals). A future shared/ extraction is
+ * welcome but out of scope for N3 — keep these three maps in sync by hand.
+ */
+const STATION_TZ: Record<string, string> = {
+  KNYC: "America/New_York",
+  KMIA: "America/New_York",
+  KPHL: "America/New_York",
+  KATL: "America/New_York",
+  KORD: "America/Chicago",
+  KAUS: "America/Chicago",
+  KIAH: "America/Chicago",
+  KDFW: "America/Chicago",
+  KDEN: "America/Denver",
+  KLAX: "America/Los_Angeles",
+  KSFO: "America/Los_Angeles",
+};
+
+const DEFAULT_TZ = "America/New_York";
+
+/** Resolve a station's IANA timezone, defaulting to US Eastern. */
+function stationTz(stationId: string): string {
+  return STATION_TZ[stationId] ?? DEFAULT_TZ;
+}
+
+/** Celsius → Fahrenheit (matches the existing `* 9 / 5 + 32` convention in this file). */
+function cToF(c: number): number {
+  return c * 9 / 5 + 32;
+}
+
+/**
+ * The UTC instant of the start (local midnight) of the calendar day that the
+ * instant `dateNow` falls into, in IANA timezone `tz`.
+ *
+ * DST-correct: derives the local wall-clock day and offset from
+ * `Intl.DateTimeFormat` parts rather than assuming a fixed UTC offset, so it
+ * stays right across spring-forward / fall-back and for any station tz. Used to
+ * build the `start` bound of the same-day observations query (N3) — for a US
+ * Eastern station this lands on 04:00Z (EDT) or 05:00Z (EST); Pacific lands on
+ * 07:00Z (PDT) / 08:00Z (PST).
+ *
+ * Exported so the windowing math is unit-testable in isolation.
+ */
+export function localDayStartUtc(dateNow: Date, tz: string): Date {
+  // UTC offset (minutes) that `tz` applies to the instant `atUtcMs`. Positive
+  // means local is BEHIND UTC (e.g. New_York = +240 EDT / +300 EST). Derived by
+  // formatting the instant in `tz` and diffing the reported wall-clock from UTC.
+  const offsetMinutes = (atUtcMs: number): number => {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = fmt.formatToParts(new Date(atUtcMs));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+    const asUtc = Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      get("hour"),
+      get("minute"),
+      get("second"),
+    );
+    return (asUtc - atUtcMs) / 60000;
+  };
+
+  // The local calendar Y/M/D that `dateNow` falls into.
+  const dayParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(dateNow);
+  const dGet = (t: string) => Number(dayParts.find((p) => p.type === t)?.value);
+  const y = dGet("year");
+  const m = dGet("month");
+  const d = dGet("day");
+
+  // Resolve the UTC instant of that local midnight. Start from the naive UTC
+  // guess, correct by the offset that applies at the guess; one pass is exact
+  // except across the ~2 DST transitions/year, a second pass converges those.
+  let guess = Date.UTC(y, m - 1, d, 0, 0, 0);
+  for (let i = 0; i < 2; i++) {
+    const off = offsetMinutes(guess);
+    const corrected = Date.UTC(y, m - 1, d, 0, 0, 0) - off * 60000;
+    if (corrected === guess) break;
+    guess = corrected;
+  }
+  return new Date(guess);
+}
+
 /** NWS station to gridpoint mapping (cache on first lookup) */
 const stationGridCache = new Map<string, { office: string; gridX: number; gridY: number }>();
 
@@ -21,6 +125,21 @@ const STATION_COORDS: Record<string, { lat: number; lon: number }> = {
   KSFO: { lat: 37.6213, lon: -122.3790 },  // San Francisco
   KMIA: { lat: 25.7959, lon: -80.2870 },   // Miami
 };
+
+/**
+ * Aggregated view of a station's same-day observations for the obs running-max
+ * anchor (N3). All temps are Fahrenheit.
+ */
+export interface TodayObservations {
+  /** Max observed temp (°F) across today's local-calendar-day observations. A hard floor on the daily high. */
+  runningMax: number;
+  /** Latest (newest-timestamp) observation in the window. */
+  latest: { tempF: number; timestamp: string };
+  /** Minutes since the latest observation (computed against the `now` param for testability). */
+  latestAgeMinutes: number;
+  /** Number of usable (non-null temp) observations in the local-day window. */
+  count: number;
+}
 
 export interface NwsForecastPeriod {
   number: number;
@@ -142,6 +261,87 @@ export class NwsService {
     } catch (err) {
       log.debug(
         `Failed to get latest observation for ${stationId}: ${err instanceof Error ? err.message : err}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Fetch ALL of today's observations over the station's LOCAL calendar day and
+   * aggregate them for the obs running-max anchor (N3,
+   * win-rate-80-addendum-2026-06-05.md Finding 5 / item N3).
+   *
+   * Unlike {@link getLatestObservation} (a single latest reading, no staleness
+   * check), this returns:
+   * - `runningMax` — the max observed temp so far today, a HARD FLOOR on the
+   *   daily high (the estimator may truncate its distribution below it);
+   * - `latest` + `latestAgeMinutes` — for the staleness guard (reject obs older
+   *   than the configured max age);
+   * - `count` — how many usable observations back the window.
+   *
+   * The window is `[localDayStart, now]`: local midnight (DST-correct via
+   * {@link localDayStartUtc}) up to the `now` instant — never the prior local
+   * evening (the UTC-day windowing bug that contaminated ground truth in N1).
+   *
+   * @param now Injectable clock (defaults to `new Date()`); also bounds the
+   *   query's `end` and anchors `latestAgeMinutes` for deterministic tests.
+   * @returns Aggregated observations, or `null` when zero usable observations.
+   */
+  async getTodayObservations(
+    stationId: string,
+    now: Date = new Date(),
+  ): Promise<TodayObservations | null> {
+    try {
+      const tz = stationTz(stationId);
+      const startUtc = localDayStartUtc(now, tz);
+
+      const data = await this.fetch<{
+        features: Array<{
+          properties: {
+            timestamp: string;
+            temperature: { value: number | null; unitCode?: string };
+          };
+        }>;
+      }>(
+        `${this.baseUrl}/stations/${stationId}/observations` +
+          `?start=${startUtc.toISOString()}&end=${now.toISOString()}&limit=100`,
+      );
+
+      const features = data.features ?? [];
+      if (features.length === 0) return null;
+
+      let runningMax = -Infinity;
+      let latest: { tempF: number; timestamp: string } | null = null;
+      let latestMs = -Infinity;
+      let count = 0;
+
+      for (const f of features) {
+        const p = f.properties;
+        const c = p.temperature?.value;
+        if (c == null) continue;
+
+        // NWS returns Celsius — convert to Fahrenheit.
+        const tempF = cToF(c);
+        count++;
+        if (tempF > runningMax) runningMax = tempF;
+
+        // Newest by timestamp (the feed is usually newest-first, but don't rely
+        // on ordering — pick the max timestamp explicitly).
+        const ts = Date.parse(p.timestamp);
+        if (Number.isFinite(ts) && ts > latestMs) {
+          latestMs = ts;
+          latest = { tempF, timestamp: p.timestamp };
+        }
+      }
+
+      if (count === 0 || latest == null) return null;
+
+      const latestAgeMinutes = (now.getTime() - latestMs) / 60000;
+
+      return { runningMax, latest, latestAgeMinutes, count };
+    } catch (err) {
+      log.debug(
+        `Failed to get today's observations for ${stationId}: ${err instanceof Error ? err.message : err}`
       );
       return null;
     }

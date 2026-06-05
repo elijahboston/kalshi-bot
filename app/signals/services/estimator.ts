@@ -79,6 +79,24 @@ export interface ReasoningTrace {
    * supply it (back-compat — most callers don't yet).
    */
   sourceMix?: Record<string, number> | null;
+  /**
+   * Event-coherence telemetry (addendum N2). Populated only by
+   * {@link ProbabilityEstimator.estimateEvent}; null on the legacy per-market
+   * path. Lets the Finding-2 incoherence query (bracket probs summing to
+   * 0.79–1.69) be checked directly from a reasoning trace: `finalSum` should
+   * track `rawCdfSum` (= coverage) to within the floor/clamp drift.
+   */
+  eventCoherence?: {
+    eventTicker: string;
+    /** Number of markets (brackets + tails) jointly estimated for the event. */
+    markets: number;
+    /** Σ of the raw per-market CDF/counting blends = coverage (≈1 when the set partitions ℝ; <1 with listing gaps). */
+    rawCdfSum: number;
+    /** Σ of the final returned probabilities across the event's markets. */
+    finalSum: number;
+    /** The TV-ramped event-level market-prior weight, or null when the blend is off. */
+    eventBlendWeight: number | null;
+  } | null;
 }
 
 export class ProbabilityEstimator {
@@ -143,16 +161,7 @@ export class ProbabilityEstimator {
     }
 
     // Step 3: Count members matching this market's condition
-    let membersInBracket: number;
-    if (market.marketType === "upper_tail") {
-      membersInBracket = correctedValues.filter((v) => v > market.bracketLow!).length;
-    } else if (market.marketType === "lower_tail") {
-      membersInBracket = correctedValues.filter((v) => v < market.bracketLow!).length;
-    } else {
-      membersInBracket = correctedValues.filter(
-        (v) => v >= market.bracketLow! && v < market.bracketHigh!
-      ).length;
-    }
+    const membersInBracket = countMembersInMarket(market, correctedValues);
 
     const rawMean = mean(ensembleValues);
     const rawStd = std(ensembleValues);
@@ -253,20 +262,13 @@ export class ProbabilityEstimator {
     }
 
     // CDF-fitted probability: use normal CDF for temperature, empirical for precip/snow
-    let cdfProb: number;
-    if (isPrecipCategory) {
-      cdfProb = countingProb;
-    } else if (sigmaUsed === 0) {
-      cdfProb = countingProb;
-    } else if (market.marketType === "upper_tail") {
-      cdfProb = 1 - normalCdf(market.bracketLow!, corrMean, sigmaUsed);
-    } else if (market.marketType === "lower_tail") {
-      cdfProb = normalCdf(market.bracketLow!, corrMean, sigmaUsed);
-    } else {
-      cdfProb =
-        normalCdf(market.bracketHigh!, corrMean, sigmaUsed) -
-        normalCdf(market.bracketLow!, corrMean, sigmaUsed);
-    }
+    const cdfProb = cdfProbForMarket(
+      market,
+      corrMean,
+      sigmaUsed,
+      countingProb,
+      isPrecipCategory
+    );
 
     // Blend CDF and counting, weighted by ensemble size. With many members
     // (>=100), the sigma estimate is reliable and the normal-CDF integral over
@@ -275,9 +277,7 @@ export class ProbabilityEstimator {
     // counting instead. Previously the weighting was inverted (counting
     // dominated at large ensembles), which crushed CDF's correct ~30-40%
     // estimates on tight near-mean brackets down to counting's noisy 5-10%.
-    const cdfWeight = isPrecipCategory
-      ? 0
-      : Math.min(1, correctedValues.length / 200);
+    const cdfWeight = cdfBlendWeight(correctedValues.length, isPrecipCategory);
     const rawProbability = cdfWeight * cdfProb + (1 - cdfWeight) * countingProb;
 
     // Historical-prior blend. When the estimator's ensemble+CDF view conflicts
@@ -397,6 +397,7 @@ export class ProbabilityEstimator {
       historicalPriorBlend,
       marketPriorBlend,
       sourceMix: sourceMix ?? null,
+      eventCoherence: null,
     };
 
     log.debug(
@@ -406,6 +407,335 @@ export class ProbabilityEstimator {
     );
 
     return { probability, confidence, ensembleSize: ensembleValues.length, reasoning };
+  }
+
+  /**
+   * Event-coherent estimation (addendum N2). Estimates ALL markets of one event
+   * (same station + targetDate + category — the mutually-exclusive bracket set)
+   * from a SINGLE shared temperature distribution, so the returned P(YES) vector
+   * sums to the partition's coverage (≈1 when the brackets+tails tile ℝ) instead
+   * of the 0.79–1.69 incoherence of independent per-market estimation (Finding 2).
+   *
+   * Why a single shared distribution: per-market sigma floors and per-market
+   * mean/sigma would each shift the integral, so the bracket probabilities would
+   * no longer be slices of one CDF and could not sum coherently. We therefore
+   * compute bias → corrected mean → sigma blend → an EVENT-level sigma floor
+   * (floorFactor × median regular-bracket width) → observation adjustment ONCE,
+   * then derive every market's raw probability from it.
+   *
+   * Blends are applied vector-wise and sum-preserving (historical prior →
+   * renormalize back to coverage; market prior via one event-level
+   * total-variation-ramped weight on the de-vigged market vector), so coherence
+   * survives the priors that inflated the legacy wings.
+   *
+   * @param eventMarkets All markets of one event. Must be non-empty and share
+   *   stationId/targetDate/category; precip/snow events are supported but skip
+   *   the temperature-only sigma floor + observation adjustment.
+   * @param marketPrices ticker → market P(YES) in [0,1] (mid/last). Optional;
+   *   when ≥2 markets have prices and marketPriorWeight>0, drives the vector blend.
+   * @returns ticker → EstimateResult (same shape as estimate(); Phase 3 consumes
+   *   per-market entries unchanged).
+   */
+  async estimateEvent(
+    eventMarkets: Market[],
+    ensembleValues: number[],
+    observation?: ObservationAdjustment,
+    marketPrices?: Map<string, number>,
+    sourceMix?: Record<string, number>
+  ): Promise<Map<string, EstimateResult>> {
+    if (eventMarkets.length === 0) {
+      throw new Error("estimateEvent called with no markets");
+    }
+    // All markets of an event share station/targetDate/category. Validate each
+    // market's own bracket data (same guard as estimate()).
+    for (const m of eventMarkets) {
+      const isTail = m.marketType === "upper_tail" || m.marketType === "lower_tail";
+      if (!m.stationId || m.bracketLow == null || (!isTail && m.bracketHigh == null)) {
+        throw new Error(`Market ${m.ticker} missing station/bracket data`);
+      }
+    }
+
+    const ref = eventMarkets[0]!;
+    const stationId = ref.stationId!;
+    const category = ref.category;
+    const eventTicker = ref.eventTicker;
+    const isPrecipCategory = category === "precip" || category === "snowfall";
+
+    // Forecast horizon (days), floored at 1 — identical to estimate(). Same-day
+    // markets resolve at midnight-UTC so this can go <= 0; station_bias rows are
+    // stored at horizon >= 1.
+    const forecastHorizon = ref.targetDate
+      ? Math.max(1, Math.ceil((new Date(ref.targetDate).getTime() - Date.now()) / 86400_000))
+      : 1;
+
+    // ── Step 1: Shared distribution (computed ONCE for the whole event) ──
+    const biasCorrection = await this.getBiasCorrection(stationId, forecastHorizon, category);
+
+    let correctedValues = biasCorrection
+      ? ensembleValues.map((v) => v - biasCorrection.meanBias)
+      : [...ensembleValues];
+    if (isPrecipCategory) {
+      correctedValues = correctedValues.map((v) => Math.max(0, v));
+    }
+
+    const rawMean = mean(ensembleValues);
+    const rawStd = std(ensembleValues);
+    let corrMean = mean(correctedValues);
+    const corrStd = std(correctedValues);
+    const corrMeanBeforeObs = corrMean; // for the observation meanShift trace
+
+    // Sigma blend (empirical/ensemble, sample-size-weighted, capped) — identical
+    // logic to estimate(), applied once.
+    let sigmaSource: "empirical" | "ensemble" = "ensemble";
+    let sigmaUsed = corrStd;
+    let empiricalSigmaWeight: number | null = null;
+    if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize > 0) {
+      const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
+      if (empiricalSigma != null && empiricalSigma > 0) {
+        const w = Math.min(MAX_EMPIRICAL_SIGMA_WEIGHT, biasCorrection.sampleSize / 50);
+        sigmaUsed = w * empiricalSigma + (1 - w) * corrStd;
+        sigmaSource = w >= 0.5 ? "empirical" : "ensemble";
+        empiricalSigmaWeight = w;
+      }
+    }
+
+    // Event-level sigma floor: floorFactor × MEDIAN regular-bracket width. A
+    // single shared floor (not per-market) is what keeps the vector coherent —
+    // per-market floors would each reshape the integral. Tail-only events fall
+    // back to width 1.0 (same convention as the per-market floor's tail case).
+    let sigmaFloorApplied: number | null = null;
+    if (!isPrecipCategory) {
+      const floorFactor = getConfig().bot.sigmaFloorBracketWidthFactor;
+      const medianWidth = medianRegularBracketWidth(eventMarkets);
+      const sigmaFloor = floorFactor * medianWidth;
+      if (floorFactor > 0 && sigmaUsed < sigmaFloor) {
+        sigmaUsed = sigmaFloor;
+        sigmaFloorApplied = sigmaFloor;
+      }
+    }
+
+    // Observation adjustment (high_temp, same-day) — same logic as estimate(),
+    // applied ONCE to the shared mean/sigma so it stays coherent across brackets.
+    let obsAdj: ReasoningTrace["observationAdjustment"] = null;
+    if (observation && category === "high_temp" && forecastHorizon <= 1) {
+      const sigmaBefore = sigmaUsed;
+      const obsHour = localHourAtStation(observation.observedAt, stationId);
+      const diurnalOffset = estimateDiurnalOffset(obsHour);
+      const impliedHigh = observation.observedTemp + diurnalOffset;
+      const divergence = Math.abs(impliedHigh - corrMean);
+      if (divergence <= 2) {
+        sigmaUsed = sigmaUsed * 0.7;
+      } else {
+        corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
+        sigmaUsed = sigmaUsed * 0.85;
+      }
+      obsAdj = {
+        observedTemp: observation.observedTemp,
+        sigmaBefore,
+        sigmaAfter: sigmaUsed,
+        meanShift: corrMean - corrMeanBeforeObs,
+      };
+    }
+
+    // ── Step 2: Raw vector from the SAME distribution ──
+    // Per market: counting from the shared corrected pool, CDF integral from the
+    // shared mean/sigma, blended by the shared size weight. coverage = Σ raw.
+    const cdfWeight = cdfBlendWeight(correctedValues.length, isPrecipCategory);
+    interface Slot {
+      market: Market;
+      isTail: boolean;
+      membersInBracket: number;
+      countingProb: number;
+      cdfProb: number;
+      raw: number; // mutated through the pipeline → final probability
+      hasMarketPrice: boolean;
+      marketPrice: number | null;
+    }
+    const slots: Slot[] = eventMarkets.map((m) => {
+      const isTail = m.marketType === "upper_tail" || m.marketType === "lower_tail";
+      const membersInBracket = countMembersInMarket(m, correctedValues);
+      const countingProb = membersInBracket / correctedValues.length;
+      const cdfProb = cdfProbForMarket(m, corrMean, sigmaUsed, countingProb, isPrecipCategory);
+      const raw = cdfWeight * cdfProb + (1 - cdfWeight) * countingProb;
+      const mp = marketPrices?.get(m.ticker);
+      return {
+        market: m,
+        isTail,
+        membersInBracket,
+        countingProb,
+        cdfProb,
+        raw,
+        hasMarketPrice: mp != null,
+        marketPrice: mp ?? null,
+      };
+    });
+
+    const coverage = slots.reduce((s, x) => s + x.raw, 0);
+
+    // ── Step 3: Historical prior per market, then renormalize back to coverage ──
+    // The prior inflates the vector (each bracket pulled toward its baseline hit
+    // rate); rescaling to `coverage` keeps the partition's total mass fixed so
+    // the wings can't accrue the phantom probability of the legacy path.
+    const priorWeight = getConfig().bot.historicalPriorWeight;
+    const histTraces = new Map<string, ReasoningTrace["historicalPriorBlend"]>();
+    // Per-market historical hit rate (surfaced in the trace even when the blend
+    // is off, matching estimate()). Computed once whenever priorWeight>0 — when
+    // weight=0 it's left null, same as the legacy path skipping the lookup is
+    // immaterial since the trace field is informational.
+    const hitRates = new Map<string, number | null>();
+    if (priorWeight > 0) {
+      const clampedWeight = Math.min(1, Math.max(0, priorWeight));
+      for (const slot of slots) {
+        const hitRate = await this.getHistoricalHitRate(
+          slot.market.stationId!,
+          category,
+          slot.market.bracketLow!,
+          slot.market.bracketHigh ?? null
+        );
+        hitRates.set(slot.market.ticker, hitRate);
+        if (hitRate != null) {
+          const before = slot.raw;
+          const blended = (1 - clampedWeight) * before + clampedWeight * hitRate;
+          slot.raw = blended;
+          histTraces.set(slot.market.ticker, {
+            weight: clampedWeight,
+            rawProbability: before,
+            blendedProbability: blended,
+          });
+        }
+      }
+      renormalizeToCoverage(slots, coverage);
+    }
+
+    // ── Step 4: Market-prior blend, vector-wise & sum-preserving ──
+    // De-vig the market price vector (strip overround), put it on the same total
+    // mass as the model (× coverage), then mix with ONE event-level weight ramped
+    // by total-variation distance through the existing knobs. Sum-preserving by
+    // construction: each output is a convex combo of two coverage-summing vectors.
+    const cfg = getConfig();
+    const marketPriorWeight = cfg.bot.marketPriorWeight;
+    const pricedSlots = slots.filter((s) => s.hasMarketPrice);
+    let eventBlendWeight: number | null = null;
+    const marketTraces = new Map<string, ReasoningTrace["marketPriorBlend"]>();
+    if (marketPriorWeight > 0 && pricedSlots.length >= 2) {
+      const mktSum = pricedSlots.reduce((s, x) => s + (x.marketPrice ?? 0), 0);
+      const modelSumPriced = pricedSlots.reduce((s, x) => s + x.raw, 0);
+      if (mktSum > 0) {
+        // De-vigged market vector on the model's priced-mass scale, so the TV
+        // distance compares like with like (both normalized vectors sum to 1).
+        const base = clamp01(marketPriorWeight);
+        const max = Math.max(base, clamp01(cfg.bot.marketPriorMaxWeight));
+        const rampStart = cfg.bot.marketPriorRampStart;
+        const rampEnd = Math.max(cfg.bot.marketPriorRampEnd, rampStart + 1e-9);
+
+        // Total-variation distance between the two probability simplices.
+        let tv = 0;
+        for (const s of pricedSlots) {
+          const pModelNorm = modelSumPriced > 0 ? s.raw / modelSumPriced : 0;
+          const pMktNorm = (s.marketPrice ?? 0) / mktSum;
+          tv += Math.abs(pModelNorm - pMktNorm);
+        }
+        tv *= 0.5;
+
+        const t = Math.min(1, Math.max(0, (tv - rampStart) / (rampEnd - rampStart)));
+        const weight = base + (max - base) * t;
+        eventBlendWeight = weight;
+
+        // Market mass on the priced-model scale: priced de-vigged vector × the
+        // priced model mass, so the blend preserves Σ over the priced slots
+        // (unpriced markets keep their model value, excluded from this denom).
+        for (const s of pricedSlots) {
+          const pMktOnScale = ((s.marketPrice ?? 0) / mktSum) * modelSumPriced;
+          const before = s.raw;
+          s.raw = (1 - weight) * before + weight * pMktOnScale;
+          marketTraces.set(s.market.ticker, {
+            weight,
+            baseWeight: base,
+            disagreement: tv,
+            marketPrice: s.marketPrice ?? 0,
+            probabilityBefore: before,
+            probabilityAfter: s.raw,
+          });
+        }
+      }
+    }
+
+    // ── Step 5: Tail floor → renormalize to coverage → final clamp (no renorm
+    // after the clamp; it binds rarely and coherence telemetry catches drift). ──
+    const hasEmpirical = biasCorrection != null && biasCorrection.sampleSize >= 10;
+    const floor = isPrecipCategory ? 0 : hasEmpirical ? 0.01 : 0.03;
+    if (!isPrecipCategory && floor > 0) {
+      for (const s of slots) {
+        if (s.raw < floor) s.raw = floor;
+      }
+      renormalizeToCoverage(slots, coverage);
+      for (const s of slots) {
+        s.raw = Math.min(1 - floor, Math.max(floor, s.raw));
+      }
+    }
+
+    // ── Step 6: Confidence — computed ONCE per event, identical for every market. ──
+    const spreadNorm = isPrecipCategory
+      ? (corrMean > 0 ? corrStd / corrMean : corrStd)
+      : sigmaUsed;
+    const spreadDivisor = isPrecipCategory ? 2 : 10;
+    const spreadFactor = Math.max(0, 1 - spreadNorm / spreadDivisor);
+    const biasFactor = biasCorrection ? Math.min(1, biasCorrection.sampleSize / 30) : 0.5;
+    const ensembleFactor = Math.min(1, ensembleValues.length / 120);
+    const confidence = spreadFactor * 0.4 + biasFactor * 0.4 + ensembleFactor * 0.2;
+
+    const finalSum = slots.reduce((s, x) => s + x.raw, 0);
+
+    // ── Step 7: Build per-market results + shared eventCoherence telemetry. ──
+    const eventCoherence: NonNullable<ReasoningTrace["eventCoherence"]> = {
+      eventTicker,
+      markets: slots.length,
+      rawCdfSum: coverage,
+      finalSum,
+      eventBlendWeight,
+    };
+    if (Math.abs(finalSum - coverage) > 0.05) {
+      log.info(
+        `event ${eventTicker}: coherence drift finalSum=${finalSum.toFixed(3)} vs coverage=${coverage.toFixed(3)} ` +
+        `(${slots.length} markets, blendW=${eventBlendWeight == null ? "off" : eventBlendWeight.toFixed(2)})`
+      );
+    }
+
+    const results = new Map<string, EstimateResult>();
+    for (const s of slots) {
+      const reasoning: ReasoningTrace = {
+        stationId,
+        targetDate: ref.targetDate || "unknown",
+        forecastHorizon,
+        bracketLow: s.market.bracketLow!,
+        bracketHigh: s.market.bracketHigh ?? s.market.bracketLow!,
+        rawEnsembleStats: { mean: rawMean, std: rawStd, count: ensembleValues.length },
+        biasCorrection: biasCorrection
+          ? { meanBias: biasCorrection.meanBias, sampleSize: biasCorrection.sampleSize }
+          : null,
+        correctedEnsembleStats: { mean: corrMean, std: corrStd },
+        sigmaSource,
+        sigmaUsed,
+        empiricalSigmaWeight,
+        sigmaFloorApplied,
+        observationAdjustment: obsAdj,
+        membersInBracket: s.membersInBracket,
+        cdfProbability: s.cdfProb,
+        countingProbability: s.countingProb,
+        historicalHitRate: hitRates.get(s.market.ticker) ?? null,
+        historicalPriorBlend: histTraces.get(s.market.ticker) ?? null,
+        marketPriorBlend: marketTraces.get(s.market.ticker) ?? null,
+        sourceMix: sourceMix ?? null,
+        eventCoherence,
+      };
+      results.set(s.market.ticker, {
+        probability: s.raw,
+        confidence,
+        ensembleSize: ensembleValues.length,
+        reasoning,
+      });
+    }
+    return results;
   }
 
   private async getBiasCorrection(stationId: string, horizon: number, category: string) {
@@ -547,6 +877,93 @@ export function erf(x: number): number {
 /** CDF of the normal distribution */
 export function normalCdf(x: number, mu: number, sigma: number): number {
   return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
+}
+
+/**
+ * Count corrected ensemble members satisfying a market's bracket/tail condition.
+ * Shared by the legacy `estimate()` and the event-coherent `estimateEvent()`
+ * paths so both count from the SAME corrected pool with identical edge
+ * semantics (upper_tail `> low`, lower_tail `< low`, bracket `[low, high)`).
+ */
+export function countMembersInMarket(market: Market, correctedValues: number[]): number {
+  if (market.marketType === "upper_tail") {
+    return correctedValues.filter((v) => v > market.bracketLow!).length;
+  }
+  if (market.marketType === "lower_tail") {
+    return correctedValues.filter((v) => v < market.bracketLow!).length;
+  }
+  return correctedValues.filter(
+    (v) => v >= market.bracketLow! && v < market.bracketHigh!
+  ).length;
+}
+
+/**
+ * CDF-fitted YES probability for a single market under a shared normal
+ * distribution (mean `corrMean`, sigma `sigmaUsed`). Falls back to the supplied
+ * counting probability for precip/snow (zero-inflated, non-Gaussian) and when
+ * sigma collapses to 0. Shared by both estimation paths so the event vector's
+ * bracket `Φ(hi)−Φ(lo)` / tail `1−Φ(lo)` / `Φ(lo)` integrals are byte-identical
+ * to the per-market path. Addendum N2.
+ */
+export function cdfProbForMarket(
+  market: Market,
+  corrMean: number,
+  sigmaUsed: number,
+  countingProb: number,
+  isPrecipCategory: boolean
+): number {
+  if (isPrecipCategory || sigmaUsed === 0) return countingProb;
+  if (market.marketType === "upper_tail") {
+    return 1 - normalCdf(market.bracketLow!, corrMean, sigmaUsed);
+  }
+  if (market.marketType === "lower_tail") {
+    return normalCdf(market.bracketLow!, corrMean, sigmaUsed);
+  }
+  return (
+    normalCdf(market.bracketHigh!, corrMean, sigmaUsed) -
+    normalCdf(market.bracketLow!, corrMean, sigmaUsed)
+  );
+}
+
+/**
+ * Size-weighted CDF↔counting blend weight (addendum N2 shares this with the
+ * legacy path). With many members (≥200) the sigma estimate is reliable and the
+ * smooth normal integral beats the noisy raw count; with few members sigma is
+ * shaky so counting dominates. Precip/snow always use counting (weight 0).
+ */
+export function cdfBlendWeight(memberCount: number, isPrecipCategory: boolean): number {
+  return isPrecipCategory ? 0 : Math.min(1, memberCount / 200);
+}
+
+/**
+ * Median width of an event's regular `bracket`-type markets, used as the
+ * event-level sigma-floor scale (addendum N2). Tails (bracketHigh null) are
+ * excluded — their "width" is undefined. Falls back to 1.0 for tail-only events
+ * (matching the per-market floor's tail convention) so the floor never crashes.
+ */
+export function medianRegularBracketWidth(eventMarkets: Market[]): number {
+  const widths = eventMarkets
+    .filter((m) => m.marketType === "bracket" && m.bracketHigh != null && m.bracketLow != null)
+    .map((m) => m.bracketHigh! - m.bracketLow!)
+    .filter((w) => w > 0)
+    .sort((a, b) => a - b);
+  if (widths.length === 0) return 1.0;
+  const mid = Math.floor(widths.length / 2);
+  return widths.length % 2 === 1
+    ? widths[mid]!
+    : (widths[mid - 1]! + widths[mid]!) / 2;
+}
+
+/**
+ * Rescale a slot vector so Σ raw == `coverage` again (sum-preserving step used
+ * after the historical-prior and tail-floor inflations in estimateEvent — N2).
+ * No-op when the current sum is 0 (vector is all-zero; nothing to preserve).
+ */
+function renormalizeToCoverage(slots: Array<{ raw: number }>, coverage: number): void {
+  const current = slots.reduce((s, x) => s + x.raw, 0);
+  if (current === 0) return;
+  const k = coverage / current;
+  for (const s of slots) s.raw *= k;
 }
 
 /** IANA timezone per enabled station. Expand as we enable more stations. */

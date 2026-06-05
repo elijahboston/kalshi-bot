@@ -7,6 +7,7 @@ import {
   ProbabilityEstimator,
   localHourAtStation,
   estimateDiurnalOffset,
+  medianRegularBracketWidth,
 } from "./estimator";
 import { runMigrations, getDb, calibration, stationBias, markets } from "@kcb/db";
 import { getConfig } from "@kcb/config";
@@ -1459,5 +1460,321 @@ describe("ProbabilityEstimator — tail probability floor", () => {
     // With bias record, floor is 0.01 not 0.03
     expect(result.probability).toBeGreaterThanOrEqual(0.01 - 1e-9);
     expect(result.probability).toBeLessThan(0.03);
+  });
+});
+
+describe("medianRegularBracketWidth", () => {
+  test("odd count → middle width", () => {
+    const ms = [
+      { marketType: "bracket", bracketLow: 30, bracketHigh: 31 },
+      { marketType: "bracket", bracketLow: 31, bracketHigh: 33 }, // width 2
+      { marketType: "bracket", bracketLow: 33, bracketHigh: 36 }, // width 3
+    ] as any[];
+    expect(medianRegularBracketWidth(ms)).toBe(2);
+  });
+
+  test("even count → mean of two middle widths", () => {
+    const ms = [
+      { marketType: "bracket", bracketLow: 0, bracketHigh: 1 }, // 1
+      { marketType: "bracket", bracketLow: 0, bracketHigh: 3 }, // 3
+    ] as any[];
+    expect(medianRegularBracketWidth(ms)).toBe(2);
+  });
+
+  test("tails excluded; tail-only event → fallback 1.0", () => {
+    const ms = [
+      { marketType: "upper_tail", bracketLow: 80, bracketHigh: null },
+      { marketType: "lower_tail", bracketLow: 60, bracketHigh: null },
+    ] as any[];
+    expect(medianRegularBracketWidth(ms)).toBe(1.0);
+  });
+
+  test("mixed tails + brackets → uses only the brackets", () => {
+    const ms = [
+      { marketType: "lower_tail", bracketLow: 60, bracketHigh: null },
+      { marketType: "bracket", bracketLow: 60, bracketHigh: 61 },
+      { marketType: "bracket", bracketLow: 61, bracketHigh: 62 },
+      { marketType: "upper_tail", bracketLow: 62, bracketHigh: null },
+    ] as any[];
+    expect(medianRegularBracketWidth(ms)).toBe(1);
+  });
+});
+
+/**
+ * Build a coherent event: lower_tail (< lo) + `n` contiguous 1°F brackets
+ * starting at `lo` + upper_tail (> lo+n). Partitions ℝ, so raw probs should sum
+ * to ~1. All markets share station/targetDate/category/eventTicker.
+ */
+function makeEvent(opts: { lo?: number; n?: number; station?: string; eventTicker?: string } = {}) {
+  const lo = opts.lo ?? 78;
+  const n = opts.n ?? 6;
+  const station = opts.station ?? "KNYC";
+  const eventTicker = opts.eventTicker ?? "KXHIGHNY-26JUN05";
+  const targetDate = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+  const common = {
+    stationId: station,
+    category: "high_temp",
+    targetDate,
+    eventTicker,
+    seriesTicker: "KXHIGHNY",
+    status: "open",
+  };
+  const markets: any[] = [];
+  markets.push({
+    ...common,
+    ticker: `${eventTicker}-T${lo}L`,
+    marketType: "lower_tail",
+    bracketLow: lo,
+    bracketHigh: null,
+  });
+  for (let i = 0; i < n; i++) {
+    const blo = lo + i;
+    markets.push({
+      ...common,
+      ticker: `${eventTicker}-B${blo}`,
+      marketType: "bracket",
+      bracketLow: blo,
+      bracketHigh: blo + 1,
+    });
+  }
+  markets.push({
+    ...common,
+    ticker: `${eventTicker}-T${lo + n}U`,
+    marketType: "upper_tail",
+    bracketLow: lo + n,
+    bracketHigh: null,
+  });
+  return markets;
+}
+
+function sumProbs(results: Map<string, { probability: number }>): number {
+  let s = 0;
+  for (const r of results.values()) s += r.probability;
+  return s;
+}
+
+describe("ProbabilityEstimator — estimateEvent (addendum N2)", () => {
+  const originalHist = getConfig().bot.historicalPriorWeight;
+  const originalMkt = getConfig().bot.marketPriorWeight;
+  const originalFloor = getConfig().bot.sigmaFloorBracketWidthFactor;
+
+  beforeEach(() => {
+    // Hermetic defaults: priors/blends off, modest sigma floor so a partition of
+    // 1°F brackets stays coherent (floor = 0.6 × median width 1.0 = 0.6).
+    getConfig().bot.historicalPriorWeight = 0;
+    getConfig().bot.marketPriorWeight = 0;
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0.6;
+  });
+
+  afterEach(() => {
+    getConfig().bot.historicalPriorWeight = originalHist;
+    getConfig().bot.marketPriorWeight = originalMkt;
+    getConfig().bot.sigmaFloorBracketWidthFactor = originalFloor;
+  });
+
+  test("partition (lower tail + 6 brackets + upper tail) sums to 1, no priors/blends", async () => {
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 6 }); // brackets [78,84), tails <78 / >84
+    // Ensemble centered ~81. Use non-integer values so no member lands exactly on
+    // a half-open bracket boundary (e.g. exactly 84 would fall in the [84,84] gap
+    // between the top bracket [83,84) and the >84 upper tail — a measure-zero
+    // boundary in the CDF but a real miss for discrete counting).
+    const ensemble = [77.5, 78.5, 78.7, 79.5, 80.2, 80.8, 81.3, 81.6, 82.4, 82.7, 83.2, 83.6, 84.5, 85.5];
+
+    const results = await estimator.estimateEvent(event, ensemble);
+
+    expect(results.size).toBe(event.length);
+    // The raw CDF/counting vector over a partition is exactly 1 (the tails close
+    // both ends), so coverage ≈ 1 and the final sum tracks it.
+    expect(sumProbs(results)).toBeCloseTo(1, 6);
+    for (const r of results.values()) {
+      expect(r.reasoning.eventCoherence).not.toBeNull();
+      expect(r.reasoning.eventCoherence!.rawCdfSum).toBeCloseTo(1, 6);
+      expect(r.reasoning.eventCoherence!.finalSum).toBeCloseTo(sumProbs(results), 9);
+      expect(r.reasoning.eventCoherence!.eventBlendWeight).toBeNull();
+      expect(r.reasoning.eventCoherence!.markets).toBe(event.length);
+    }
+  });
+
+  test("historical prior does NOT inflate the sum (renormalized to coverage)", async () => {
+    const db = getDb();
+    // Seed calibration so getHistoricalHitRate returns ~0.5 for the central
+    // brackets (the join is bracket-center-proximity based). Use the event's own
+    // tickers so the markets-join finds them.
+    const event = makeEvent({ lo: 78, n: 6 });
+    for (const m of event) {
+      db.insert(markets).values({
+        ticker: m.ticker,
+        eventTicker: m.eventTicker,
+        seriesTicker: m.seriesTicker,
+        title: "t",
+        category: "high_temp",
+        stationId: "KNYC",
+        targetDate: m.targetDate,
+        bracketLow: m.bracketLow,
+        bracketHigh: m.bracketHigh,
+        marketType: m.marketType,
+        status: "settled",
+        discoveredAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }).onConflictDoNothing().run();
+      for (const outcome of [1, 1, 1, 0, 0, 0]) {
+        db.insert(calibration).values(makeCalibrationRow({
+          id: crypto.randomUUID(),
+          ticker: m.ticker,
+          actualOutcome: outcome,
+        })).run();
+      }
+    }
+    getConfig().bot.historicalPriorWeight = 0.5;
+
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [78, 79, 79, 80, 80, 81, 81, 81, 82, 82, 83, 83, 84, 85];
+    const results = await estimator.estimateEvent(event, ensemble);
+
+    const coverage = [...results.values()][0]!.reasoning.eventCoherence!.rawCdfSum;
+    // Despite each bracket being pulled toward its ~0.5 baseline, the sum is
+    // rescaled back to coverage — no wing inflation (the Finding-2 bug).
+    expect(sumProbs(results)).toBeCloseTo(coverage, 2);
+    // The blend actually fired on at least one market.
+    const anyBlend = [...results.values()].some((r) => r.reasoning.historicalPriorBlend != null);
+    expect(anyBlend).toBe(true);
+  });
+
+  test("vector market blend: de-vigs an overround book, preserves the sum, moves the peak toward the market", async () => {
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 6 });
+    // Model is centered ~80 (peak bracket 80-81). Build a market book whose peak
+    // is at 82-83 and that sums to 1.10 (10% overround) to exercise de-vigging.
+    const ensemble = [78, 79, 79, 80, 80, 80, 81, 81, 82, 82, 83, 84];
+
+    getConfig().bot.marketPriorWeight = 0.3;
+    getConfig().bot.marketPriorMaxWeight = 0.7;
+    getConfig().bot.marketPriorRampStart = 0.0; // ensure the ramp engages on this TV
+    getConfig().bot.marketPriorRampEnd = 0.4;
+
+    const prices = new Map<string, number>();
+    // Overround book peaked at 82-83. Raw entries sum to ~1.10.
+    const byTicker: Record<string, number> = {
+      [`${event[0]!.ticker}`]: 0.02, // lower tail
+      [`${event[1]!.ticker}`]: 0.04, // 78-79
+      [`${event[2]!.ticker}`]: 0.08, // 79-80
+      [`${event[3]!.ticker}`]: 0.14, // 80-81
+      [`${event[4]!.ticker}`]: 0.20, // 81-82
+      [`${event[5]!.ticker}`]: 0.30, // 82-83  ← market peak
+      [`${event[6]!.ticker}`]: 0.20, // 83-84
+      [`${event[7]!.ticker}`]: 0.08, // upper tail
+    };
+    for (const [t, p] of Object.entries(byTicker)) prices.set(t, p);
+
+    const before = await estimator.estimateEvent(event, ensemble); // no prices
+    getConfig().bot.marketPriorWeight = 0.3; // (re-set after no-price call reset nothing)
+    const after = await estimator.estimateEvent(event, ensemble, undefined, prices);
+
+    const coverage = [...after.values()][0]!.reasoning.eventCoherence!.rawCdfSum;
+    // Sum-preserving: the blend keeps Σ at coverage.
+    expect(sumProbs(after)).toBeCloseTo(coverage, 2);
+    // Event-level blend weight was computed.
+    expect([...after.values()][0]!.reasoning.eventCoherence!.eventBlendWeight).not.toBeNull();
+    // The 82-83 bracket (market's peak) should gain probability vs the no-blend run.
+    const peakTicker = event[5]!.ticker;
+    expect(after.get(peakTicker)!.probability).toBeGreaterThan(before.get(peakTicker)!.probability);
+  });
+
+  test("gap preservation: dropping a middle bracket → coverage < 1, finalSum ≈ coverage", async () => {
+    const estimator = new ProbabilityEstimator();
+    const full = makeEvent({ lo: 78, n: 6 });
+    // Drop the 81-82 bracket (index 4: lower tail=0, brackets start at 1).
+    const dropped = full.filter((m) => m.ticker !== full[4]!.ticker);
+    const ensemble = [78, 79, 79, 80, 80, 81, 81, 81, 82, 82, 83, 83, 84, 85];
+
+    const results = await estimator.estimateEvent(dropped, ensemble);
+    const coverage = [...results.values()][0]!.reasoning.eventCoherence!.rawCdfSum;
+
+    // Missing bracket carried real mass → coverage strictly below 1.
+    expect(coverage).toBeLessThan(0.99);
+    expect(coverage).toBeGreaterThan(0.5);
+    // Gap mass is preserved (NOT forced back to 1) and finalSum tracks coverage.
+    expect(sumProbs(results)).toBeCloseTo(coverage, 2);
+  });
+
+  test("single-market 'event' ≈ estimate() within tolerance (priors/blends off)", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeMarket(); // 30-31 bracket
+    const ensemble = [28, 29, 30, 30, 30, 30, 30, 31, 32, 33];
+
+    const single = await estimator.estimate(market, ensemble);
+    const evResults = await estimator.estimateEvent([market], ensemble);
+    const ev = evResults.get(market.ticker)!;
+
+    // The per-market sigma floor (estimate) uses this market's width (1.0); the
+    // event floor uses median regular width (also 1.0 here) → identical sigma,
+    // so the probabilities match closely. (Tail floor + clamp differ only by the
+    // coverage renorm, which is a no-op for a single market whose raw == coverage.)
+    expect(ev.probability).toBeCloseTo(single.probability, 6);
+    expect(ev.confidence).toBeCloseTo(single.confidence, 6);
+    expect(ev.reasoning.sigmaUsed).toBeCloseTo(single.reasoning.sigmaUsed, 6);
+  });
+
+  test("tail-only event (no regular brackets) → median width fallback 1.0, no crash", async () => {
+    const estimator = new ProbabilityEstimator();
+    const targetDate = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+    const common = {
+      stationId: "KNYC",
+      category: "high_temp",
+      targetDate,
+      eventTicker: "KXHIGHNY-TAILONLY",
+      seriesTicker: "KXHIGHNY",
+    };
+    const event = [
+      { ...common, ticker: "T-LOW", marketType: "lower_tail", bracketLow: 70, bracketHigh: null },
+      { ...common, ticker: "T-HIGH", marketType: "upper_tail", bracketLow: 70, bracketHigh: null },
+    ] as any[];
+    const ensemble = [65, 68, 70, 72, 75, 78];
+
+    const results = await estimator.estimateEvent(event, ensemble);
+    expect(results.size).toBe(2);
+    // lower_tail (<70) + upper_tail (>70) ≈ partition (members exactly at 70 go
+    // to neither), so the sum is ≈ coverage and ≤ 1.
+    const coverage = [...results.values()][0]!.reasoning.eventCoherence!.rawCdfSum;
+    expect(sumProbs(results)).toBeCloseTo(coverage, 6);
+    expect(coverage).toBeLessThanOrEqual(1 + 1e-9);
+  });
+
+  test("confidence identical across the event's results", async () => {
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 6 });
+    const ensemble = [78, 79, 80, 80, 81, 81, 82, 82, 83, 84];
+
+    const results = await estimator.estimateEvent(event, ensemble);
+    const confidences = [...results.values()].map((r) => r.confidence);
+    const first = confidences[0]!;
+    for (const c of confidences) expect(c).toBe(first);
+  });
+
+  test("throws on empty event", async () => {
+    const estimator = new ProbabilityEstimator();
+    expect(estimator.estimateEvent([], [30, 31, 32])).rejects.toThrow("no markets");
+  });
+
+  test("throws when a market is missing bracket data", async () => {
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 2 });
+    (event[1] as any).bracketLow = null;
+    expect(estimator.estimateEvent(event, [78, 79, 80])).rejects.toThrow("missing station/bracket data");
+  });
+
+  test("market blend with only ONE priced market is skipped (needs ≥2)", async () => {
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 6 });
+    const ensemble = [78, 79, 80, 80, 81, 81, 82, 82, 83, 84];
+    getConfig().bot.marketPriorWeight = 0.5;
+
+    const prices = new Map<string, number>([[event[3]!.ticker, 0.9]]); // single price
+    const results = await estimator.estimateEvent(event, ensemble, undefined, prices);
+
+    // No event-level blend fired; coherence weight stays null.
+    expect([...results.values()][0]!.reasoning.eventCoherence!.eventBlendWeight).toBeNull();
+    for (const r of results.values()) expect(r.reasoning.marketPriorBlend).toBeNull();
   });
 });
