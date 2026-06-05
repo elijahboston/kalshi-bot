@@ -1,5 +1,53 @@
 import { test, expect, describe } from "bun:test";
-import { parseTicker } from "./discovery";
+import { parseTicker, parseBracketFromTitle } from "./discovery";
+
+describe("parseBracketFromTitle (Finding 11 — rounded-integer settlement geometry)", () => {
+  test("two-value range '87-88°' → [86.5, 88.5)", () => {
+    expect(
+      parseBracketFromTitle("Will the **high temp in Denver** be 87-88° on Jun 5, 2026?", "high_temp")
+    ).toEqual({ marketType: "bracket", bracketLow: 86.5, bracketHigh: 88.5 });
+  });
+
+  test("lower tail '<87°' → threshold 86.5", () => {
+    expect(
+      parseBracketFromTitle("Will the **high temp in Denver** be <87° on Jun 5, 2026?", "high_temp")
+    ).toEqual({ marketType: "lower_tail", bracketLow: 86.5, bracketHigh: null });
+  });
+
+  test("upper tail '>94°' → threshold 94.5", () => {
+    expect(
+      parseBracketFromTitle("Will the **high temp in Denver** be >94° on Jun 5, 2026?", "high_temp")
+    ).toEqual({ marketType: "upper_tail", bracketLow: 94.5, bracketHigh: null });
+  });
+
+  test("single value 'be 78°' → [77.5, 78.5)", () => {
+    expect(
+      parseBracketFromTitle("Will the **high temp in NYC** be 78° on May 29, 2026?", "high_temp")
+    ).toEqual({ marketType: "bracket", bracketLow: 77.5, bracketHigh: 78.5 });
+  });
+
+  test("low_temp markets parse identically", () => {
+    expect(
+      parseBracketFromTitle("Will the **low temp in Chicago** be 20-21° on Mar 5, 2026?", "low_temp")
+    ).toEqual({ marketType: "bracket", bracketLow: 19.5, bracketHigh: 21.5 });
+  });
+
+  test("negative temperatures", () => {
+    expect(
+      parseBracketFromTitle("Will the **low temp in Chicago** be -5--4° on Jan 5, 2026?", "low_temp")
+    ).toEqual({ marketType: "bracket", bracketLow: -5.5, bracketHigh: -3.5 });
+  });
+
+  test("non-temperature categories return null (legacy parse keeps them)", () => {
+    expect(
+      parseBracketFromTitle("Will it rain 1-2 inches in Miami on Jun 15, 2026?", "precip")
+    ).toBeNull();
+  });
+
+  test("unrecognized title returns null (caller falls back)", () => {
+    expect(parseBracketFromTitle("Some unrelated market", "high_temp")).toBeNull();
+  });
+});
 
 describe("parseTicker", () => {
   test("parses standard HIGH ticker", () => {

@@ -57,6 +57,71 @@ export function parseTicker(ticker: string) {
   };
 }
 
+export interface ParsedBracket {
+  marketType: "bracket" | "upper_tail" | "lower_tail";
+  bracketLow: number | null;
+  bracketHigh: number | null;
+}
+
+/**
+ * Derive the TRUE settlement interval from a temperature market's title.
+ *
+ * Kalshi settles temperature markets on the rounded integer high/low, so a
+ * "87-88°" bracket pays YES for any official value in [86.5, 88.5) — 2°F of
+ * coverage, midpoint = the ticker's B-number (B87.5). The original parser
+ * stored [B, B+1) = [87.5, 88.5), silently dropping the entire "87" half of
+ * every bracket: CDF integrals ran over half the true interval (structurally
+ * understating YES — a primary driver of the contra-market NO book), event
+ * coverage summed to ~0.79, and tail thresholds were off by 0.5°F. Found
+ * 2026-06-05 by the N2 event-coherence telemetry (finalSum ≈ 0.79 over a
+ * complete partition). See win-rate-80-addendum-2026-06-05.md (Finding 11).
+ *
+ * Title forms (all 1,512 settled rows audited):
+ *   "be 87-88°" → bracket  [86.5, 88.5)
+ *   "be <87°"   → lower_tail, YES when X < 86.5  (rounded ≤ 86)
+ *   "be >94°"   → upper_tail, YES when X > 94.5  (rounded ≥ 95)
+ *   "be 78°"    → bracket  [77.5, 78.5)  (single-value, defensive)
+ *
+ * Returns null for non-temperature categories (precip/snow keep the legacy
+ * ticker-based parse until their settlement rules are audited) and for
+ * unrecognized titles (caller falls back to the legacy parse).
+ */
+export function parseBracketFromTitle(title: string, category: string): ParsedBracket | null {
+  if (category !== "high_temp" && category !== "low_temp") return null;
+
+  // Order matters: range before single (the single-value regex would match the
+  // first number of a range); tails carry an explicit </> marker.
+  const range = title.match(/be (-?\d+(?:\.\d+)?)-(-?\d+(?:\.\d+)?)°/);
+  if (range) {
+    return {
+      marketType: "bracket",
+      bracketLow: Number(range[1]) - 0.5,
+      bracketHigh: Number(range[2]) + 0.5,
+    };
+  }
+
+  const lower = title.match(/be <(-?\d+(?:\.\d+)?)°/);
+  if (lower) {
+    return { marketType: "lower_tail", bracketLow: Number(lower[1]) - 0.5, bracketHigh: null };
+  }
+
+  const upper = title.match(/be >(-?\d+(?:\.\d+)?)°/);
+  if (upper) {
+    return { marketType: "upper_tail", bracketLow: Number(upper[1]) + 0.5, bracketHigh: null };
+  }
+
+  const single = title.match(/be (-?\d+(?:\.\d+)?)°/);
+  if (single) {
+    return {
+      marketType: "bracket",
+      bracketLow: Number(single[1]) - 0.5,
+      bracketHigh: Number(single[1]) + 0.5,
+    };
+  }
+
+  return null;
+}
+
 /** Check if a market's target date is within the next N days */
 function isWithinDays(targetDate: string, days: number): boolean {
   const target = new Date(targetDate);
@@ -154,12 +219,22 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
           })
           .where(eq(markets.ticker, km.ticker));
       } else {
-        // Determine market type and bracket bounds
+        // Determine market type and bracket bounds. Temperature markets parse
+        // the TRUE settlement interval from the title (rounded-integer
+        // semantics — see parseBracketFromTitle); the legacy ticker-based
+        // parse remains as the fallback for non-temp categories and
+        // unrecognized titles.
         let marketType: "bracket" | "upper_tail" | "lower_tail" = "bracket";
+        let bracketLow = parsed.bracketLow;
         let bracketHigh = parsed.bracketLow != null ? parsed.bracketLow + 1 : null;
 
-        if (parsed.isThreshold) {
-          // Threshold markets are tails — parse direction from title
+        const titleBracket = parseBracketFromTitle(km.title, parsed.category);
+        if (titleBracket) {
+          marketType = titleBracket.marketType;
+          bracketLow = titleBracket.bracketLow;
+          bracketHigh = titleBracket.bracketHigh;
+        } else if (parsed.isThreshold) {
+          // Legacy tail handling — parse direction from title
           // ">X°" = upper_tail (YES = temp > X), "<X°" = lower_tail (YES = temp < X)
           if (km.title.includes(">")) {
             marketType = "upper_tail";
@@ -179,7 +254,7 @@ export async function discoverMarkets(client: KalshiClient): Promise<number> {
           category: parsed.category,
           stationId: parsed.stationId,
           targetDate: parsed.targetDate,
-          bracketLow: parsed.bracketLow,
+          bracketLow,
           bracketHigh,
           marketType,
           status: km.status,

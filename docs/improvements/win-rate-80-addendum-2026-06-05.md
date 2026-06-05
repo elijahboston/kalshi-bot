@@ -96,6 +96,25 @@ Counterfactual on all 79 settled dry-run exits: 65 exited positions would have *
 
 The 18–20Z band (midday local) is where the bot bleeds: too late for the morning HRRR edge, too early for the obs running-max to pin the answer, while the market has already priced the afternoon trajectory.
 
+### Finding 11 — Bracket geometry was wrong: every bracket stored at HALF its true width 🔥 (discovered by N2's coherence telemetry, 2026-06-05)
+
+The moment the event-coherent vector went live, its `finalSum` telemetry read **0.79 over a complete partition** (KXHIGHDEN-26JUN05: 4 brackets + 2 tails, all priced). A complete partition must sum to ~1 — the missing mass led straight to the listing:
+
+| Ticker | Title | True interval (rounded-integer settlement) | Stored |
+|---|---|---|---|
+| …-B87.5 | "be **87-88°**" | **[86.5, 88.5)** — 2°F | [87.5, 88.5) — 1°F |
+| …-T87 | "be **<87°**" | X < **86.5** (rounded ≤ 86) | X < 87.0 |
+| …-T94 | "be **>94°**" | X > **94.5** (rounded ≥ 95) | X > 94.0 |
+
+`parseTicker` treated the ticker's B-number — which is the bracket **midpoint** — as the lower bound and added 1. **Every one of the 1,056 bracket rows silently dropped half its settlement range** (the "87" half of "87-88°"); every tail threshold was off by 0.5°F. Audited: all 1,584 temperature rows had wrong bounds; the corrected intervals tile each event exactly.
+
+Consequences, in causal order:
+1. **Every CDF integral ran over half the true interval** — the estimator structurally understated every bracket's P(YES) by roughly the missing half's mass. A high of 87.0 resolves B87.5 YES while the model thought 87.0 was *outside the bracket*. This is the deepest mechanical root of the systemic NO-overconfidence — beneath even the ground-truth corruption (Finding 1) and the missing HRRR (N5 discovery).
+2. The N1 settlement-truth repair derived actuals as midpoints of the *stored* intervals — systematically +0.5°F. (Still far better than the obs-max corruption; re-derived below.)
+3. Counting probabilities, historical hit-rate bracket matching, tail-gate thresholds, and the event-coherence coverage all consumed the same wrong bounds.
+
+**Fix (N13, shipped 2026-06-05):** `parseBracketFromTitle` in discovery.ts derives bounds from the title's rounded-integer semantics ("87-88°" → [86.5, 88.5); "<87°" → 86.5; ">94°" → 94.5; single-value defensive); legacy parse kept for non-temp categories. One-time `scripts/fix-bracket-geometry.ts` migrated all 1,584 rows (0 unparseable, 0 post-fix overlaps), then `rebuild-ground-truth.ts` re-derived settlement actuals + `station_bias` v3 from the corrected intervals (all midpoints shifted −0.5°F; e.g. KNYC bias +0.53 → +0.99). Event coverage verified ≈ 1.0 live post-fix. Note for any historical analysis: **all pre-2026-06-05 model probabilities were computed on half-width brackets.**
+
 ---
 
 ## New action items
