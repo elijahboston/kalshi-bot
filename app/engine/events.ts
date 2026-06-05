@@ -23,7 +23,7 @@ export type BotEvents = {
     side: "yes" | "no";
     edge: number;
     confidence: number;
-    recommendation: "buy_yes" | "buy_no" | "skip";
+    recommendation: "buy_yes" | "buy_no" | "confirm_yes" | "confirm_no" | "skip";
     estimatedProb: number;
     marketPrice: number;
     forecastHorizonHours?: number;

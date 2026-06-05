@@ -20,4 +20,4 @@
  */
 
 export { NwsService } from "./services/nws";
-export { EnsembleService } from "./services/ensemble";
+export { EnsembleService, resetSniperRefreshTracking } from "./services/ensemble";

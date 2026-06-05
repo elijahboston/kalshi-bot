@@ -8,9 +8,12 @@ mock.module("@kcb/config", () => ({
   }),
 }));
 
-import type { KalshiFeedEvents } from "@kcb/kalshi-client";
+import type { KalshiFeedEvents, WsTickerMsg } from "@kcb/kalshi-client";
+import { runMigrations, getDb, markets, eq } from "@kcb/db";
 import { bus } from "../events";
 import { startFeed, stopFeed } from "./feed";
+
+runMigrations();
 
 function createStubFeed() {
   let events: KalshiFeedEvents = {};
@@ -36,7 +39,38 @@ function createStubFeed() {
       events.onSequenceGap?.({ sid, expected, got, missed: got - expected });
     },
     simulateError(err: Error) { events.onError?.(err); },
+    simulateTicker(msg: Partial<WsTickerMsg["msg"]> & { market_ticker: string; price: number }) {
+      events.onTicker?.({
+        type: "ticker",
+        sid: 1,
+        seq: 1,
+        msg: { volume: 0, open_interest: 0, ts: 0, ...msg } as WsTickerMsg["msg"],
+      });
+    },
   };
+}
+
+function seedMarket(ticker: string) {
+  const ts = new Date().toISOString();
+  getDb()
+    .insert(markets)
+    .values({
+      ticker,
+      eventTicker: "KXHIGHNY-25FEB19",
+      seriesTicker: "KXHIGHNY",
+      title: "test market",
+      category: "high_temp",
+      marketType: "bracket",
+      status: "open",
+      discoveredAt: ts,
+      updatedAt: ts,
+    })
+    .onConflictDoNothing()
+    .run();
+}
+
+function readMarket(ticker: string) {
+  return getDb().select().from(markets).where(eq(markets.ticker, ticker)).get();
 }
 
 beforeEach(() => {
@@ -107,5 +141,56 @@ describe("startFeed", () => {
     } finally {
       off();
     }
+  });
+});
+
+describe("onTicker — bid/ask persistence (addendum N4)", () => {
+  test("persists yes_bid / yes_ask alongside last price", () => {
+    const ticker = "KXHIGHNY-25FEB19-B30";
+    seedMarket(ticker);
+
+    const { stub, simulateTicker } = createStubFeed();
+    startFeed(stub);
+
+    simulateTicker({ market_ticker: ticker, price: 72, yes_bid: 70, yes_ask: 74 });
+
+    const row = readMarket(ticker);
+    expect(row).toBeDefined();
+    expect(row!.lastYesPrice).toBe(72);
+    expect(row!.lastNoPrice).toBe(28);
+    expect(row!.yesBid).toBe(70);
+    expect(row!.yesAsk).toBe(74);
+  });
+
+  test("tolerates absent book fields (null) without clobbering price", () => {
+    const ticker = "KXHIGHNY-25FEB19-B31";
+    seedMarket(ticker);
+
+    const { stub, simulateTicker } = createStubFeed();
+    startFeed(stub);
+
+    // Ticker message with no book — yes_bid/yes_ask undefined.
+    simulateTicker({ market_ticker: ticker, price: 55 });
+
+    const row = readMarket(ticker);
+    expect(row).toBeDefined();
+    expect(row!.lastYesPrice).toBe(55);
+    expect(row!.yesBid).toBeNull();
+    expect(row!.yesAsk).toBeNull();
+  });
+
+  test("a later book update overwrites a prior one", () => {
+    const ticker = "KXHIGHNY-25FEB19-B32";
+    seedMarket(ticker);
+
+    const { stub, simulateTicker } = createStubFeed();
+    startFeed(stub);
+
+    simulateTicker({ market_ticker: ticker, price: 60, yes_bid: 58, yes_ask: 62 });
+    simulateTicker({ market_ticker: ticker, price: 61, yes_bid: 59, yes_ask: 63 });
+
+    const row = readMarket(ticker);
+    expect(row!.yesBid).toBe(59);
+    expect(row!.yesAsk).toBe(63);
   });
 });

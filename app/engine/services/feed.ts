@@ -43,16 +43,22 @@ export function startFeed(feedInstance: KalshiFeed): void {
     },
 
     onTicker(msg: WsTickerMsg) {
-      const { market_ticker, price, yes_bid, yes_ask, volume, open_interest, ts } = msg.msg;
+      const { market_ticker, price, volume, open_interest, ts } = msg.msg;
 
       log.debug(`Price update: ${market_ticker} yes=${price}`);
 
-      // Update DB
+      // Update DB. Persist the order book (yes_bid/yes_ask) alongside the
+      // last-trade price so signal evaluation and paper fills can price against
+      // what we'd actually pay (ask for YES, 100−bid for NO) instead of a stale
+      // last trade — addendum N4. Tolerate absent book fields (null) for thin
+      // markets / partial ticker messages.
       const db = getDb();
       db.update(markets)
         .set({
           lastYesPrice: price,
           lastNoPrice: price != null ? 100 - price : null,
+          yesBid: msg.msg.yes_bid ?? null,
+          yesAsk: msg.msg.yes_ask ?? null,
           updatedAt: now(),
         })
         .where(eq(markets.ticker, market_ticker))

@@ -40,6 +40,61 @@ const CATEGORY_TO_TOMORROW: Record<string, string> = {
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const HRRR_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (matches HRRR run frequency)
 
+/** Default same-day ensemble TTL (hours) when config is unavailable (mocked in tests). */
+const DEFAULT_SAME_DAY_TTL_HOURS = 2;
+/** Default sniper horizon (hours) when config is unavailable (mocked in tests). */
+const DEFAULT_SNIPER_HORIZON_HOURS = 12;
+
+/**
+ * Read a numeric bot config value, tolerating a mocked/absent/partial
+ * @kcb/config. Several test files `mock.module("@kcb/config")` with a bot object
+ * that omits the newer keys (and module mocks leak process-wide in Bun), so a
+ * missing/NaN value must fall back to the documented default rather than
+ * poisoning a TTL computation with NaN.
+ */
+function botConfigNum(read: (bot: ReturnType<typeof getConfig>["bot"]) => number, fallback: number): number {
+  try {
+    const v = read(getConfig().bot);
+    return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Per-(station,targetDate) record of whether the sniper-window forced cache
+ * refresh has already fired this process. Addendum N6: "docs promised forced
+ * invalidation at sniper entry; measured 3.2h-stale ensembles at trade time."
+ * On the first call inside the sniper horizon we bypass the ensemble cache once
+ * (fetch fresh), then mark the key so subsequent ticks serve the (now-fresh)
+ * cache normally. Reset in tests via resetSniperRefreshTracking().
+ */
+const sniperRefreshed = new Map<string, boolean>();
+
+/** Clear sniper-window forced-refresh tracking (test helper for N6). */
+export function resetSniperRefreshTracking(): void {
+  sniperRefreshed.clear();
+}
+
+/** Today's date in UTC as YYYY-MM-DD (matches how cacheValues derives horizons). */
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Prune sniper-refresh keys whose targetDate is strictly before today (UTC).
+ * Keeps the module-level Map from growing unbounded across many trading days.
+ * Cheap, opportunistic — called on insert.
+ */
+function pruneSniperRefreshed(): void {
+  const today = todayUtc();
+  for (const key of sniperRefreshed.keys()) {
+    // key === `${stationId}:${targetDate}` — targetDate is the trailing YYYY-MM-DD
+    const targetDate = key.slice(key.lastIndexOf(":") + 1);
+    if (targetDate < today) sniperRefreshed.delete(key);
+  }
+}
+
 /** Map market category to Open-Meteo hourly variable name (for HRRR) */
 const CATEGORY_TO_HOURLY: Record<string, string> = {
   high_temp: "temperature_2m",
@@ -87,7 +142,9 @@ export class EnsembleService {
   /**
    * Get ensemble forecast values for a station/date/category.
    * Returns values in US units (F for temp, inches for precip/snow).
-   * Checks DB cache first, falls back to Open-Meteo API.
+   * Thin back-compat wrapper over {@link getEnsembleWithSources} — returns just
+   * the blended value pool. Prefer getEnsembleWithSources when you also need the
+   * per-source attribution (N5).
    *
    * @param forecastHorizonHours Hours until market close. When provided,
    *   enables HRRR ingestion (<48h) and horizon-weighted model blending.
@@ -98,24 +155,86 @@ export class EnsembleService {
     category: MarketCategory,
     forecastHorizonHours?: number
   ): Promise<number[]> {
+    const { values } = await this.getEnsembleWithSources(
+      stationId,
+      targetDate,
+      category,
+      forecastHorizonHours
+    );
+    return values;
+  }
+
+  /**
+   * Get ensemble forecast values together with a per-source member count
+   * (`sourceMix`) taken AFTER horizon weighting/duplication (addendum N5 —
+   * "nothing records which sources fed a given estimate; no way to know whether
+   * the bot's worst days were HRRR-less"). The orchestrator persists sourceMix
+   * into the ReasoningTrace and can gate on it (requireHrrrInSniper).
+   *
+   * sourceMix label semantics:
+   * - On the **fresh-fetch path** every member carries a real model tag, so the
+   *   mix is authoritative: `{hrrr, gfs, ecmwf, icon, gem, arpege, tomorrow_io,
+   *   other}` with counts summing to `values.length`.
+   * - On the **DB-cache path** the cached ensemble is stored as a raw number[]
+   *   with no per-member tags, so we do NOT invent per-model attribution: the
+   *   cached portion is reported honestly as `{cached: n}`. Any freshly-fetched
+   *   HRRR members blended on top of the cache are counted accurately under
+   *   `hrrr`. `cached` is the label the orchestrator treats as "hrrr-unknown".
+   *
+   * Cache freshness (addendum N6 — "docs promised forced invalidation at sniper
+   * entry; measured 3.2h-stale ensembles at trade time"):
+   * - When `targetDate` is today (UTC) the ensemble cache TTL is
+   *   `bot.sameDayEnsembleTtlHours` (default 2h) instead of the standard 6h;
+   *   scout-mode (future-day) horizons keep 6h.
+   * - The FIRST call inside the sniper horizon (`horizonHours <= sniperHorizonHours`)
+   *   for a given (station,targetDate) force-bypasses the ensemble cache once to
+   *   pull a fresh full pool, then marks the key so later ticks serve normally.
+   */
+  async getEnsembleWithSources(
+    stationId: string,
+    targetDate: string,
+    category: MarketCategory,
+    forecastHorizonHours?: number
+  ): Promise<{ values: number[]; sourceMix: Record<string, number> }> {
     const forecastType = category;
     const horizonHours = forecastHorizonHours ?? this.estimateHorizonHours(targetDate);
 
-    // Check ensemble cache
-    const cached = await this.getCached(stationId, targetDate, forecastType);
+    // N6: shorter cache TTL for same-day targets; 6h is fine for scout horizons.
+    const isToday = targetDate === todayUtc();
+    const ensembleTtlMs = isToday
+      ? botConfigNum((b) => b.sameDayEnsembleTtlHours, DEFAULT_SAME_DAY_TTL_HOURS) * 60 * 60 * 1000
+      : CACHE_TTL_MS;
+
+    // N6: sniper-entry forced refresh — bypass the ensemble cache exactly once
+    // per (station,targetDate) on first entry into the sniper window.
+    const sniperHorizon = botConfigNum((b) => b.sniperHorizonHours, DEFAULT_SNIPER_HORIZON_HOURS);
+    const inSniper = forecastHorizonHours != null && forecastHorizonHours <= sniperHorizon;
+    const sniperKey = `${stationId}:${targetDate}`;
+    let forceRefresh = false;
+    if (inSniper && !sniperRefreshed.get(sniperKey)) {
+      forceRefresh = true;
+      sniperRefreshed.set(sniperKey, true);
+      pruneSniperRefreshed();
+      log.debug(
+        `Sniper-entry forced ensemble refresh for ${stationId} ${targetDate} (horizon=${horizonHours.toFixed(0)}h)`
+      );
+    }
+
+    // Check ensemble cache (skipped on a sniper-entry forced refresh)
+    const cached = forceRefresh ? null : await this.getCached(stationId, targetDate, forecastType, ensembleTtlMs);
     if (cached) {
       log.debug(`Cache hit for ${stationId} ${targetDate} ${forecastType}`);
       // Even with cached ensemble, still fetch fresh HRRR if within range
       if (horizonHours <= 48) {
         const hrrrCached = await this.getCached(stationId, targetDate, `${forecastType}_hrrr`, HRRR_CACHE_TTL_MS);
         if (!hrrrCached) {
-          const blended = await this.blendWithHrrr(cached, stationId, targetDate, category, horizonHours);
-          return blended;
+          return this.blendWithHrrr(cached, stationId, targetDate, category, horizonHours);
         }
         // HRRR also cached — blend cached values
-        return this.applyBlending(cached, "ensemble", hrrrCached, horizonHours);
+        const values = this.applyBlending(cached, "ensemble", hrrrCached, horizonHours);
+        return { values, sourceMix: this.cachedSourceMix(cached.length, values.length) };
       }
-      return cached;
+      return { values: cached, sourceMix: { cached: cached.length } };
     }
 
     // Fetch from Open-Meteo (primary ensemble source) with model tagging
@@ -136,7 +255,9 @@ export class EnsembleService {
       const tomorrowValues = await this.fetchTomorrowIo(stationId, targetDate, category);
       if (tomorrowValues.length > 0) {
         for (const v of tomorrowValues) {
-          taggedMembers.push({ value: v, model: "other" });
+          // Tag as a distinct source label so sourceMix can report tomorrow_io
+          // separately (N5); it draws the same horizon weight as the "other" group.
+          taggedMembers.push({ value: v, model: "tomorrow_io" });
         }
         log.info(
           `Added ${tomorrowValues.length} value(s) from Tomorrow.io for ${stationId} ${targetDate}`
@@ -161,22 +282,42 @@ export class EnsembleService {
           await this.cacheValues(stationId, targetDate, `${forecastType}_hrrr`, hrrrValues, HRRR_CACHE_TTL_MS);
         }
       } catch (err) {
-        log.debug(
-          `HRRR unavailable for ${stationId}: ${err instanceof Error ? err.message : err}`
-        );
+        // N5: HRRR is up to 70% of the short-horizon pool; a silent absence
+        // reshapes every probability. Escalate to warn inside the sniper window
+        // (the orchestrator's requireHrrrInSniper gate greps this message), keep
+        // it at debug for far-horizon warm passes where HRRR isn't expected.
+        const msg = `HRRR unavailable for ${stationId}: ${err instanceof Error ? err.message : err}`;
+        if (inSniper) {
+          log.warn(`hrrr unavailable in sniper window — ${msg} (horizon=${horizonHours.toFixed(0)}h)`);
+        } else {
+          log.debug(msg);
+        }
       }
     }
 
     if (taggedMembers.length > 0 || hrrrValues.length > 0) {
       // Apply horizon-weighted blending
-      const blended = this.blendMembers(taggedMembers, hrrrValues, horizonHours);
-      await this.cacheValues(stationId, targetDate, forecastType, blended);
-      return blended;
+      const { values, sourceMix } = this.blendMembersWithSources(taggedMembers, hrrrValues, horizonHours);
+      await this.cacheValues(stationId, targetDate, forecastType, values);
+      return { values, sourceMix };
     }
 
     // All APIs failed — fall back to NWS synthetic
     log.warn(`All forecast APIs failed for ${stationId} ${targetDate}, falling back to NWS synthetic`);
-    return this.syntheticFallback(stationId, targetDate, category);
+    const values = await this.syntheticFallback(stationId, targetDate, category);
+    return { values, sourceMix: { synthetic: values.length } };
+  }
+
+  /**
+   * Build the cache-path sourceMix: the cached pool is untagged so it is
+   * reported honestly as `{cached: n}`, and any freshly-blended HRRR members
+   * (the tail of the array beyond the cached portion) are attributed to `hrrr`.
+   */
+  private cachedSourceMix(cachedLen: number, totalLen: number): Record<string, number> {
+    const mix: Record<string, number> = { cached: cachedLen };
+    const hrrrAdded = totalLen - cachedLen;
+    if (hrrrAdded > 0) mix.hrrr = hrrrAdded;
+    return mix;
   }
 
   private async getCached(
@@ -234,12 +375,18 @@ export class EnsembleService {
     const hourlyVar = CATEGORY_TO_HOURLY[category];
     if (!hourlyVar) return [];
 
-    // HRRR via Open-Meteo regular forecast API (deterministic model)
+    // HRRR via Open-Meteo regular forecast API (deterministic model).
+    // Open-Meteo's model id for HRRR is `gfs_hrrr` (HRRR lives under the GFS
+    // family). The previous value `hrrr_conus` was never valid on this endpoint
+    // — every fetch 400'd and the failure was swallowed at debug level, so the
+    // bot traded its entire history without HRRR. Found 2026-06-05 the moment
+    // addendum N5 promoted sniper-window HRRR failures to warn. See
+    // improvements/win-rate-80-addendum-2026-06-05.md (N5).
     const url =
       `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${coords.lat}&longitude=${coords.lon}` +
       `&hourly=${hourlyVar}` +
-      `&models=hrrr_conus` +
+      `&models=gfs_hrrr` +
       `&forecast_days=2` +
       `&temperature_unit=celsius` +
       `&precipitation_unit=mm`;
@@ -361,6 +508,23 @@ export class EnsembleService {
     hrrrValues: number[],
     horizonHours: number
   ): number[] {
+    return this.blendMembersWithSources(taggedMembers, hrrrValues, horizonHours).values;
+  }
+
+  /**
+   * Like {@link blendMembers}, but also returns a per-source member count taken
+   * AFTER horizon weighting/duplication (N5 source attribution). Source labels
+   * are the model groups the pool was built from — `hrrr`, `gfs`, `ecmwf`,
+   * `icon`, `gem`, `arpege`, `tomorrow_io`, `other` — and the counts sum to
+   * `values.length`. This is the authoritative attribution for the fresh-fetch
+   * path (every member carries a real model tag), unlike the cache path which
+   * can only report `{cached: n}` (see getEnsembleWithSources).
+   */
+  blendMembersWithSources(
+    taggedMembers: Array<{ value: number; model: string }>,
+    hrrrValues: number[],
+    horizonHours: number
+  ): { values: number[]; sourceMix: Record<string, number> } {
     const bucket = getHorizonBucket(horizonHours);
     const weights = MODEL_WEIGHTS[bucket];
 
@@ -377,9 +541,17 @@ export class EnsembleService {
     }
     if (hrrrValues.length > 0) totalWeight += weights.hrrr;
 
+    const sourceMix: Record<string, number> = {};
+    const bump = (label: string, n: number) => {
+      if (n > 0) sourceMix[label] = (sourceMix[label] || 0) + n;
+    };
+
     if (totalWeight === 0) {
-      // No weighting info — return raw values
-      return [...taggedMembers.map((m) => m.value), ...hrrrValues];
+      // No weighting info — return raw values (one of each member + HRRR)
+      const values = [...taggedMembers.map((m) => m.value), ...hrrrValues];
+      for (const m of taggedMembers) bump(m.model, 1);
+      bump("hrrr", hrrrValues.length);
+      return { values, sourceMix };
     }
 
     const result: number[] = [];
@@ -396,6 +568,7 @@ export class EnsembleService {
       for (let i = 0; i < duplication; i++) {
         result.push(m.value);
       }
+      bump(m.model, duplication);
     }
 
     // Add HRRR values with appropriate weighting
@@ -407,13 +580,16 @@ export class EnsembleService {
           result.push(v);
         }
       }
+      bump("hrrr", hrrrValues.length * hrrrDup);
     }
 
-    return result;
+    return { values: result, sourceMix };
   }
 
   /**
    * Blend existing cached ensemble values with freshly-fetched HRRR.
+   * Returns the blended pool plus a cache-path sourceMix: `{cached: n}` for the
+   * untagged cached members and an accurate `hrrr` count for the fresh blend.
    */
   private async blendWithHrrr(
     cachedEnsemble: number[],
@@ -421,7 +597,7 @@ export class EnsembleService {
     targetDate: string,
     category: MarketCategory,
     horizonHours: number
-  ): Promise<number[]> {
+  ): Promise<{ values: number[]; sourceMix: Record<string, number> }> {
     let hrrrValues: number[] = [];
     try {
       hrrrValues = await this.fetchHrrr(stationId, targetDate, category);
@@ -429,9 +605,18 @@ export class EnsembleService {
         await this.cacheValues(stationId, targetDate, `${category}_hrrr`, hrrrValues, HRRR_CACHE_TTL_MS);
       }
     } catch (err) {
-      log.debug(`HRRR fetch failed during blend: ${err instanceof Error ? err.message : err}`);
+      // N5: cached-base + fresh-HRRR blend. A failure here also drops HRRR from
+      // a short-horizon pool, so warn inside the sniper window (greppable gate).
+      const sniperHorizon = botConfigNum((b) => b.sniperHorizonHours, DEFAULT_SNIPER_HORIZON_HOURS);
+      const msg = `HRRR fetch failed during blend: ${err instanceof Error ? err.message : err}`;
+      if (horizonHours <= sniperHorizon) {
+        log.warn(`hrrr unavailable in sniper window — ${msg} (horizon=${horizonHours.toFixed(0)}h)`);
+      } else {
+        log.debug(msg);
+      }
     }
-    return this.applyBlending(cachedEnsemble, "ensemble", hrrrValues, horizonHours);
+    const values = this.applyBlending(cachedEnsemble, "ensemble", hrrrValues, horizonHours);
+    return { values, sourceMix: this.cachedSourceMix(cachedEnsemble.length, values.length) };
   }
 
   /**

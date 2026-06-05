@@ -182,3 +182,91 @@ export function evaluateEntryGates(input: EntryGateInput): EntryGateResult {
 
   return { allowed: true };
 }
+
+export interface ConfirmationInput {
+  /** Estimator's final P(YES) in [0, 1] */
+  estimatedProb: number;
+  /** Market-implied P(YES) in [0, 1] (mid preferred, last-trade fallback) */
+  marketPrice: number;
+  config: {
+    /** Master switch. Ships dark (false) — orchestrator flips it on. */
+    enabled: boolean;
+    /** Min market conviction to confirm the popular side, e.g. 0.80. */
+    minMarketConviction: number;
+    /** Min model agreement with the popular side, e.g. 0.50. */
+    minModelAgreement: number;
+    /** Max contract price (in [0, 1]) we'll pay; keeps min payoff meaningful. */
+    maxEntryPrice: number;
+  };
+}
+
+export type ConfirmationResult =
+  | { fire: false }
+  | { fire: true; side: "yes" | "no"; entryPrice: number };
+
+/**
+ * Confirmation-mode evaluation: a *second* signal pathway that takes the popular
+ * side of a highly confident, well-calibrated market **when the model agrees**.
+ * This is the win-rate floor and the steady-income stream — the inverse of the
+ * contrarian path that `evaluateEntryGates` exists to suppress. See plan item #2
+ * in `docs/improvements/win-rate-80-plan-2026-06-05.md`.
+ *
+ * The market is nearly perfectly calibrated: contracts priced ≥80¢ resolve that
+ * way 90–99% of the time (reliability diagram, plan item #1). Replaying signals
+ * over 2026-04-26 → 06-05, "take the popular side when the market is ≥80%
+ * confident AND the model also agrees (est ≥ 0.50)" ran:
+ *   - YES arm: **15/15** wins, **+7.1¢/contract** average.
+ *   - NO arm:  **95.3%** win rate.
+ *
+ * Caveat — **win rate is cheap, EV is thin.** A 95% win rate at a 95¢ entry is
+ * only +0.44¢/contract before fees (NO arm), and fees can erase it. The
+ * `maxEntryPrice` cap (default 0.93, i.e. min 7¢ payoff) is what keeps each
+ * confirmation trade's payoff meaningful — it is the EV guardrail, not a
+ * conviction filter. Sizing is flat (`confirmationBetSizeCents`) and handled by
+ * execution, not here.
+ *
+ * IMPORTANT: confirmation signals must **NOT** be routed through
+ * `evaluateEntryGates`. Its concordance cap (|est − market| ≤ 25pp) and
+ * side-vs-market gate would veto exactly the agreement trades this pathway is
+ * built to harvest — e.g. est 0.55 / market 0.97 is a legitimate confirmation
+ * but a 42pp "disagreement" to the contrarian gate. Station-health filtering for
+ * confirmation signals is the orchestrator's responsibility, applied separately.
+ *
+ * Pure function: no config import, no I/O. Boundaries are inclusive on every
+ * threshold (>=, <=) so a market sitting exactly on the conviction floor or the
+ * max entry price still fires.
+ */
+export function evaluateConfirmation(
+  input: ConfirmationInput
+): ConfirmationResult {
+  const { estimatedProb, marketPrice, config } = input;
+  const { enabled, minMarketConviction, minModelAgreement, maxEntryPrice } =
+    config;
+
+  // 1. Master switch — ships dark; never fires until the orchestrator enables it.
+  if (!enabled) return { fire: false };
+
+  // 2. YES arm — confident market says YES, model agrees, payoff still ≥ cap.
+  if (
+    marketPrice >= minMarketConviction &&
+    estimatedProb >= minModelAgreement &&
+    marketPrice <= maxEntryPrice
+  ) {
+    return { fire: true, side: "yes", entryPrice: marketPrice };
+  }
+
+  // 3. NO arm — confident market says NO (mirror), model agrees it's NO-y,
+  //    and the NO contract (1 - marketPrice) is no costlier than the cap.
+  const noEntryPrice = 1 - marketPrice;
+  if (
+    marketPrice <= 1 - minMarketConviction &&
+    estimatedProb <= 1 - minModelAgreement &&
+    noEntryPrice <= maxEntryPrice
+  ) {
+    return { fire: true, side: "no", entryPrice: noEntryPrice };
+  }
+
+  // 4. Neither arm qualifies (incl. the mid-range market where neither side is
+  //    confident enough).
+  return { fire: false };
+}

@@ -67,6 +67,16 @@ export interface ReasoningTrace {
     probabilityBefore: number;
     probabilityAfter: number;
   } | null;
+  /**
+   * Per-source ensemble member counts that fed this estimate, AFTER horizon
+   * weighting (addendum N5 — source attribution). Passed through from
+   * EnsembleService.getEnsembleWithSources so reasoning traces are queryable by
+   * which models were present (e.g. HRRR-less days). Labels: hrrr/gfs/ecmwf/
+   * icon/gem/arpege/tomorrow_io/other on the fresh path; `cached` when served
+   * from the untagged DB cache (hrrr-unknown). null when the caller didn't
+   * supply it (back-compat — most callers don't yet).
+   */
+  sourceMix?: Record<string, number> | null;
 }
 
 export class ProbabilityEstimator {
@@ -82,12 +92,16 @@ export class ProbabilityEstimator {
    *
    * @param observation Optional same-day observation to tighten sigma
    * @param marketPrice Optional market-implied P(YES) in [0, 1] used as a final-stage Bayesian prior (gated by config.bot.marketPriorWeight)
+   * @param sourceMix Optional per-source ensemble member counts (N5) from
+   *   EnsembleService.getEnsembleWithSources, stored verbatim into the
+   *   ReasoningTrace (null when absent). Does not affect any computation.
    */
   async estimate(
     market: Market,
     ensembleValues: number[],
     observation?: ObservationAdjustment,
-    marketPrice?: number
+    marketPrice?: number,
+    sourceMix?: Record<string, number>
   ): Promise<EstimateResult> {
     const isTail = market.marketType === "upper_tail" || market.marketType === "lower_tail";
     if (!market.stationId || market.bracketLow == null || (!isTail && market.bracketHigh == null)) {
@@ -353,6 +367,7 @@ export class ProbabilityEstimator {
       historicalHitRate,
       historicalPriorBlend,
       marketPriorBlend,
+      sourceMix: sourceMix ?? null,
     };
 
     log.debug(

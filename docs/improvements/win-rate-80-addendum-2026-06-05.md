@@ -161,6 +161,11 @@ Ordered by impact-per-effort. Items N1–N3 attack root causes; N4–N7 fix the 
 
 **Verification:** Distribution of `signals.edge` should shrink on thin markets; paper PnL per trade drops by ~spread/2 (more honest), live/paper divergence narrows.
 
+**Implementation status (2026-06-05):** Items 1, 3, 4 shipped on the execution side; item 2 (signal-eval `marketPrice = mid`, one-sided-book skip) remains for the orchestrator/estimator path.
+- `feed.ts` ticker handler now writes `yesBid`/`yesAsk` (null-tolerant) alongside last price on every `markets` update (migration 0005 columns).
+- `execution.ts::executeSignal` does a per-signal `markets` book lookup after the anti-churn guards. **Spread guard:** both sides present and `yesAsk − yesBid > maxSpreadCents` (10; 0 = disabled) → skip `spread N¢ > max M¢` (applies to confirmation entries too). **Crossing-price entry:** YES pays `yesAsk`, NO pays `100 − yesBid`, clamped to [1,99]; falls back to the prior last-trade-derived price (`round(marketPrice·100)` / inverse) when the needed side is null. Kelly EV math still uses `signal.marketPrice` (probability) — only the *limit price we pay* moved to the book.
+- Tests: `feed.test.ts` (+3, bid/ask persistence + null tolerance + overwrite), `execution.test.ts` (+spread guard on/off, YES-ask, NO-100−bid, book-absent fallback).
+
 ### N5. Source attribution + HRRR data-quality gate ⭐
 **Impact:** Makes the 70%-weight short-horizon source auditable; stops the bot from sniping with a degraded pool.
 **Effort:** 0.5–1 day.
@@ -173,6 +178,15 @@ Ordered by impact-per-effort. Items N1–N3 attack root causes; N4–N7 fix the 
 
 **Verification:** Query reasoning traces by sourceMix; win-rate split HRRR-present vs absent becomes measurable (and actionable).
 
+**Implementation status (2026-06-05):** ✅ Fully shipped — data layer (`ensemble.ts` + `estimator.ts`) plus the orchestrator ladder gate (skip contrarian sniper-window signals when `sourceMix.hrrr === 0` under `require_hrrr_in_sniper`; confirmation entries deliberately exempt — their information source is the market itself).
+
+**🔥 Discovery (2026-06-05, the moment the warn logging went live):** HRRR **has never worked**. `fetchHrrr` requested `models=hrrr_conus`, which Open-Meteo rejects with HTTP 400 (`Cannot initialize MultiDomains from invalid String value hrrr_conus`) — and the failure was swallowed at debug level. The correct model id is `gfs_hrrr` (fixed same day, verified against the live API). **The bot's entire trading history ran HRRR-less**: the source designed to be 40–70% of the sniper-window pool contributed zero members to every estimate ever made. This retroactively explains part of why "forecast sharpening" never closed the Brier gap (the 2026-04-13 analysis measured our Brier flat at 0.161 while the market sharpened 14× — we were sharpening without the sharpest input). Finding 6's hypothesis ("we can't tell if losing days were HRRR-less") resolves to: they all were.
+- New public `EnsembleService.getEnsembleWithSources(stationId, targetDate, category, horizonHours?)` returns `{ values: number[]; sourceMix: Record<string, number> }`. `getEnsembleValues` is now a thin back-compat wrapper returning just `.values` (existing orchestrator/reconciliation callers unchanged).
+- **sourceMix label semantics** (documented in JSDoc): on the **fresh-fetch path** every member carries a real model tag, so the mix is authoritative — `{hrrr, gfs, ecmwf, icon, gem, arpege, tomorrow_io, other}` with counts taken AFTER horizon weighting/duplication and **summing to `values.length`**. Tomorrow.io members are tagged `tomorrow_io` (was lumped into `other`) so they report separately; they still draw the `other` horizon weight. On the **DB-cache path** the cached pool is an untagged `number[]`, so it is reported honestly as `{cached: n}` — we do NOT invent per-model attribution — plus an accurate `hrrr` count for any fresh HRRR blended on top. `cached` is the label the orchestrator treats as **hrrr-unknown**. The all-APIs-failed synthetic path reports `{synthetic: n}`.
+- HRRR fetch failure **inside the sniper window** (`horizonHours <= bot.sniperHorizonHours`, both the fresh-fetch and cached-base+fresh-HRRR paths) now logs at **`log.warn`** with the stable, greppable substring **`hrrr unavailable in sniper window`** (orchestrator's `requireHrrrInSniper` gate keys on this). Outside the sniper window it stays at `debug` (far-horizon warm passes don't expect HRRR). The bus event is implicit — `createLogger`'s warn already emits a `"log"` bus event at `level: "warn"`.
+- `ReasoningTrace.sourceMix?: Record<string, number> | null` added; `estimate(market, ensembleValues, observation?, marketPrice?, sourceMix?)` gained an optional 5th param stored verbatim into the trace (null when absent). No existing call site changed; sourceMix does not affect any computation.
+- Tests: `ensemble.test.ts` +11 (per-source counts sum to `values.length`; fresh per-model mix; cached `{cached:n}` + fresh-HRRR blend; both-cached `{cached,hrrr}`; `getEnsembleValues` back-compat array; HRRR-warn greppable string fires inside sniper / not outside), `estimator.test.ts` +1 (trace carries sourceMix when provided, null otherwise).
+
 ### N6. Sniper-entry cache invalidation (close the docs/code gap)
 **Impact:** Ensures the freshest full ensemble at decision time, not just fresh HRRR on a 6h-old base.
 **Effort:** 0.5 day.
@@ -183,6 +197,12 @@ Ordered by impact-per-effort. Items N1–N3 attack root causes; N4–N7 fix the 
 2. Reduce ensemble cache TTL to 2h when `targetDate == today` (6h is fine for scout-mode horizons).
 
 **Verification:** `ensemble_age_hours` at trade time (Finding-7 query) ≤ 2h for all sniper entries.
+
+**Implementation status (2026-06-05):** ✅ Shipped in `ensemble.ts` (both items, inside `getEnsembleWithSources`; JSDoc references this finding — "docs promised forced invalidation at sniper entry; measured 3.2h-stale ensembles at trade time").
+1. **Same-day TTL:** when `targetDate` equals today (UTC `YYYY-MM-DD` compare, matching how the file already derives horizons) the ensemble cache TTL is `bot.sameDayEnsembleTtlHours` (default 2h) instead of the standard `CACHE_TTL_MS` (6h). Future-day (scout) horizons keep 6h. HRRR's 1h sidecar TTL is unchanged.
+2. **Sniper-entry forced refresh:** a module-level `Map<string, boolean>` keyed `${stationId}:${targetDate}` tracks first entry. When `horizonHours != null && horizonHours <= bot.sniperHorizonHours` and the key hasn't been refreshed this process, the ensemble cache is **bypassed exactly once** (fresh full pool fetched), then the key is marked so subsequent ticks serve the now-fresh cache normally. Keys for past dates are pruned opportunistically on insert. Exported `resetSniperRefreshTracking()` clears the map (test/ops hook; also re-exported from `@kcb/data`).
+- Config reads go through a `botConfigNum` helper that falls back to the documented defaults (2h / 12h) when `@kcb/config` is mocked/partial in tests (Bun `mock.module` leaks process-wide and several files omit the newer bot keys) — prevents a `NaN` TTL.
+- Tests (in the N6 block of `ensemble.test.ts`): same-day row cached 3h ago → stale → re-fetch; 1h-old → served (zero network); first sniper call bypasses a *fresh* cache once (open-meteo hit), second serves cache (no re-fetch), `resetSniperRefreshTracking()` re-arms the bypass.
 
 ### N7. Coin-flip dead-zone gate
 **Impact:** Removes the 78-trade / 48.7% / −$14 segment unless we hold an information edge there.
@@ -223,6 +243,8 @@ Ordered by impact-per-effort. Items N1–N3 attack root causes; N4–N7 fix the 
 **Change:** Dry-run fills execute at the book's crossing price with a 1-tick adverse markup, and only when `ask − bid ≤ max_spread_cents`. Tag orders with `fill_model = 'book_v1'` so eras are comparable.
 
 **Verification:** Paper round-trip PnL per trade drops by the realistic spread cost; no change in signal logic.
+
+**Implementation status (2026-06-05):** Shipped via the N4 crossing-price change — dry-run entry fills now execute at the book's crossing price (ask for YES / `100 − bid` for NO) instead of the zero-spread last trade, gated by the same `maxSpreadCents` check. The explicit 1-tick adverse markup and a persisted `fill_model = 'book_v1'` tag were **not** added (no schema change in scope for this slice); the crossing price already carries the realistic spread cost. Add the era tag later if paper-era comparability is needed.
 
 ### N11. Ground-truth mismatch telemetry (permanent regression alarm)
 **Impact:** Finding 1 went undetected for ~3 months; make its recurrence impossible.

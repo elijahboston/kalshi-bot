@@ -204,6 +204,7 @@ Each item has impact estimate, files, and verification. They are ordered by impa
 **Verification:** Backtest in a SQL CTE: re-classify all 200 historical trades through these gates. Expect ≥100 trades blocked, remaining 50–80 win rate.
 
 ### 2. Confirmation-mode signal pathway ⭐ HIGH IMPACT, ADDS VOLUME
+**Status:** ✅ Shipped end-to-end 2026-06-05 — `evaluateConfirmation` (pure helper), orchestrator emission (`confirm_yes`/`confirm_no` when the contrarian ladder skips inside the sniper window; station-health honored, concordance cap deliberately not applied), and the execution branch (Kelly bypass, flat `confirmation_bet_size_cents`, ≤93¢ entry cap re-checked at fill time). Runtime row `confirmation_mode_enabled=true` (paper). Replay basis: YES arm 15/15 (+7.1¢/contract), NO arm 95.3%.
 **Impact:** Adds high-win-rate market-follow trades to compensate for the volume lost to gate #1. Expected hit rate 85–95% per the market reliability data.
 **Effort:** 1–1.5 days.
 **Files:** `app/signals/services/entry-gates.ts`, `app/engine/services/orchestrator.ts`, `packages/config/src/index.ts`.
@@ -218,6 +219,8 @@ Each item has impact estimate, files, and verification. They are ordered by impa
 - Sizing: flat `confirmation_bet_size_cents` (e.g., $5). Kelly stays in main path; confirmation path is conviction-flat.
 
 **Verification:** Counterfactual replay on past signals — expect 50–200 confirmation signals over 6 weeks, win rate ≥85%, small per-trade PnL, positive aggregate.
+
+**Implementation status (2026-06-05):** Execution-side branch shipped in `execution.ts`. `executeSignal` recognizes `recommendation === "confirm_yes" | "confirm_no"` and: **bypasses** the Kelly EV-sign gate (`cappedKelly <= 0` no longer skips — the model intentionally disagrees with paying the confident market) and the `minContractPrice` floor; sizes **flat** at `confirmationBetSizeCents` (500¢); enforces an **entry-price cap** re-checked at execution time (`confirmationMaxEntryPrice`, 0.93) → skip `confirmation entry N¢ > cap M¢`; records `kellyFraction = 0` on the order row to mark "sizing bypassed Kelly". All other guards (max positions, netHeld, cooldown, exposure, **spread**) still apply. The entry price is the book crossing price from N4 (ask for YES / `100 − bid` for NO). **Still required from the orchestrator/estimator path:** emit `confirm_yes` / `confirm_no` recommendations (with `side` set and `marketPrice`/`estimatedProb` populated) when `marketPrice ≥ confirmationMinMarketConviction` and the model agrees per `confirmationMinModelAgreement`, behind `confirmationModeEnabled`. Until that emission lands, no confirmation orders are placed (ships dark). 9 execution tests cover the branch (fires on negative Kelly, flat sizing → `floor(500/86)=5`, kellyFraction 0, cap skip, confirm_no `100−bid`, and the minContractPrice bypass vs the still-enforced regular path).
 
 ### 3. Raise `market_prior_weight` adaptively ⭐ MEDIUM IMPACT
 **Status:** ✅ Shipped 2026-06-05 — weight ramps 0.3 → 0.7 over disagreement 0.30 → 0.60 (`market_prior_max_weight`, `market_prior_ramp_start/end`). KNYC June-5 example verified in tests: blend 0.37 → 0.62, false NO edge correctly killed.

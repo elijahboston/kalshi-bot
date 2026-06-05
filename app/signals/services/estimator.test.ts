@@ -476,6 +476,21 @@ describe("ProbabilityEstimator — market prior blend (adaptive ramp)", () => {
     expect(result.probability).toBeGreaterThan(0.55);
     expect(0.8 - result.probability).toBeLessThan(0.25);
   });
+
+  test("sourceMix (N5): carried into the trace when provided, null otherwise", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [28, 29, 30, 30, 31, 32];
+
+    // Provided → stored verbatim
+    const mix = { hrrr: 105, gfs: 22, ecmwf: 23, tomorrow_io: 1 };
+    const withMix = await estimator.estimate(makeMarket(), ensemble, undefined, undefined, mix);
+    expect(withMix.reasoning.sourceMix).toEqual(mix);
+
+    // Omitted → null (back-compat; does not affect probability)
+    const withoutMix = await estimator.estimate(makeMarket(), ensemble);
+    expect(withoutMix.reasoning.sourceMix).toBeNull();
+    expect(withMix.probability).toBeCloseTo(withoutMix.probability, 10);
+  });
 });
 
 describe("getHistoricalHitRate", () => {

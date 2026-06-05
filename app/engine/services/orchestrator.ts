@@ -7,7 +7,7 @@ import { registerTick, startLoop, stopLoop, getLoopState } from "./loop";
 import { discoverMarkets } from "./discovery";
 import { startFeed, stopFeed, subscribeToTickers } from "./feed";
 import { EnsembleService, NwsService } from "@kcb/data";
-import { ProbabilityEstimator, getEffectiveThreshold, evaluateTailGate, evaluateEntryGates } from "@kcb/signals";
+import { ProbabilityEstimator, getEffectiveThreshold, evaluateTailGate, evaluateEntryGates, evaluateConfirmation } from "@kcb/signals";
 import type { EstimateResult, ObservationAdjustment } from "@kcb/signals";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, isTickerHeld, restoreAntiChurnState } from "@kcb/execution";
 import { ReconciliationService } from "./reconciliation";
@@ -92,7 +92,11 @@ export async function initOrchestrator(): Promise<void> {
         )
       );
 
-    const estimates: Array<{ market: Market; estimate: EstimateResult }> = [];
+    const estimates: Array<{
+      market: Market;
+      estimate: EstimateResult;
+      sourceMix: Record<string, number>;
+    }> = [];
 
     // Cache same-day observations per station to avoid redundant NWS calls
     const observationCache = new Map<string, ObservationAdjustment | null>();
@@ -116,12 +120,16 @@ export async function initOrchestrator(): Promise<void> {
             : undefined;
 
         const category = market.category as Parameters<typeof ensembleService.getEnsembleValues>[2];
-        const ensembleValues = await ensembleService.getEnsembleValues(
-          market.stationId,
-          market.targetDate!,
-          category,
-          forecastHorizonHours
-        );
+        // Source-attributed fetch (addendum N5): sourceMix records member counts
+        // per model so the HRRR sniper gate and post-hoc win-rate splits can see
+        // which sources actually fed each estimate.
+        const { values: ensembleValues, sourceMix } =
+          await ensembleService.getEnsembleWithSources(
+            market.stationId,
+            market.targetDate!,
+            category,
+            forecastHorizonHours
+          );
 
         // Fetch same-day observation for temperature markets (improvement #4)
         let observation: ObservationAdjustment | undefined;
@@ -140,15 +148,15 @@ export async function initOrchestrator(): Promise<void> {
           observation = observationCache.get(market.stationId) ?? undefined;
         }
 
-        const marketPriceForEstimator =
-          market.lastYesPrice != null ? market.lastYesPrice / 100 : undefined;
+        const marketPriceForEstimator = marketMid(market);
         const estimate = await estimator.estimate(
           market,
           ensembleValues,
           observation,
-          marketPriceForEstimator
+          marketPriceForEstimator,
+          sourceMix
         );
-        estimates.push({ market, estimate });
+        estimates.push({ market, estimate, sourceMix });
       } catch (err) {
         log.warn(
           `Estimation failed for ${market.ticker}: ${err instanceof Error ? err.message : err}`
@@ -181,15 +189,18 @@ export async function initOrchestrator(): Promise<void> {
 
     const actionableSignals: ActionableSignal[] = [];
 
-    for (const { market, estimate } of estimates) {
+    for (const { market, estimate, sourceMix } of estimates) {
       // Skip markets with no price data — placing orders at the 50¢ default
-      // creates resting orders that never fill and churn through cancel/re-place cycles
-      if (market.lastYesPrice == null) {
+      // creates resting orders that never fill and churn through cancel/re-place cycles.
+      // Price is the book mid when both sides are quoted (addendum N4 — last trade
+      // can be stale on thin markets and manufactures phantom edge), else last trade.
+      const midPrice = marketMid(market);
+      if (midPrice == null) {
         log.debug(`Skipping ${market.ticker}: no price data yet`);
         continue;
       }
 
-      const marketPrice = market.lastYesPrice / 100;
+      const marketPrice = midPrice;
 
       // Determine side and edge
       const yesEdge = estimate.probability - marketPrice;
@@ -219,7 +230,13 @@ export async function initOrchestrator(): Promise<void> {
       const edgeThreshold = baseThreshold + stationSurcharge;
 
       // Determine recommendation
-      let recommendation: "buy_yes" | "buy_no" | "scout" | "skip" = "skip";
+      let recommendation:
+        | "buy_yes"
+        | "buy_no"
+        | "confirm_yes"
+        | "confirm_no"
+        | "scout"
+        | "skip" = "skip";
       let skipReason: string | null = null;
 
       // Sniper mode: gate entry based on forecast horizon
@@ -240,6 +257,15 @@ export async function initOrchestrator(): Promise<void> {
       const inSniperWindow =
         sniperHorizon === 0 || // disabled
         forecastHorizonHours == null ||
+        forecastHorizonHours <= sniperHorizon;
+
+      // True only when the market is genuinely inside an enabled sniper window
+      // (not the degenerate "sniper disabled / horizon unknown" cases above).
+      // Used by the HRRR data-quality gate and the confirmation pathway, both
+      // of which assume near-close market conditions.
+      const inActualSniperWindow =
+        sniperHorizon > 0 &&
+        forecastHorizonHours != null &&
         forecastHorizonHours <= sniperHorizon;
 
       // Tail-market entry gate. Tails historically bled on mid-priced contracts
@@ -283,6 +309,18 @@ export async function initOrchestrator(): Promise<void> {
       } else if (!inSniperWindow) {
         recommendation = "scout";
         skipReason = `scout mode (${forecastHorizonHours!.toFixed(1)}h > ${sniperHorizon}h sniper window)`;
+      } else if (
+        config.bot.requireHrrrInSniper &&
+        inActualSniperWindow &&
+        (sourceMix["hrrr"] ?? 0) === 0
+      ) {
+        // Data-quality gate (addendum N5): HRRR is 40-70% of the intended pool
+        // inside the sniper window; its silent absence reshapes every probability.
+        // Contrarian entries require it. Confirmation entries (below) deliberately
+        // don't — their information source is the market itself. `cached`-labeled
+        // pools count as hrrr-absent: N6's sniper-entry refresh means a healthy
+        // HRRR would have been blended fresh by now.
+        skipReason = "hrrr unavailable in sniper window";
       } else if (edge < edgeThreshold) {
         skipReason =
           stationSurcharge > 0
@@ -296,6 +334,44 @@ export async function initOrchestrator(): Promise<void> {
         skipReason = entryGates.reason ?? "entry gate blocked";
       } else {
         recommendation = side === "yes" ? "buy_yes" : "buy_no";
+      }
+
+      // Confirmation-mode pathway (win-rate-80 plan #2): when the contrarian
+      // ladder skips but the market is highly convinced (≥80¢) and the model
+      // agrees on direction, take the popular side flat. Replay 2026-04→06:
+      // YES arm 15/15 (+7.1¢/contract), NO arm 95.3%. Deliberately NOT routed
+      // through evaluateEntryGates — its concordance cap would veto legitimate
+      // agreement trades (e.g. est 0.55 / market 0.97). Station health and the
+      // sniper window still apply; tails are allowed (the confirmationMaxEntryPrice
+      // cap and the market-conviction filter are the guards there). Execution
+      // bypasses the Kelly EV-sign gate for confirm_* and sizes flat — see
+      // executeSignal.
+      if (recommendation === "skip" && inActualSniperWindow) {
+        const confirmation = evaluateConfirmation({
+          estimatedProb: estimate.probability,
+          marketPrice,
+          config: {
+            enabled: config.bot.confirmationModeEnabled,
+            minMarketConviction: config.bot.confirmationMinMarketConviction,
+            minModelAgreement: config.bot.confirmationMinModelAgreement,
+            maxEntryPrice: config.bot.confirmationMaxEntryPrice,
+          },
+        });
+        const stationDisabled =
+          market.stationId != null &&
+          config.bot.disabledStations.includes(market.stationId);
+        if (confirmation.fire && !stationDisabled) {
+          side = confirmation.side;
+          // Held-side model edge, recorded for telemetry only — confirmation
+          // trades claim market edge, not model edge, so this may be ≤ 0.
+          edge =
+            confirmation.side === "yes"
+              ? estimate.probability - marketPrice
+              : marketPrice - estimate.probability;
+          recommendation =
+            confirmation.side === "yes" ? "confirm_yes" : "confirm_no";
+          skipReason = null;
+        }
       }
 
       // Compute Kelly fraction
@@ -586,6 +662,19 @@ export async function initOrchestrator(): Promise<void> {
   });
 
   log.info("Orchestrator initialized — ready to start");
+}
+
+/**
+ * Market-implied P(YES) in [0,1]: book mid when both sides are quoted
+ * (addendum N4 — the last trade can be arbitrarily stale on thin markets and
+ * manufactures phantom edge), falling back to the last trade price. Returns
+ * undefined when no price information exists at all.
+ */
+function marketMid(market: Market): number | undefined {
+  if (market.yesBid != null && market.yesAsk != null) {
+    return (market.yesBid + market.yesAsk) / 200;
+  }
+  return market.lastYesPrice != null ? market.lastYesPrice / 100 : undefined;
 }
 
 export { startLoop as start, stopLoop as stop, getLoopState as getState, stopFeed };

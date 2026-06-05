@@ -1,6 +1,10 @@
 import { test, expect, describe } from "bun:test";
-import { evaluateTailGate, evaluateEntryGates } from "./entry-gates";
-import type { EntryGateInput } from "./entry-gates";
+import {
+  evaluateTailGate,
+  evaluateEntryGates,
+  evaluateConfirmation,
+} from "./entry-gates";
+import type { EntryGateInput, ConfirmationInput } from "./entry-gates";
 
 describe("evaluateTailGate", () => {
   test("non-tail market passes unconditionally", () => {
@@ -365,6 +369,141 @@ describe("evaluateEntryGates", () => {
       );
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain("disagreement");
+    });
+  });
+});
+
+describe("evaluateConfirmation", () => {
+  // Shipped confirmation defaults; tests override per-case. `enabled` defaults
+  // true here so most cases exercise the arms, not the master switch.
+  const defaultConfig: ConfirmationInput["config"] = {
+    enabled: true,
+    minMarketConviction: 0.8,
+    minModelAgreement: 0.5,
+    maxEntryPrice: 0.93,
+  };
+
+  // `over.config` is a partial override merged onto defaultConfig.
+  const baseInput = (
+    over: Partial<Omit<ConfirmationInput, "config">> & {
+      config?: Partial<ConfirmationInput["config"]>;
+    } = {}
+  ): ConfirmationInput => {
+    const { config: configOver, ...rest } = over;
+    return {
+      estimatedProb: 0.6,
+      marketPrice: 0.85,
+      ...rest,
+      config: { ...defaultConfig, ...configOver },
+    };
+  };
+
+  describe("disabled", () => {
+    test("never fires even on otherwise-perfect YES inputs", () => {
+      const result = evaluateConfirmation(
+        baseInput({
+          estimatedProb: 0.6,
+          marketPrice: 0.85,
+          config: { enabled: false },
+        })
+      );
+      expect(result.fire).toBe(false);
+    });
+
+    test("never fires even on otherwise-perfect NO inputs", () => {
+      const result = evaluateConfirmation(
+        baseInput({
+          estimatedProb: 0.3,
+          marketPrice: 0.15,
+          config: { enabled: false },
+        })
+      );
+      expect(result.fire).toBe(false);
+    });
+  });
+
+  describe("YES arm", () => {
+    test("fires at market 0.85 / est 0.60; entryPrice = 0.85", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.6, marketPrice: 0.85 })
+      );
+      expect(result).toEqual({ fire: true, side: "yes", entryPrice: 0.85 });
+    });
+
+    test("blocked when model disagrees (market 0.85 / est 0.45)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.45, marketPrice: 0.85 })
+      );
+      expect(result.fire).toBe(false);
+    });
+
+    test("blocked when too expensive (market 0.95 / maxEntryPrice 0.93)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.6, marketPrice: 0.95 })
+      );
+      expect(result.fire).toBe(false);
+    });
+  });
+
+  describe("YES arm boundaries (inclusive thresholds)", () => {
+    test("market exactly at conviction floor 0.80 fires (>=)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.6, marketPrice: 0.8 })
+      );
+      expect(result).toEqual({ fire: true, side: "yes", entryPrice: 0.8 });
+    });
+
+    test("est exactly at agreement floor 0.50 fires (>=)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.5, marketPrice: 0.85 })
+      );
+      expect(result).toEqual({ fire: true, side: "yes", entryPrice: 0.85 });
+    });
+
+    test("market exactly at maxEntryPrice 0.93 fires (<=)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.6, marketPrice: 0.93 })
+      );
+      expect(result).toEqual({ fire: true, side: "yes", entryPrice: 0.93 });
+    });
+
+    test("market 0.94 blocked (just over maxEntryPrice)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.6, marketPrice: 0.94 })
+      );
+      expect(result.fire).toBe(false);
+    });
+  });
+
+  describe("NO arm", () => {
+    test("fires at market 0.15 / est 0.30 → side no, entryPrice 0.85", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.3, marketPrice: 0.15 })
+      );
+      expect(result).toEqual({ fire: true, side: "no", entryPrice: 0.85 });
+    });
+
+    test("blocked when model says too YES-y (market 0.15 / est 0.55)", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.55, marketPrice: 0.15 })
+      );
+      expect(result.fire).toBe(false);
+    });
+
+    test("blocked by maxEntryPrice: market 0.05 → NO costs 0.95 > 0.93", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.3, marketPrice: 0.05 })
+      );
+      expect(result.fire).toBe(false);
+    });
+  });
+
+  describe("mid-range market never fires", () => {
+    test("market 0.50 fires neither arm", () => {
+      const result = evaluateConfirmation(
+        baseInput({ estimatedProb: 0.5, marketPrice: 0.5 })
+      );
+      expect(result.fire).toBe(false);
     });
   });
 });

@@ -20,13 +20,17 @@ const mockBotConfig = {
   flatBetSizeCents: 0,
   highConfidenceThreshold: 0,
   highConfidenceBetSizeCents: 0,
+  // Spread-aware + confirmation-mode keys (addendum N4 / win-rate-80 #2).
+  maxSpreadCents: 10,
+  confirmationBetSizeCents: 500,
+  confirmationMaxEntryPrice: 0.93,
 };
 
 mock.module("@kcb/config", () => ({
   getConfig: () => ({ bot: mockBotConfig }),
 }));
 
-import { getDb, runMigrations, orders, positions } from "@kcb/db";
+import { getDb, runMigrations, orders, positions, markets } from "@kcb/db";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
 import { bus } from "@kcb/engine";
 import { eq, sql } from "drizzle-orm";
@@ -49,10 +53,15 @@ beforeEach(async () => {
   mockBotConfig.highConfidenceBetSizeCents = 0;
   mockBotConfig.maxExposurePerTicker = 500;
   mockBotConfig.maxContractsPerOrder = 15;
+  mockBotConfig.minContractPrice = 15;
+  mockBotConfig.maxSpreadCents = 10;
+  mockBotConfig.confirmationBetSizeCents = 500;
+  mockBotConfig.confirmationMaxEntryPrice = 0.93;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
   db.delete(positions).run();
+  db.delete(markets).run();
 });
 
 describe("computeKelly", () => {
@@ -928,5 +937,274 @@ describe("restoreAntiChurnState", () => {
     // Second call should be a no-op
     await restoreAntiChurnState();
     // No error means success
+  });
+});
+
+// ── Spread-aware / book-aware entries (addendum N4 + N10) ──────
+// These tests seed a `markets` row with an order book so executeSignal prices
+// against the book (ask for YES, 100−bid for NO) and enforces the spread guard.
+
+function seedMarket(
+  ticker: string,
+  book: { yesBid?: number | null; yesAsk?: number | null; lastYesPrice?: number | null } = {}
+) {
+  const ts = new Date().toISOString();
+  getDb()
+    .insert(markets)
+    .values({
+      ticker,
+      eventTicker: "KXHIGHNY-26MAR04",
+      seriesTicker: "KXHIGHNY",
+      title: "test market",
+      category: "high_temp",
+      stationId: "KNYC",
+      targetDate: "2026-03-04",
+      bracketLow: 39,
+      bracketHigh: 40,
+      marketType: "bracket",
+      status: "open",
+      lastYesPrice: book.lastYesPrice ?? null,
+      lastNoPrice: book.lastYesPrice != null ? 100 - book.lastYesPrice : null,
+      yesBid: book.yesBid ?? null,
+      yesAsk: book.yesAsk ?? null,
+      discoveredAt: ts,
+      updatedAt: ts,
+    })
+    .onConflictDoNothing()
+    .run();
+}
+
+function readOrder(ticker: string) {
+  return getDb().select().from(orders).where(eq(orders.ticker, ticker)).get();
+}
+
+describe("executeSignal spread guard (addendum N4)", () => {
+  test("skips when spread exceeds maxSpreadCents", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 40, yesAsk: 55, lastYesPrice: 50 });
+    mockBotConfig.maxSpreadCents = 10;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker, side: "yes", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe("spread 15¢ > max 10¢");
+    expect(readOrder(ticker)).toBeUndefined();
+  });
+
+  test("proceeds when spread guard disabled (maxSpreadCents=0)", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 40, yesAsk: 55, lastYesPrice: 50 });
+    mockBotConfig.maxSpreadCents = 0;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker, side: "yes", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    // YES pays the ask = 55¢ even though last trade was 50¢.
+    expect(readOrder(ticker)!.limitPrice).toBe(55);
+  });
+});
+
+describe("executeSignal crossing-price entry (addendum N4 + N10)", () => {
+  test("YES entry uses the ask, not last trade", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 70, yesAsk: 74, lastYesPrice: 70 });
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId } = await service.executeSignal(
+      makeSignal({ ticker, side: "yes", marketPrice: 0.7, estimatedProb: 0.85 }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    const order = readOrder(ticker)!;
+    expect(order.limitPrice).toBe(74); // ask, not Math.round(0.70*100)=70
+    expect(order.side).toBe("yes");
+  });
+
+  test("NO entry pays 100 − bid", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 70, yesAsk: 74, lastYesPrice: 70 });
+
+    const service = new ExecutionService(stubKalshi);
+    // execution.ts does not run the concordance gate (that lives in entry-gates),
+    // so a plain buy_no with positive Kelly fires regardless of marketPrice.
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "no",
+        recommendation: "buy_no",
+        marketPrice: 0.7,
+        estimatedProb: 0.1,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    const order = readOrder(ticker)!;
+    expect(order.limitPrice).toBe(30); // 100 − bid(70)
+    expect(order.side).toBe("no");
+  });
+
+  test("falls back to last-trade pricing when book is absent", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: null, yesAsk: null, lastYesPrice: 68 });
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId } = await service.executeSignal(
+      makeSignal({ ticker, side: "yes", marketPrice: 0.68, estimatedProb: 0.85 }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    // No ask → Math.round(0.68 * 100) = 68 (prior behavior).
+    expect(readOrder(ticker)!.limitPrice).toBe(68);
+  });
+});
+
+describe("executeSignal confirmation mode (win-rate-80 #2)", () => {
+  test("confirm_yes fires despite negative Kelly, flat-sized, kellyFraction=0", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 84, yesAsk: 86, lastYesPrice: 85 });
+    mockBotConfig.confirmationBetSizeCents = 500;
+
+    const service = new ExecutionService(stubKalshi);
+    // est 0.55 < market 0.85 → Kelly for YES is negative (regular path would skip).
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.85,
+        estimatedProb: 0.55,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    const order = readOrder(ticker)!;
+    expect(order.limitPrice).toBe(86); // ask
+    expect(order.quantity).toBe(5); // floor(500 / 86) = 5
+    expect(order.kellyFraction).toBe(0); // sizing bypassed Kelly
+  });
+
+  test("confirm_yes above the entry-price cap is skipped", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 93, yesAsk: 95, lastYesPrice: 94 });
+    mockBotConfig.confirmationMaxEntryPrice = 0.93;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.95,
+        estimatedProb: 0.55,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe("confirmation entry 95¢ > cap 93¢");
+    expect(readOrder(ticker)).toBeUndefined();
+  });
+
+  test("confirm_no fires and pays 100 − bid", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 11, yesAsk: 13, lastYesPrice: 12 });
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "no",
+        recommendation: "confirm_no",
+        marketPrice: 0.12,
+        estimatedProb: 0.45,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    const order = readOrder(ticker)!;
+    expect(order.limitPrice).toBe(89); // 100 − bid(11)
+    expect(order.kellyFraction).toBe(0);
+  });
+
+  test("regular buy_yes with negative Kelly is still skipped (no positive EV)", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 84, yesAsk: 86, lastYesPrice: 85 });
+
+    const service = new ExecutionService(stubKalshi);
+    // Same numbers as the confirm_yes test but plain buy_yes → must skip.
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "buy_yes",
+        marketPrice: 0.85,
+        estimatedProb: 0.55,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe("Kelly fraction <= 0 (no positive EV)");
+  });
+
+  test("minContractPrice enforced for regular low-conf signal but bypassed for confirmation", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    // ask 10¢ < minContractPrice 15¢. Low-conf regular buy_yes must skip;
+    // a confirm_yes at the same price must bypass the floor and place.
+    seedMarket(ticker, { yesBid: 8, yesAsk: 10, lastYesPrice: 9 });
+    mockBotConfig.minContractPrice = 15;
+    mockBotConfig.maxContractsPerOrder = 200;
+
+    const service = new ExecutionService(stubKalshi);
+
+    const regular = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "buy_yes",
+        marketPrice: 0.1,
+        estimatedProb: 0.5, // positive Kelly on YES at 10¢
+        confidence: 0.85, // below highConfidenceThreshold
+      }),
+      10000
+    );
+    expect(regular.orderId).toBeNull();
+    expect(regular.skipReason).toBe("price 10¢ < min 15¢ (low-conf lottery filter)");
+
+    // Now the confirmation variant bypasses the floor.
+    const confirm = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.1,
+        estimatedProb: 0.5,
+        confidence: 0.85,
+        edge: 0,
+      }),
+      10000
+    );
+    expect(confirm.skipReason).toBeNull();
+    expect(confirm.orderId).toBeString();
+    expect(readOrder(ticker)!.limitPrice).toBe(10);
   });
 });

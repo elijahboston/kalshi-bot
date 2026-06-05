@@ -1,5 +1,5 @@
 import { getConfig } from "@kcb/config";
-import { getDb, orders, signals as signalsTable, positions, eq, and, sql } from "@kcb/db";
+import { getDb, orders, signals as signalsTable, positions, markets, eq, and, sql } from "@kcb/db";
 import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
@@ -258,8 +258,60 @@ export class ExecutionService {
       log.info(`${signal.ticker}: allowing re-entry after loss (edge ${(signal.edge * 100).toFixed(1)}¢ >= ${(requiredEdge * 100).toFixed(1)}¢)`);
     }
 
-    // Kelly criterion sizing
     const side = signal.side as "yes" | "no";
+
+    // Confirmation-mode entry (win-rate-80-plan-2026-06-05.md #2): the model
+    // intentionally disagrees with paying a confident market 80–93¢; we trust
+    // the market here. These signals BYPASS the Kelly EV-sign gate and the
+    // minContractPrice floor, size flat, and are capped by confirmationMaxEntryPrice.
+    const isConfirmation =
+      signal.recommendation === "confirm_yes" || signal.recommendation === "confirm_no";
+
+    // Market-book lookup (addendum N4): price the entry against what we'd
+    // actually pay — the ask for YES, 100−bid for NO — instead of the stale
+    // last-trade price. Falls back to last-trade-derived pricing when the book
+    // side we need is absent (thin market / no ticker yet).
+    const [book] = await db
+      .select({
+        yesBid: markets.yesBid,
+        yesAsk: markets.yesAsk,
+        lastYesPrice: markets.lastYesPrice,
+      })
+      .from(markets)
+      .where(eq(markets.ticker, signal.ticker))
+      .limit(1);
+    const yesBid = book?.yesBid ?? null;
+    const yesAsk = book?.yesAsk ?? null;
+
+    // Spread guard: a wide book means the last-trade edge is phantom and a live
+    // limit at the crossing price would fill only on adverse selection. Skip
+    // when both sides are present and the spread exceeds the configured max.
+    // Applies to confirmation entries too. 0 = disabled.
+    if (
+      config.bot.maxSpreadCents > 0 &&
+      yesBid != null &&
+      yesAsk != null &&
+      yesAsk - yesBid > config.bot.maxSpreadCents
+    ) {
+      const spread = yesAsk - yesBid;
+      const reason = `spread ${spread}¢ > max ${config.bot.maxSpreadCents}¢`;
+      log.info(`Skipping ${signal.ticker}: ${reason}`);
+      return skip(reason);
+    }
+
+    // Crossing-price entry (addendum N4): YES pays the ask, NO pays 100−bid.
+    // When the relevant book side is missing, fall back to the prior
+    // last-trade-derived pricing (Math.round(marketPrice·100) for YES / inverse
+    // for NO). Price is in cents, clamped to a tradable [1, 99].
+    const lastTradeYes = Math.round(signal.marketPrice * 100);
+    const lastTradeNo = Math.round((1 - signal.marketPrice) * 100);
+    const rawPrice = side === "yes"
+      ? (yesAsk ?? lastTradeYes)
+      : (yesBid != null ? 100 - yesBid : lastTradeNo);
+    const price = Math.max(1, Math.min(99, rawPrice));
+
+    // Kelly criterion sizing. computeKelly gates the EV sign for the regular
+    // path; the confirmation path deliberately skips that gate (see above).
     const kellyFraction = computeKelly(
       signal.estimatedProb,
       signal.marketPrice,
@@ -267,29 +319,41 @@ export class ExecutionService {
     );
 
     const cappedKelly = Math.min(kellyFraction, config.bot.maxKellyFraction);
-    if (cappedKelly <= 0) {
+    if (cappedKelly <= 0 && !isConfirmation) {
       const reason = "Kelly fraction <= 0 (no positive EV)";
       log.info(`Skipping ${signal.ticker}: ${reason}`);
       return skip(reason);
     }
 
+    // Confirmation entry-price cap: re-check at execution time because the book
+    // may have moved since signal eval. Keeps the minimum payoff ≥ (1 − cap).
+    if (isConfirmation) {
+      const capCents = Math.round(config.bot.confirmationMaxEntryPrice * 100);
+      if (price > capCents) {
+        const reason = `confirmation entry ${price}¢ > cap ${capCents}¢`;
+        log.info(`Skipping ${signal.ticker}: ${reason}`);
+        return skip(reason);
+      }
+    }
+
     // Compute contracts. Flat sizing (when configured) bypasses Kelly's dollar
-    // amount but still requires cappedKelly > 0 above — Kelly gates the EV sign.
-    // High-confidence signals scale up to highConfidenceBetSizeCents when their
-    // confidence meets the threshold (per 2026-05-23 perf analysis).
+    // amount but still requires cappedKelly > 0 above — Kelly gates the EV sign
+    // (except confirmation entries). Confirmation entries size flat at
+    // confirmationBetSizeCents. High-confidence signals scale up to
+    // highConfidenceBetSizeCents when their confidence meets the threshold
+    // (per 2026-05-23 perf analysis).
     const isHighConfidence =
       config.bot.highConfidenceThreshold > 0 &&
       signal.confidence >= config.bot.highConfidenceThreshold &&
       config.bot.highConfidenceBetSizeCents > 0;
-    const flatSize = isHighConfidence
-      ? config.bot.highConfidenceBetSizeCents
-      : config.bot.flatBetSizeCents;
+    const flatSize = isConfirmation
+      ? config.bot.confirmationBetSizeCents
+      : isHighConfidence
+        ? config.bot.highConfidenceBetSizeCents
+        : config.bot.flatBetSizeCents;
     const betAmount = flatSize > 0
       ? flatSize
       : Math.floor(balance * cappedKelly);
-    const price = side === "yes"
-      ? Math.round(signal.marketPrice * 100) // price in cents
-      : Math.round((1 - signal.marketPrice) * 100);
     let contracts = Math.min(
       Math.floor(betAmount / price),
       config.bot.maxContractsPerOrder
@@ -302,21 +366,26 @@ export class ExecutionService {
     }
 
     // Minimum contract price filter: skip cheap lottery tickets — but bypass
-    // for high-confidence signals. Per 2026-05-26 audit, the 15¢ floor was
-    // silently dropping every actionable tail signal (1,807 over 11 days,
-    // some at conf=0.92 / edge=27¢ on 1¢ markets — i.e., the highest-EV
+    // for high-confidence AND confirmation signals. Per 2026-05-26 audit, the
+    // 15¢ floor was silently dropping every actionable tail signal (1,807 over
+    // 11 days, some at conf=0.92 / edge=27¢ on 1¢ markets — i.e., the highest-EV
     // trades on the board). The Kelly EV-sign gate above already filters
     // genuinely bad bets; the price floor was only a safety net against
     // low-confidence "lottery ticket" bets that this gate doesn't catch.
-    if (price < config.bot.minContractPrice && !isHighConfidence) {
+    // Confirmation entries pay 80–93¢ by construction, so they never trip this
+    // floor in practice, but we bypass explicitly to keep the intent clear.
+    const bypassPriceFloor = isHighConfidence || isConfirmation;
+    if (price < config.bot.minContractPrice && !bypassPriceFloor) {
       const reason = `price ${price}¢ < min ${config.bot.minContractPrice}¢ (low-conf lottery filter)`;
       log.info(`Skipping ${signal.ticker}: ${reason}`);
       return skip(reason);
     }
-    if (price < config.bot.minContractPrice && isHighConfidence) {
+    if (price < config.bot.minContractPrice && bypassPriceFloor) {
       log.info(
         `${signal.ticker}: bypassing minContractPrice (${price}¢ < ${config.bot.minContractPrice}¢) — ` +
-        `confidence ${signal.confidence.toFixed(2)} >= ${config.bot.highConfidenceThreshold}`
+        (isConfirmation
+          ? "confirmation entry"
+          : `confidence ${signal.confidence.toFixed(2)} >= ${config.bot.highConfidenceThreshold}`)
       );
     }
 
@@ -352,7 +421,17 @@ export class ExecutionService {
       return skip(reason);
     }
 
-    const tierTag = isHighConfidence ? ` HIGH-CONF(${signal.confidence.toFixed(2)})` : "";
+    // kellyFraction stored on the order row: confirmation entries store 0 (not
+    // null) to mark "sizing deliberately bypassed Kelly" — null already means
+    // "exit / not Kelly-sized" elsewhere, so 0 keeps confirmation entries
+    // distinguishable from exits while signalling no-Kelly sizing.
+    const recordedKelly = isConfirmation ? 0 : cappedKelly;
+
+    const tierTag = isConfirmation
+      ? ` CONFIRM`
+      : isHighConfidence
+        ? ` HIGH-CONF(${signal.confidence.toFixed(2)})`
+        : "";
     log.info(
       `Executing:${tierTag} ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
       `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢, ` +
@@ -360,7 +439,9 @@ export class ExecutionService {
     );
 
     if (config.bot.dryRun) {
-      // Simulate order
+      // Paper-fill model (addendum N10): the dry-run fill executes at `price`,
+      // which is now the book's crossing price (ask for YES / 100−bid for NO)
+      // computed above — honest slippage vs the old zero-spread last-trade fill.
       const orderId = `dry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date().toISOString();
 
@@ -375,7 +456,7 @@ export class ExecutionService {
         status: "filled",
         signalId: signal.id,
         dryRun: true,
-        kellyFraction: cappedKelly,
+        kellyFraction: recordedKelly,
         createdAt: now,
         updatedAt: now,
       });
@@ -417,7 +498,7 @@ export class ExecutionService {
       status: "open",
       signalId: signal.id,
       dryRun: false,
-      kellyFraction: cappedKelly,
+      kellyFraction: recordedKelly,
       createdAt: now,
       updatedAt: now,
     });
