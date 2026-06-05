@@ -8,6 +8,8 @@ import {
   localHourAtStation,
   estimateDiurnalOffset,
   medianRegularBracketWidth,
+  cdfProbForMarket,
+  countMembersInMarket,
 } from "./estimator";
 import { runMigrations, getDb, calibration, stationBias, markets } from "@kcb/db";
 import { getConfig } from "@kcb/config";
@@ -1776,5 +1778,393 @@ describe("ProbabilityEstimator — estimateEvent (addendum N2)", () => {
     // No event-level blend fired; coherence weight stays null.
     expect([...results.values()][0]!.reasoning.eventCoherence!.eventBlendWeight).toBeNull();
     for (const r of results.values()) expect(r.reasoning.marketPriorBlend).toBeNull();
+  });
+});
+
+// ── Addendum N3 — observation running-max clamp + post-peak collapse ──────────
+
+/** A bracket market for `m`-type markets, defaulting to today (forecastHorizon ≤ 1). */
+function makeTodayBracket(overrides: Partial<any> = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    ticker: "KXHIGHNY-TODAY-B86",
+    stationId: "KNYC",
+    category: "high_temp",
+    bracketLow: 86.5,
+    bracketHigh: 88.5,
+    marketType: "bracket",
+    targetDate: today,
+    ...overrides,
+  } as any;
+}
+
+describe("cdfProbForMarket — N3 running-max clamp (pure math)", () => {
+  // The clamped CDF is F_H(x) = 0 for x < rm, Φ((x−μ)/σ) for x ≥ rm.
+  const bracket = { marketType: "bracket", bracketLow: 86.5, bracketHigh: 88.5 } as any;
+  const lowerTail = { marketType: "lower_tail", bracketLow: 86.5, bracketHigh: null } as any;
+  const upperTail = { marketType: "upper_tail", bracketLow: 84.5, bracketHigh: null } as any;
+
+  test("bracket containing rm: clamp folds the sub-rm mass INTO the bracket → P rises", () => {
+    const mu = 88;
+    const sigma = 1.5;
+    const noClamp = cdfProbForMarket(bracket, mu, sigma, 0, false, null);
+    const withClamp = cdfProbForMarket(bracket, mu, sigma, 0, false, 87.5);
+    // rm 87.5 ∈ [86.5, 88.5): mass below 87.5 collapses onto the point rm, which
+    // lands inside the bracket → the bracket probability strictly increases.
+    expect(withClamp).toBeGreaterThan(noClamp);
+    // Exact: clampedCdf(88.5) − clampedCdf(86.5) = Φ((88.5−88)/1.5) − 0.
+    expect(withClamp).toBeCloseTo(normalCdf(88.5, mu, sigma), 9);
+  });
+
+  test("bracket fully below rm → clamped to 0 (impossible)", () => {
+    // Bracket [86.5,88.5) entirely below rm=90 → the high can't land here.
+    expect(cdfProbForMarket(bracket, 88, 1.5, 0.4, false, 90)).toBeCloseTo(0, 9);
+  });
+
+  test("lower tail at/under rm → P = 0 exactly", () => {
+    // th 86.5 ≤ rm 87.5 → clampedCdf(86.5) = 0.
+    expect(cdfProbForMarket(lowerTail, 88, 1.5, 0.3, false, 87.5)).toBe(0);
+  });
+
+  test("lower tail above rm → unaffected Φ(th)", () => {
+    // th 86.5 > rm 80 → clampedCdf(86.5) = Φ((86.5−88)/1.5) (clamp irrelevant).
+    const p = cdfProbForMarket(lowerTail, 88, 1.5, 0.3, false, 80);
+    expect(p).toBeCloseTo(normalCdf(86.5, 88, 1.5), 9);
+  });
+
+  test("upper tail with threshold below rm → P = 1 exactly", () => {
+    // th 84.5 < rm 87.5 → the observed max already exceeds the threshold.
+    expect(cdfProbForMarket(upperTail, 88, 1.5, 0.9, false, 87.5)).toBe(1);
+  });
+
+  test("upper tail with threshold above rm → 1 − Φ(th), clamp irrelevant", () => {
+    // th 84.5 ≥ rm 80 → 1 − clampedCdf(84.5) = 1 − Φ((84.5−88)/1.5).
+    const p = cdfProbForMarket(upperTail, 88, 1.5, 0.9, false, 80);
+    expect(p).toBeCloseTo(1 - normalCdf(84.5, 88, 1.5), 9);
+  });
+
+  test("clamp at exactly the bracket low boundary: lower-tail mass folds in", () => {
+    // rm == lo == 86.5. clampedCdf(86.5) = Φ((86.5−88)/1.5) (>= boundary), so the
+    // bracket keeps Φ(hi)−Φ(lo) — nothing folds in (no mass strictly below lo).
+    const p = cdfProbForMarket(bracket, 88, 1.5, 0, false, 86.5);
+    expect(p).toBeCloseTo(normalCdf(88.5, 88, 1.5) - normalCdf(86.5, 88, 1.5), 9);
+  });
+
+  test("null/undefined runningMax → identical to the un-clamped integral", () => {
+    const a = cdfProbForMarket(bracket, 88, 1.5, 0, false);
+    const b = cdfProbForMarket(bracket, 88, 1.5, 0, false, null);
+    const c = cdfProbForMarket(bracket, 88, 1.5, 0, false, undefined);
+    const plain = normalCdf(88.5, 88, 1.5) - normalCdf(86.5, 88, 1.5);
+    expect(a).toBeCloseTo(plain, 9);
+    expect(b).toBeCloseTo(plain, 9);
+    expect(c).toBeCloseTo(plain, 9);
+  });
+
+  test("a partition's clamped slices still sum to 1 (coherence)", () => {
+    const mu = 81;
+    const sigma = 2;
+    const rm = 80.3;
+    const lower = { marketType: "lower_tail", bracketLow: 78, bracketHigh: null } as any;
+    const brackets = [
+      { marketType: "bracket", bracketLow: 78, bracketHigh: 80 },
+      { marketType: "bracket", bracketLow: 80, bracketHigh: 82 },
+      { marketType: "bracket", bracketLow: 82, bracketHigh: 84 },
+    ] as any[];
+    const upper = { marketType: "upper_tail", bracketLow: 84, bracketHigh: null } as any;
+    let sum = cdfProbForMarket(lower, mu, sigma, 0, false, rm);
+    for (const b of brackets) sum += cdfProbForMarket(b, mu, sigma, 0, false, rm);
+    sum += cdfProbForMarket(upper, mu, sigma, 0, false, rm);
+    expect(sum).toBeCloseTo(1, 9);
+  });
+});
+
+describe("countMembersInMarket — N3 running-max clamp (pure)", () => {
+  const bracket = { marketType: "bracket", bracketLow: 86.5, bracketHigh: 88.5 } as any;
+  const lowerTail = { marketType: "lower_tail", bracketLow: 86.5, bracketHigh: null } as any;
+  const upperTail = { marketType: "upper_tail", bracketLow: 84.5, bracketHigh: null } as any;
+
+  test("members below rm fold up into the bracket containing rm", () => {
+    // 3 members below rm (84,85,86) clamp to 87.5 → land in [86.5,88.5);
+    // 87 already inside; 89 above. Without clamp only 87 counts (1); with → 4.
+    const ens = [84, 85, 86, 87, 89];
+    expect(countMembersInMarket(bracket, ens)).toBe(1);
+    expect(countMembersInMarket(bracket, ens, 87.5)).toBe(4);
+  });
+
+  test("lower tail under rm → 0 members (all clamp up to rm)", () => {
+    const ens = [80, 82, 84, 90];
+    expect(countMembersInMarket(lowerTail, ens, 87.5)).toBe(0);
+  });
+
+  test("upper tail below rm → all members count (clamped ≥ rm > th)", () => {
+    const ens = [80, 82, 84];
+    expect(countMembersInMarket(upperTail, ens, 87.5)).toBe(3);
+  });
+
+  test("null runningMax leaves the raw counts unchanged", () => {
+    const ens = [84, 85, 86, 87, 89];
+    expect(countMembersInMarket(bracket, ens, null)).toBe(1);
+  });
+});
+
+describe("ProbabilityEstimator — N3 observation integration", () => {
+  const originalBot = {
+    obsPeakHour: getConfig().bot.obsPeakHour,
+    obsMaxAgeMinutes: getConfig().bot.obsMaxAgeMinutes,
+    obsPostPeakSigma: getConfig().bot.obsPostPeakSigma,
+    obsPostPeakMeanOffset: getConfig().bot.obsPostPeakMeanOffset,
+    sigmaFloorBracketWidthFactor: getConfig().bot.sigmaFloorBracketWidthFactor,
+  };
+
+  beforeEach(() => {
+    const bot = getConfig().bot;
+    bot.obsPeakHour = 16;
+    bot.obsMaxAgeMinutes = 90;
+    bot.obsPostPeakSigma = 0.7;
+    bot.obsPostPeakMeanOffset = 0.3;
+    bot.sigmaFloorBracketWidthFactor = 0.6;
+  });
+
+  afterEach(() => {
+    Object.assign(getConfig().bot, originalBot);
+  });
+
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  test("clamp: rm inside the bracket raises P vs the no-obs case (mass folds in)", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Bracket [86.5, 88.5); ensemble centered ~88. Post-peak obs pins mean=rm+0.3
+    // and sigma=0.7 so the only variable across runs is the clamp itself.
+    const market = makeTodayBracket();
+    const ensemble = Array.from({ length: 30 }, (_, i) => 86 + (i % 5)); // spread 86..90, mean 88
+    // 21:30Z @ KNYC (EDT) = 17:30 local ≥ 16 → post-peak; rm 87.5.
+    const obs = {
+      observedTemp: 87.5,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+      latestAgeMinutes: 10,
+    };
+
+    const withObs = await estimator.estimate(market, ensemble, obs);
+    // Compare against the same post-peak distribution WITHOUT the clamp: the
+    // clamp folds the (real) sub-87.5 mass into the bracket, so P must rise.
+    const noClampCdf = cdfProbForMarket(
+      market, withObs.reasoning.correctedEnsembleStats.mean, withObs.reasoning.sigmaUsed, 0, false, null
+    );
+    expect(withObs.reasoning.cdfProbability).toBeGreaterThan(noClampCdf);
+    expect(withObs.reasoning.observationAdjustment!.postPeakCollapse).toBe(true);
+  });
+
+  test("clamp kills an impossible lower tail: raw cdf is exactly 0", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Lower-tail < 86.5, rm 87.5 ≥ threshold → P(H < 86.5) = 0 (raw).
+    const market = makeTodayBracket({
+      ticker: "KXHIGHNY-TODAY-T86L",
+      marketType: "lower_tail",
+      bracketLow: 86.5,
+      bracketHigh: null,
+    });
+    const ensemble = [82, 83, 84, 85, 86, 87, 88]; // some below the threshold
+    const obs = {
+      observedTemp: 87.5,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+      latestAgeMinutes: 5,
+    };
+
+    const result = await estimator.estimate(market, ensemble, obs);
+    // Raw cdf/counting are 0; the final probability is the tail floor (≥ 0.03).
+    expect(result.reasoning.cdfProbability).toBe(0);
+    expect(result.reasoning.countingProbability).toBe(0);
+    expect(result.probability).toBeCloseTo(0.03, 6);
+  });
+
+  test("upper tail below rm: raw cdf is exactly 1", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Upper-tail > 84.5, rm 87.5 > threshold → P(H > 84.5) = 1 (raw); final
+    // clamped to 1 − floor.
+    const market = makeTodayBracket({
+      ticker: "KXHIGHNY-TODAY-T84U",
+      marketType: "upper_tail",
+      bracketLow: 84.5,
+      bracketHigh: null,
+    });
+    const ensemble = [80, 81, 82, 83, 84];
+    const obs = {
+      observedTemp: 87.5,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+      latestAgeMinutes: 5,
+    };
+
+    const result = await estimator.estimate(market, ensemble, obs);
+    expect(result.reasoning.cdfProbability).toBe(1);
+    expect(result.reasoning.countingProbability).toBe(1);
+    expect(result.probability).toBeCloseTo(0.97, 6); // 1 − floor
+  });
+
+  test("post-peak collapse: mean = rm + 0.3, sigma = 0.7, trace flag set", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeTodayBracket();
+    const ensemble = [84, 85, 86, 87, 88, 89, 90];
+    const obs = {
+      observedTemp: 86, // latest reading need not equal the running max
+      observedAt: `${today()}T21:30:00Z`, // 17:30 EDT ≥ 16
+      runningMax: 87.5,
+      latestAgeMinutes: 20,
+    };
+
+    const result = await estimator.estimate(market, ensemble, obs);
+
+    const adj = result.reasoning.observationAdjustment!;
+    expect(adj.postPeakCollapse).toBe(true);
+    expect(adj.runningMax).toBe(87.5);
+    expect(adj.latestAgeMinutes).toBe(20);
+    expect(result.reasoning.correctedEnsembleStats.mean).toBeCloseTo(87.8, 6); // rm + 0.3
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.7, 6); // collapsed below the floor
+    // sigma 0.7 < the 0.6×2 = 1.2 bracket floor — post-peak deliberately overrides it.
+    expect(result.reasoning.obsStale).toBe(false);
+  });
+
+  test("pre-peak: existing implied-high behavior, postPeakCollapse false", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeTodayBracket({ bracketLow: 80, bracketHigh: 82 });
+    const ensemble = [79, 80, 80, 81, 81, 81, 82, 82, 83, 84]; // mean ≈ 81.3
+    // 15:00Z @ KNYC (EDT) = 11:00 local < 16 → pre-peak. Obs 72 → implied high
+    // 72 + offset(11h ≈ 5.67) ≈ 77.7, diverges > 2 from ~81.3 → mean shifts down.
+    const obs = {
+      observedTemp: 72,
+      observedAt: `${today()}T15:00:00Z`,
+      runningMax: 73,
+      latestAgeMinutes: 15,
+    };
+
+    const result = await estimator.estimate(market, ensemble, obs);
+
+    const adj = result.reasoning.observationAdjustment!;
+    expect(adj.postPeakCollapse).toBe(false);
+    expect(adj.runningMax).toBe(73);
+    // Diverges branch: mean blended toward the (lower) implied high, sigma ×0.85.
+    expect(adj.meanShift).toBeLessThan(0);
+    expect(adj.sigmaAfter / adj.sigmaBefore).toBeCloseTo(0.85, 6);
+  });
+
+  test("staleness guard: stale obs ignored entirely, obsStale true, no clamp", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeTodayBracket();
+    const ensemble = [84, 85, 86, 87, 88, 89, 90];
+    // latestAgeMinutes 120 > 90 → ignore. Even though obsHour would be post-peak,
+    // the staleness guard short-circuits before any adjustment.
+    const staleObs = {
+      observedTemp: 87.5,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+      latestAgeMinutes: 120,
+    };
+
+    const stale = await estimator.estimate(market, ensemble, staleObs);
+    const noObs = await estimator.estimate(market, ensemble);
+
+    expect(stale.reasoning.observationAdjustment).toBeNull();
+    expect(stale.reasoning.obsStale).toBe(true);
+    // No clamp / no mean shift / no collapse → identical to the no-obs estimate.
+    expect(stale.reasoning.cdfProbability).toBeCloseTo(noObs.reasoning.cdfProbability, 9);
+    expect(stale.reasoning.correctedEnsembleStats.mean).toBeCloseTo(noObs.reasoning.correctedEnsembleStats.mean, 9);
+    expect(stale.reasoning.sigmaUsed).toBeCloseTo(noObs.reasoning.sigmaUsed, 9);
+    expect(stale.probability).toBeCloseTo(noObs.probability, 9);
+  });
+
+  test("missing latestAgeMinutes → treated as fresh (back-compat)", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makeTodayBracket();
+    const ensemble = [84, 85, 86, 87, 88, 89, 90];
+    // No latestAgeMinutes (e.g. a legacy single-reading caller) → not stale.
+    const obs = {
+      observedTemp: 86,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+    };
+    const result = await estimator.estimate(market, ensemble, obs);
+    expect(result.reasoning.obsStale).toBe(false);
+    expect(result.reasoning.observationAdjustment!.postPeakCollapse).toBe(true);
+    expect(result.reasoning.observationAdjustment!.latestAgeMinutes).toBeNull();
+  });
+
+  test("non-high_temp markets are untouched by the obs anchor", async () => {
+    const estimator = new ProbabilityEstimator();
+    const market = makePrecipMarket({ targetDate: today() });
+    const ensemble = [0, 0, 0.1, 0.15, 0.2];
+    const obs = {
+      observedTemp: 87.5,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 87.5,
+      latestAgeMinutes: 5,
+    };
+    const result = await estimator.estimate(market, ensemble, obs);
+    expect(result.reasoning.observationAdjustment).toBeNull();
+    expect(result.reasoning.obsStale).toBe(false);
+  });
+
+  test("event coherence preserved under the clamp (finalSum ≈ coverage ≈ 1)", async () => {
+    const estimator = new ProbabilityEstimator();
+    // Hermetic: priors off so coverage tracks the raw clamped CDF.
+    getConfig().bot.historicalPriorWeight = 0;
+    getConfig().bot.marketPriorWeight = 0;
+
+    const event = makeEvent({ lo: 78, n: 6 }); // brackets [78,84), tails <78 / >84
+    const ensemble = [77.5, 78.5, 79.5, 80.2, 80.8, 81.3, 81.6, 82.4, 82.7, 83.6, 84.5, 85.5];
+    // Post-peak obs, rm 81 lands inside the bracket range → the clamp reshapes
+    // the vector but a partition must still sum to coverage ≈ 1.
+    const obs = {
+      observedTemp: 81,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 81,
+      latestAgeMinutes: 10,
+    };
+
+    const results = await estimator.estimateEvent(event, ensemble, obs);
+    const coverage = [...results.values()][0]!.reasoning.eventCoherence!.rawCdfSum;
+    // The clamped slices of a partition still sum to ~1 (coverage).
+    expect(coverage).toBeCloseTo(1, 6);
+    // finalSum tracks coverage within the documented tail-floor/clamp drift
+    // (the impossible lower tail's raw 0 → 0.03 floor adds a little mass the
+    // post-clamp step deliberately doesn't renormalize away — eventCoherence
+    // telemetry surfaces it). Matches the precision used by the other
+    // estimateEvent coverage assertions.
+    expect([...results.values()][0]!.reasoning.eventCoherence!.finalSum).toBeCloseTo(sumProbs(results), 9);
+    expect(sumProbs(results)).toBeCloseTo(coverage, 1);
+    // The clamp actually engaged (post-peak collapse, shared across the event).
+    for (const r of results.values()) {
+      expect(r.reasoning.observationAdjustment!.postPeakCollapse).toBe(true);
+      expect(r.reasoning.observationAdjustment!.runningMax).toBe(81);
+    }
+    // Lower tail (<78) is impossible given rm 81 → its raw cdf is 0.
+    expect(results.get(event[0]!.ticker)!.reasoning.cdfProbability).toBe(0);
+  });
+
+  test("event: stale obs → no clamp/collapse, obsStale true on every market", async () => {
+    const estimator = new ProbabilityEstimator();
+    getConfig().bot.historicalPriorWeight = 0;
+    getConfig().bot.marketPriorWeight = 0;
+    const event = makeEvent({ lo: 78, n: 6 });
+    const ensemble = [77.5, 78.5, 79.5, 80.2, 80.8, 81.3, 81.6, 82.4, 82.7, 83.6, 84.5, 85.5];
+    const staleObs = {
+      observedTemp: 81,
+      observedAt: `${today()}T21:30:00Z`,
+      runningMax: 81,
+      latestAgeMinutes: 200,
+    };
+
+    const withStale = await estimator.estimateEvent(event, ensemble, staleObs);
+    const without = await estimator.estimateEvent(event, ensemble);
+
+    for (const r of withStale.values()) {
+      expect(r.reasoning.obsStale).toBe(true);
+      expect(r.reasoning.observationAdjustment).toBeNull();
+    }
+    // Identical vector to the no-obs run (the stale obs changed nothing).
+    for (const m of event) {
+      expect(withStale.get(m.ticker)!.probability).toBeCloseTo(without.get(m.ticker)!.probability, 9);
+    }
   });
 });

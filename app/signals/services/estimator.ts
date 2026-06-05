@@ -17,10 +17,26 @@ export interface EstimateResult {
 }
 
 export interface ObservationAdjustment {
-  /** Latest observed temperature in F */
+  /** Latest observed temperature in F (existing semantics — newest reading). */
   observedTemp: number;
-  /** Timestamp of observation */
+  /** Timestamp of the latest observation. */
   observedAt: string;
+  /**
+   * Max of today's local-calendar-day observations (°F) — a HARD FLOOR on the
+   * daily high (addendum N3). When present + fresh, the estimator clamps its
+   * distribution at this value (mass below it folds onto the point runningMax).
+   * Optional for back-compat with callers that only have a single reading.
+   */
+  runningMax?: number;
+  /**
+   * Minutes since the latest observation, measured against the orchestrator's
+   * clock (addendum N3). Drives the staleness guard: obs older than
+   * `obsMaxAgeMinutes` are ignored entirely (no mean shift, no collapse, no
+   * clamp). Optional/back-compat: when absent, the obs is treated as fresh.
+   */
+  latestAgeMinutes?: number;
+  /** Number of usable (non-null temp) observations backing the window (N3). */
+  obsCount?: number;
 }
 
 export interface ReasoningTrace {
@@ -43,8 +59,35 @@ export interface ReasoningTrace {
   empiricalSigmaWeight: number | null;
   /** Sigma floor that clipped the blend (plan #4), or null when it didn't bind. */
   sigmaFloorApplied?: number | null;
-  /** Same-day observation adjustment applied */
-  observationAdjustment: { observedTemp: number; sigmaBefore: number; sigmaAfter: number; meanShift: number } | null;
+  /**
+   * Same-day observation adjustment applied. The base fields
+   * (`observedTemp`/`sigmaBefore`/`sigmaAfter`/`meanShift`) keep their existing
+   * semantics; addendum N3 adds:
+   * - `runningMax` — the day's observed running max (the clamp floor), or null
+   *   when the obs carried no running max;
+   * - `postPeakCollapse` — true when the post-peak branch fired (local hour ≥
+   *   `obsPeakHour`, fresh obs, runningMax present): mean set to
+   *   `runningMax + obsPostPeakMeanOffset`, sigma to `obsPostPeakSigma` (which
+   *   may legitimately sit below the sigma floor — real same-day information);
+   * - `latestAgeMinutes` — staleness of the latest reading at decision time.
+   */
+  observationAdjustment: {
+    observedTemp: number;
+    sigmaBefore: number;
+    sigmaAfter: number;
+    meanShift: number;
+    runningMax: number | null;
+    postPeakCollapse: boolean;
+    latestAgeMinutes: number | null;
+  } | null;
+  /**
+   * True when a same-day observation was supplied but ignored because it was
+   * staler than `obsMaxAgeMinutes` (addendum N3). `observationAdjustment` is
+   * null in that case (no mean shift / collapse / clamp); this flag makes the
+   * orchestrator's "obs stale in sniper window" skip decision auditable from the
+   * trace. false/absent when no obs was supplied or the obs was fresh.
+   */
+  obsStale?: boolean;
   /** How many members fall in the bracket */
   membersInBracket: number;
   /** CDF-fitted probability for the bracket */
@@ -160,15 +203,15 @@ export class ProbabilityEstimator {
       correctedValues = correctedValues.map((v) => Math.max(0, v));
     }
 
-    // Step 3: Count members matching this market's condition
-    const membersInBracket = countMembersInMarket(market, correctedValues);
-
+    // Members counting + countingProb are computed AFTER the observation
+    // adjustment (Step 3.6) so the N3 running-max clamp can fold sub-runningMax
+    // members before bucketing. The distribution stats are needed up front for
+    // the sigma blend, though.
     const rawMean = mean(ensembleValues);
     const rawStd = std(ensembleValues);
     let corrMean = mean(correctedValues);
     const corrStd = std(correctedValues);
-
-    const countingProb = membersInBracket / correctedValues.length;
+    const corrMeanBaseline = corrMean; // pre-obs mean, for the trace's meanShift
 
     // Step 3.5: Determine sigma for CDF computation
     // Blend empirical sigma (std of historical forecast errors) with ensemble spread,
@@ -183,6 +226,10 @@ export class ProbabilityEstimator {
     let sigmaUsed = corrStd;
     let empiricalSigmaWeight: number | null = null;
     let obsAdj: ReasoningTrace["observationAdjustment"] = null;
+    let obsStale = false;
+    // N3 running-max clamp floor for the bracket/tail integrals + member
+    // counting (null = no clamp: no fresh obs, stale, or non-high_temp).
+    let runningMaxForClamp: number | null = null;
 
     if (!isPrecipCategory && biasCorrection && biasCorrection.sampleSize > 0) {
       const empiricalSigma = (biasCorrection as any).stdBias as number | undefined;
@@ -225,41 +272,43 @@ export class ProbabilityEstimator {
       }
     }
 
-    // Step 3.6: Apply same-day observation adjustment (high_temp only).
-    // We project the observation to an "implied afternoon high" using a
-    // time-of-day diurnal offset (morning obs imply a higher peak; afternoon
-    // obs imply near-peak). Only then do we compare with the forecast mean.
+    // Step 3.6: Apply same-day observation adjustment (high_temp only, N3).
+    // Shared helper: staleness guard → post-peak collapse (≥ obsPeakHour) →
+    // pre-peak implied-high logic → running-max clamp floor. Identical to the
+    // estimateEvent path so the vector stays coherent.
     if (observation && market.category === "high_temp" && forecastHorizon <= 1) {
-      const sigmaBefore = sigmaUsed;
-
-      const obsHour = localHourAtStation(observation.observedAt, market.stationId);
-      const diurnalOffset = estimateDiurnalOffset(obsHour);
-      const impliedHigh = observation.observedTemp + diurnalOffset;
-      const divergence = Math.abs(impliedHigh - corrMean);
-
-      if (divergence <= 2) {
-        // Obs-implied high agrees with forecast — tighten sigma, but not as hard
-        // as before (we are one observation against a 150-member ensemble).
-        sigmaUsed = sigmaUsed * 0.7;
-      } else {
-        // Obs-implied high disagrees — blend forecast mean toward it and tighten mildly.
-        corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
-        sigmaUsed = sigmaUsed * 0.85;
-      }
-
-      obsAdj = {
-        observedTemp: observation.observedTemp,
-        sigmaBefore,
-        sigmaAfter: sigmaUsed,
-        meanShift: corrMean - mean(correctedValues),
-      };
-
-      log.debug(
-        `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F @ ${obsHour}h local, ` +
-        `implied high=${impliedHigh.toFixed(1)}F, sigma ${sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, ` +
-        `mean shift=${obsAdj.meanShift.toFixed(2)}`
+      const r = applyObservationAdjustment(
+        observation,
+        market.stationId,
+        corrMean,
+        sigmaUsed,
+        corrMeanBaseline
       );
+      corrMean = r.corrMean;
+      sigmaUsed = r.sigmaUsed;
+      runningMaxForClamp = r.runningMaxForClamp;
+      obsAdj = r.obsAdj;
+      obsStale = r.obsStale;
+
+      if (obsAdj) {
+        log.debug(
+          `${market.ticker}: obs adjustment: observed=${observation.observedTemp.toFixed(1)}F, ` +
+          `runningMax=${obsAdj.runningMax == null ? "n/a" : obsAdj.runningMax.toFixed(1)}F, ` +
+          `postPeak=${obsAdj.postPeakCollapse}, sigma ${obsAdj.sigmaBefore.toFixed(2)} → ${sigmaUsed.toFixed(2)}, ` +
+          `mean shift=${obsAdj.meanShift.toFixed(2)}`
+        );
+      } else if (obsStale) {
+        log.debug(
+          `${market.ticker}: obs ignored — stale ${observation.latestAgeMinutes?.toFixed(0)}m > ${getConfig().bot.obsMaxAgeMinutes}m`
+        );
+      }
     }
+
+    // Step 3: Count members matching this market's condition. N3 clamps each
+    // member to max(member, runningMax) before bucketing (consistent with the
+    // clamped CDF) when a fresh running max is present.
+    const membersInBracket = countMembersInMarket(market, correctedValues, runningMaxForClamp);
+    const countingProb = membersInBracket / correctedValues.length;
 
     // CDF-fitted probability: use normal CDF for temperature, empirical for precip/snow
     const cdfProb = cdfProbForMarket(
@@ -267,7 +316,8 @@ export class ProbabilityEstimator {
       corrMean,
       sigmaUsed,
       countingProb,
-      isPrecipCategory
+      isPrecipCategory,
+      runningMaxForClamp
     );
 
     // Blend CDF and counting, weighted by ensemble size. With many members
@@ -390,6 +440,7 @@ export class ProbabilityEstimator {
       empiricalSigmaWeight,
       sigmaFloorApplied,
       observationAdjustment: obsAdj,
+      obsStale,
       membersInBracket,
       cdfProbability: cdfProb,
       countingProbability: countingProb,
@@ -514,32 +565,32 @@ export class ProbabilityEstimator {
       }
     }
 
-    // Observation adjustment (high_temp, same-day) — same logic as estimate(),
-    // applied ONCE to the shared mean/sigma so it stays coherent across brackets.
+    // Observation adjustment (high_temp, same-day) — same shared helper as
+    // estimate(), applied ONCE to the shared mean/sigma so it stays coherent
+    // across brackets. Resolves the N3 running-max clamp floor for every slot.
     let obsAdj: ReasoningTrace["observationAdjustment"] = null;
+    let obsStale = false;
+    let runningMaxForClamp: number | null = null;
     if (observation && category === "high_temp" && forecastHorizon <= 1) {
-      const sigmaBefore = sigmaUsed;
-      const obsHour = localHourAtStation(observation.observedAt, stationId);
-      const diurnalOffset = estimateDiurnalOffset(obsHour);
-      const impliedHigh = observation.observedTemp + diurnalOffset;
-      const divergence = Math.abs(impliedHigh - corrMean);
-      if (divergence <= 2) {
-        sigmaUsed = sigmaUsed * 0.7;
-      } else {
-        corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
-        sigmaUsed = sigmaUsed * 0.85;
-      }
-      obsAdj = {
-        observedTemp: observation.observedTemp,
-        sigmaBefore,
-        sigmaAfter: sigmaUsed,
-        meanShift: corrMean - corrMeanBeforeObs,
-      };
+      const r = applyObservationAdjustment(
+        observation,
+        stationId,
+        corrMean,
+        sigmaUsed,
+        corrMeanBeforeObs
+      );
+      corrMean = r.corrMean;
+      sigmaUsed = r.sigmaUsed;
+      runningMaxForClamp = r.runningMaxForClamp;
+      obsAdj = r.obsAdj;
+      obsStale = r.obsStale;
     }
 
     // ── Step 2: Raw vector from the SAME distribution ──
     // Per market: counting from the shared corrected pool, CDF integral from the
     // shared mean/sigma, blended by the shared size weight. coverage = Σ raw.
+    // Both consume the shared N3 running-max clamp so the vector stays coherent
+    // (each P(YES) remains a slice of the SAME clamped CDF).
     const cdfWeight = cdfBlendWeight(correctedValues.length, isPrecipCategory);
     interface Slot {
       market: Market;
@@ -553,9 +604,9 @@ export class ProbabilityEstimator {
     }
     const slots: Slot[] = eventMarkets.map((m) => {
       const isTail = m.marketType === "upper_tail" || m.marketType === "lower_tail";
-      const membersInBracket = countMembersInMarket(m, correctedValues);
+      const membersInBracket = countMembersInMarket(m, correctedValues, runningMaxForClamp);
       const countingProb = membersInBracket / correctedValues.length;
-      const cdfProb = cdfProbForMarket(m, corrMean, sigmaUsed, countingProb, isPrecipCategory);
+      const cdfProb = cdfProbForMarket(m, corrMean, sigmaUsed, countingProb, isPrecipCategory, runningMaxForClamp);
       const raw = cdfWeight * cdfProb + (1 - cdfWeight) * countingProb;
       const mp = marketPrices?.get(m.ticker);
       return {
@@ -719,6 +770,7 @@ export class ProbabilityEstimator {
         empiricalSigmaWeight,
         sigmaFloorApplied,
         observationAdjustment: obsAdj,
+        obsStale,
         membersInBracket: s.membersInBracket,
         cdfProbability: s.cdfProb,
         countingProbability: s.countingProb,
@@ -884,17 +936,34 @@ export function normalCdf(x: number, mu: number, sigma: number): number {
  * Shared by the legacy `estimate()` and the event-coherent `estimateEvent()`
  * paths so both count from the SAME corrected pool with identical edge
  * semantics (upper_tail `> low`, lower_tail `< low`, bracket `[low, high)`).
+ *
+ * When `runningMax` is provided (addendum N3 — same-day observation anchor for
+ * `high_temp`), each member is first CLAMPED to `max(member, runningMax)` before
+ * the bucket test: the settled daily high cannot be below what we have already
+ * observed today, so any forecast member below the running max folds onto the
+ * point `runningMax`. This makes the counting path consistent with the clamped
+ * CDF in {@link cdfProbForMarket}. `null`/`undefined` (the back-compat default,
+ * stale/absent obs, or non-`high_temp`) leaves the raw members untouched.
  */
-export function countMembersInMarket(market: Market, correctedValues: number[]): number {
+export function countMembersInMarket(
+  market: Market,
+  correctedValues: number[],
+  runningMax?: number | null
+): number {
+  const clamp =
+    runningMax != null
+      ? (v: number) => Math.max(v, runningMax)
+      : (v: number) => v;
   if (market.marketType === "upper_tail") {
-    return correctedValues.filter((v) => v > market.bracketLow!).length;
+    return correctedValues.filter((v) => clamp(v) > market.bracketLow!).length;
   }
   if (market.marketType === "lower_tail") {
-    return correctedValues.filter((v) => v < market.bracketLow!).length;
+    return correctedValues.filter((v) => clamp(v) < market.bracketLow!).length;
   }
-  return correctedValues.filter(
-    (v) => v >= market.bracketLow! && v < market.bracketHigh!
-  ).length;
+  return correctedValues.filter((v) => {
+    const c = clamp(v);
+    return c >= market.bracketLow! && c < market.bracketHigh!;
+  }).length;
 }
 
 /**
@@ -904,25 +973,48 @@ export function countMembersInMarket(market: Market, correctedValues: number[]):
  * sigma collapses to 0. Shared by both estimation paths so the event vector's
  * bracket `Φ(hi)−Φ(lo)` / tail `1−Φ(lo)` / `Φ(lo)` integrals are byte-identical
  * to the per-market path. Addendum N2.
+ *
+ * Addendum N3 — observation running-max CLAMP (NOT truncation): when
+ * `runningMax` is provided, the settled high is `H = max(X, runningMax)`, so the
+ * forecast CDF is clamped at `runningMax`: all mass below it folds onto the point
+ * `runningMax`. The clamped CDF is `F_H(x) = 0` for `x < runningMax` and
+ * `Φ((x−μ)/σ)` for `x ≥ runningMax` (the point mass at `runningMax` lives inside
+ * the `Φ` evaluated at `x ≥ runningMax`). Every YES probability is then a slice
+ * of this same clamped CDF, so the event vector stays coherent automatically:
+ *   - bracket [lo,hi): `clampedCdf(hi) − clampedCdf(lo)` — folds the sub-rm mass
+ *     INTO the bracket that contains rm, and is 0 for brackets fully below rm;
+ *   - lower tail (< th): `clampedCdf(th)` = 0 when `th ≤ rm`, else `Φ((th−μ)/σ)`;
+ *   - upper tail (> th): 1 when `th < rm` (the observed max already exceeds it),
+ *     else `1 − Φ((th−μ)/σ)`.
+ * `null`/`undefined` (back-compat default, stale/absent obs, non-`high_temp`)
+ * gives the original un-clamped integrals.
  */
 export function cdfProbForMarket(
   market: Market,
   corrMean: number,
   sigmaUsed: number,
   countingProb: number,
-  isPrecipCategory: boolean
+  isPrecipCategory: boolean,
+  runningMax?: number | null
 ): number {
   if (isPrecipCategory || sigmaUsed === 0) return countingProb;
+
+  // Clamped normal CDF of the settled high H = max(X, runningMax). Below the
+  // running max the high is impossible, so F_H = 0; at/above it the mass equals
+  // the (folded) forecast CDF Φ. Without an obs, this is the plain Φ.
+  const clampedCdf = (x: number): number =>
+    runningMax != null && x < runningMax ? 0 : normalCdf(x, corrMean, sigmaUsed);
+
   if (market.marketType === "upper_tail") {
-    return 1 - normalCdf(market.bracketLow!, corrMean, sigmaUsed);
+    const th = market.bracketLow!;
+    // th below the observed max ⇒ P(H > th) = 1 exactly (point mass at rm > th).
+    if (runningMax != null && th < runningMax) return 1;
+    return 1 - clampedCdf(th);
   }
   if (market.marketType === "lower_tail") {
-    return normalCdf(market.bracketLow!, corrMean, sigmaUsed);
+    return clampedCdf(market.bracketLow!);
   }
-  return (
-    normalCdf(market.bracketHigh!, corrMean, sigmaUsed) -
-    normalCdf(market.bracketLow!, corrMean, sigmaUsed)
-  );
+  return clampedCdf(market.bracketHigh!) - clampedCdf(market.bracketLow!);
 }
 
 /**
@@ -952,6 +1044,102 @@ export function medianRegularBracketWidth(eventMarkets: Market[]): number {
   return widths.length % 2 === 1
     ? widths[mid]!
     : (widths[mid - 1]! + widths[mid]!) / 2;
+}
+
+/**
+ * Resolved same-day observation state for a `high_temp` event, computed ONCE and
+ * shared by both estimation paths (addendum N3). `corrMean`/`sigmaUsed` are the
+ * post-observation distribution; `runningMaxForClamp` is the hard floor passed
+ * into the bracket/tail integrals + member counting (null = no clamp); `obsAdj`
+ * is the trace record (null when the obs was ignored); `obsStale` flags the
+ * staleness-guard rejection for the orchestrator's audit.
+ */
+interface ObsAdjustmentResult {
+  corrMean: number;
+  sigmaUsed: number;
+  runningMaxForClamp: number | null;
+  obsAdj: ReasoningTrace["observationAdjustment"];
+  obsStale: boolean;
+}
+
+/**
+ * Apply the same-day observation adjustment to a shared `(corrMean, sigmaUsed)`
+ * distribution for a `high_temp` market/event (addendum N3, replacing the bare
+ * diurnal sigma tweak of Finding 5). Factored out of {@link
+ * ProbabilityEstimator.estimate} and `estimateEvent` so BOTH paths run identical
+ * staleness / post-peak / pre-peak / clamp logic and stay event-coherent.
+ *
+ * Flow (matches the N3 design):
+ *  1. **Staleness guard** — if `latestAgeMinutes > obsMaxAgeMinutes`, ignore the
+ *     obs entirely: no mean shift, no collapse, no clamp; `obsStale = true`.
+ *  2. **Post-peak collapse** — local hour at the station ≥ `obsPeakHour` AND
+ *     `runningMax != null`: set `corrMean = runningMax + obsPostPeakMeanOffset`
+ *     and `sigmaUsed = obsPostPeakSigma`. This may drop sigma BELOW the plan-#4
+ *     floor by design (real same-day information, not bias-window overfit).
+ *  3. **Pre-peak** — the existing implied-high logic (diurnal offset; agree
+ *     → ×0.7 sigma; diverge → blend mean toward implied + ×0.85 sigma).
+ *  4. The running max (when present + fresh) is returned as the clamp floor
+ *     regardless of pre/post peak.
+ *
+ * @param corrMean current corrected mean (mutated copy returned)
+ * @param sigmaUsed current sigma (post sigma-floor; mutated copy returned)
+ * @param meanBaseline the corrected mean BEFORE any obs adjustment (for the
+ *   trace's `meanShift`, identical to estimate()/estimateEvent() semantics)
+ */
+function applyObservationAdjustment(
+  observation: ObservationAdjustment,
+  stationId: string,
+  corrMean: number,
+  sigmaUsed: number,
+  meanBaseline: number
+): ObsAdjustmentResult {
+  const cfg = getConfig().bot;
+  const ageMin = observation.latestAgeMinutes ?? null;
+
+  // 1. Staleness guard — ignore stale obs entirely (no clamp/shift/collapse).
+  if (ageMin != null && ageMin > cfg.obsMaxAgeMinutes) {
+    return { corrMean, sigmaUsed, runningMaxForClamp: null, obsAdj: null, obsStale: true };
+  }
+
+  const runningMax = observation.runningMax ?? null;
+  const runningMaxForClamp = runningMax; // fresh obs ⇒ clamp at the running max
+  const sigmaBefore = sigmaUsed;
+  const obsHour = localHourAtStation(observation.observedAt, stationId);
+
+  // 2. Post-peak collapse: after ~peak hour the day's high ≈ runningMax + ε.
+  const postPeakCollapse =
+    obsHour >= cfg.obsPeakHour && runningMax != null;
+  if (postPeakCollapse) {
+    corrMean = runningMax! + cfg.obsPostPeakMeanOffset;
+    sigmaUsed = cfg.obsPostPeakSigma; // may go below the sigma floor — intended
+  } else {
+    // 3. Pre-peak: project obs to an implied afternoon high, compare to mean.
+    const diurnalOffset = estimateDiurnalOffset(obsHour);
+    const impliedHigh = observation.observedTemp + diurnalOffset;
+    const divergence = Math.abs(impliedHigh - corrMean);
+    if (divergence <= 2) {
+      sigmaUsed = sigmaUsed * 0.7;
+    } else {
+      corrMean = 0.7 * corrMean + 0.3 * impliedHigh;
+      sigmaUsed = sigmaUsed * 0.85;
+    }
+  }
+
+  return {
+    corrMean,
+    sigmaUsed,
+    runningMaxForClamp,
+    obsAdj: {
+      observedTemp: observation.observedTemp,
+      sigmaBefore,
+      sigmaAfter: sigmaUsed,
+      meanShift: corrMean - meanBaseline,
+      runningMax,
+      postPeakCollapse,
+      latestAgeMinutes: ageMin,
+    },
+    obsStale: false,
+  };
 }
 
 /**

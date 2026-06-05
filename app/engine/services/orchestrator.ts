@@ -226,7 +226,10 @@ export async function initOrchestrator(): Promise<void> {
             groupHorizonHours
           );
 
-        // Fetch same-day observation for temperature markets (improvement #4)
+        // Fetch same-day observation for temperature markets. Addendum N3: use
+        // the day's RUNNING MAX (a hard floor on the high) + staleness, not just
+        // the latest reading — the estimator clamps its distribution at the
+        // running max and collapses post-peak.
         let observation: ObservationAdjustment | undefined;
         if (
           ref.category === "high_temp" &&
@@ -234,10 +237,18 @@ export async function initOrchestrator(): Promise<void> {
           groupHorizonHours <= 24
         ) {
           if (!observationCache.has(ref.stationId!)) {
-            const obs = await nwsService.getLatestObservation(ref.stationId!);
+            const obs = await nwsService.getTodayObservations(ref.stationId!);
             observationCache.set(
               ref.stationId!,
-              obs ? { observedTemp: obs.tempF, observedAt: obs.timestamp } : null
+              obs
+                ? {
+                    observedTemp: obs.latest.tempF,
+                    observedAt: obs.latest.timestamp,
+                    runningMax: obs.runningMax,
+                    latestAgeMinutes: obs.latestAgeMinutes,
+                    obsCount: obs.count,
+                  }
+                : null
             );
           }
           observation = observationCache.get(ref.stationId!) ?? undefined;
@@ -416,6 +427,15 @@ export async function initOrchestrator(): Promise<void> {
           })
         : { allowed: true as const };
 
+      // Obs data-quality gate (addendum N3): for same-day high_temp the running-
+      // max anchor is the contrarian edge inside the sniper window, so a missing
+      // or stale observation skips the contrarian entry. Computed once here;
+      // applied in the ladder below (contrarian only — confirmations exempt).
+      const obsSkipReason =
+        inActualSniperWindow && market.category === "high_temp"
+          ? obsGate(observationCache.get(market.stationId ?? ""), config.bot.obsMaxAgeMinutes)
+          : null;
+
       if (!side || edge <= 0) {
         skipReason = "no edge";
       } else if (!inSniperWindow) {
@@ -433,6 +453,13 @@ export async function initOrchestrator(): Promise<void> {
         // pools count as hrrr-absent: N6's sniper-entry refresh means a healthy
         // HRRR would have been blended fresh by now.
         skipReason = "hrrr unavailable in sniper window";
+      } else if (obsSkipReason != null) {
+        // Obs data-quality gate (addendum N3): inside the sniper window the
+        // running-max anchor IS the contrarian edge for same-day high_temp — a
+        // missing or stale observation means we'd be sniping blind, so skip the
+        // contrarian entry. Confirmation entries (below) are exempt for the same
+        // reason as the HRRR gate: their information source is the market itself.
+        skipReason = obsSkipReason;
       } else if (edge < edgeThreshold) {
         skipReason =
           stationSurcharge > 0
@@ -837,6 +864,31 @@ function marketMid(market: Market): number | undefined {
     return (market.yesBid + market.yesAsk) / 200;
   }
   return market.lastYesPrice != null ? market.lastYesPrice / 100 : undefined;
+}
+
+/**
+ * Obs data-quality gate for same-day `high_temp` contrarian entries inside the
+ * sniper window (addendum N3 §4). The running-max anchor is the contrarian edge
+ * late-day, so without a usable observation the bot is sniping blind. Returns
+ * the exact `skipReason` to set, or `null` when the obs is present + fresh
+ * (no gate). `cached` is the per-station {@link ObservationAdjustment} from the
+ * Phase 2 cache (`undefined`/`null` = the NWS fetch returned no obs).
+ *
+ * - missing (`undefined`/`null`) → `"no same-day obs in sniper window"`
+ * - stale (`latestAgeMinutes > maxAgeMinutes`) →
+ *   `"obs stale (Xm > 90m) in sniper window"` (X rounded, threshold is the
+ *   configured cap)
+ */
+export function obsGate(
+  obs: ObservationAdjustment | null | undefined,
+  maxAgeMinutes: number
+): string | null {
+  if (obs == null) return "no same-day obs in sniper window";
+  const age = obs.latestAgeMinutes;
+  if (age != null && age > maxAgeMinutes) {
+    return `obs stale (${Math.round(age)}m > ${maxAgeMinutes}m) in sniper window`;
+  }
+  return null;
 }
 
 export { startLoop as start, stopLoop as stop, getLoopState as getState, stopFeed };
