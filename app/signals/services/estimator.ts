@@ -41,6 +41,8 @@ export interface ReasoningTrace {
   sigmaUsed: number;
   /** Empirical-sigma weight in the blend (n/50, capped at 1). null when no bias data. */
   empiricalSigmaWeight: number | null;
+  /** Sigma floor that clipped the blend (plan #4), or null when it didn't bind. */
+  sigmaFloorApplied?: number | null;
   /** Same-day observation adjustment applied */
   observationAdjustment: { observedTemp: number; sigmaBefore: number; sigmaAfter: number; meanShift: number } | null;
   /** How many members fall in the bracket */
@@ -185,6 +187,32 @@ export class ProbabilityEstimator {
           `(empirical=${empiricalSigma.toFixed(2)}F w=${w.toFixed(2)}, ` +
           `ensemble=${corrStd.toFixed(2)}F, n=${biasCorrection.sampleSize})`
         );
+      }
+    }
+
+    // Step 3.55: Sigma floor (win-rate-80 plan #4). The blended sigma is fit on
+    // the bias window's own residuals and can collapse below the bracket scale,
+    // making the CDF mechanically overconfident when the mean sits just outside
+    // a tight bracket — the "mean 1°F out → 15% YES" trap that generated the
+    // contra-market NO book. Floor sigma at a fraction of the bracket width
+    // (tails use width 1.0). Deliberately applied BEFORE the observation
+    // adjustment: post-peak obs knowledge (addendum N3) is real same-day
+    // information, not overfit, and may legitimately collapse sigma below this
+    // floor. See improvements/win-rate-80-plan-2026-06-05.md §4.4.
+    let sigmaFloorApplied: number | null = null;
+    if (!isPrecipCategory) {
+      const floorFactor = getConfig().bot.sigmaFloorBracketWidthFactor;
+      const bracketWidth =
+        !isTail && market.bracketHigh != null
+          ? market.bracketHigh - market.bracketLow!
+          : 1.0;
+      const sigmaFloor = floorFactor * bracketWidth;
+      if (floorFactor > 0 && sigmaUsed < sigmaFloor) {
+        log.debug(
+          `${market.ticker}: sigma floor ${sigmaFloor.toFixed(2)}F applied (was ${sigmaUsed.toFixed(2)}F)`
+        );
+        sigmaUsed = sigmaFloor;
+        sigmaFloorApplied = sigmaFloor;
       }
     }
 
@@ -360,6 +388,7 @@ export class ProbabilityEstimator {
       sigmaSource,
       sigmaUsed,
       empiricalSigmaWeight,
+      sigmaFloorApplied,
       observationAdjustment: obsAdj,
       membersInBracket,
       cdfProbability: cdfProb,

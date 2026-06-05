@@ -114,6 +114,24 @@ export interface BotConfig {
     /** Max contract price (0-1) the bot may pay on a confirmation entry — keeps minimum payoff ≥ (1 − this). */
     confirmationMaxEntryPrice: number;
 
+    // ── Sigma floor (win-rate-80-plan #4) ──
+    /** Floor on the CDF sigma as a fraction of bracket width (tails use width 1.0). Prevents the (possibly overfit) empirical-sigma blend from collapsing the CDF into overconfidence on tight near-mean brackets. 0 = disabled. Applied before observation adjustments — post-peak obs knowledge (N3) is real information and may deliberately go below it. */
+    sigmaFloorBracketWidthFactor: number;
+
+    // ── Event-coherent estimation (addendum N2) ──
+    /** Estimate per event (one distribution → all bracket/tail probabilities, summing to 1) instead of per market. Kill switch for the N2 restructure. */
+    eventCoherentEstimation: boolean;
+
+    // ── Observation anchor (addendum N3) ──
+    /** Local hour (0-23) after which the daily high is treated as ≈ the observed running max (post-peak collapse). */
+    obsPeakHour: number;
+    /** Reject observations older than this many minutes; stale obs inside the sniper window skip same-day signals for the station. */
+    obsMaxAgeMinutes: number;
+    /** Sigma (°F) after the post-peak collapse. */
+    obsPostPeakSigma: number;
+    /** Mean offset (°F) added to the running max after the post-peak collapse (residual late-day heating allowance). */
+    obsPostPeakMeanOffset: number;
+
     // ── Data-quality gates (addendum N4/N5/N6) ──
     /** Skip same-day signals when HRRR contributed zero members inside the sniper window (addendum N5). */
     requireHrrrInSniper: boolean;
@@ -247,6 +265,12 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   confirmation_min_model_agreement: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMinModelAgreement = n; },
   confirmation_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationBetSizeCents = n; },
   confirmation_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMaxEntryPrice = n; },
+  sigma_floor_bracket_width_factor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sigmaFloorBracketWidthFactor = n; },
+  event_coherent_estimation: (c, v) => { c.bot.eventCoherentEstimation = v === "true" || v === "1"; },
+  obs_peak_hour: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.obsPeakHour = n; },
+  obs_max_age_minutes: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.obsMaxAgeMinutes = n; },
+  obs_post_peak_sigma: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.obsPostPeakSigma = n; },
+  obs_post_peak_mean_offset: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.obsPostPeakMeanOffset = n; },
   require_hrrr_in_sniper: (c, v) => { c.bot.requireHrrrInSniper = v === "true" || v === "1"; },
   same_day_ensemble_ttl_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sameDayEnsembleTtlHours = n; },
   max_spread_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxSpreadCents = n; },
@@ -325,6 +349,15 @@ export function loadConfig(): BotConfig {
       confirmationMinModelAgreement: envNum("CONFIRMATION_MIN_MODEL_AGREEMENT", 0.50),
       confirmationBetSizeCents: envNum("CONFIRMATION_BET_SIZE_CENTS", 500),
       confirmationMaxEntryPrice: envNum("CONFIRMATION_MAX_ENTRY_PRICE", 0.93),
+      // Sigma floor (win-rate-80-plan #4)
+      sigmaFloorBracketWidthFactor: envNum("SIGMA_FLOOR_BRACKET_WIDTH_FACTOR", 0.6),
+      // Event-coherent estimation (addendum N2)
+      eventCoherentEstimation: envBool("EVENT_COHERENT_ESTIMATION", true),
+      // Observation anchor (addendum N3)
+      obsPeakHour: envNum("OBS_PEAK_HOUR", 16),
+      obsMaxAgeMinutes: envNum("OBS_MAX_AGE_MINUTES", 90),
+      obsPostPeakSigma: envNum("OBS_POST_PEAK_SIGMA", 0.7),
+      obsPostPeakMeanOffset: envNum("OBS_POST_PEAK_MEAN_OFFSET", 0.3),
       // Data-quality gates (addendum N4/N5/N6)
       requireHrrrInSniper: envBool("REQUIRE_HRRR_IN_SNIPER", true),
       sameDayEnsembleTtlHours: envNum("SAME_DAY_ENSEMBLE_TTL_HOURS", 2),

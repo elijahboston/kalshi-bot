@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, afterAll } from "bun:test";
 import {
   mean,
   std,
@@ -201,15 +201,46 @@ describe("ProbabilityEstimator", () => {
   });
 
   test("zero-spread ensemble → falls back to counting (floored to 0.97)", async () => {
-    const estimator = new ProbabilityEstimator();
-    const ensemble = [30.5, 30.5, 30.5, 30.5, 30.5];
+    // Pin the sigma floor off: this test covers the sigmaUsed === 0 counting
+    // fallback, which the plan-#4 floor intentionally makes unreachable for
+    // temperature markets (zero model spread ≠ certainty). Floored behavior
+    // has its own describe block below.
+    const originalFloor = getConfig().bot.sigmaFloorBracketWidthFactor;
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0;
+    try {
+      const estimator = new ProbabilityEstimator();
+      const ensemble = [30.5, 30.5, 30.5, 30.5, 30.5];
 
-    const result = await estimator.estimate(makeMarket(), ensemble);
+      const result = await estimator.estimate(makeMarket(), ensemble);
 
-    expect(result.reasoning.countingProbability).toBe(1);
-    expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
-    // Returned probability is capped at 0.97 without empirical bias data
-    expect(result.probability).toBe(0.97);
+      expect(result.reasoning.countingProbability).toBe(1);
+      expect(result.reasoning.cdfProbability).toBe(result.reasoning.countingProbability);
+      // Returned probability is capped at 0.97 without empirical bias data
+      expect(result.probability).toBe(0.97);
+    } finally {
+      getConfig().bot.sigmaFloorBracketWidthFactor = originalFloor;
+    }
+  });
+
+  test("zero-spread ensemble WITH sigma floor → CDF replaces false certainty", async () => {
+    // The floored counterpart of the test above: 200 members all saying 30.5
+    // is model clustering, not certainty. Floor 0.6F → CDF over the 30-31
+    // bracket ≈ Φ(0.83) − Φ(−0.83) ≈ 0.595 instead of counting's 1.0.
+    const originalFloor = getConfig().bot.sigmaFloorBracketWidthFactor;
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0.6;
+    try {
+      const estimator = new ProbabilityEstimator();
+      const ensemble = Array.from({ length: 200 }, () => 30.5);
+
+      const result = await estimator.estimate(makeMarket(), ensemble);
+
+      expect(result.reasoning.countingProbability).toBe(1);
+      expect(result.reasoning.sigmaFloorApplied).toBeCloseTo(0.6, 6);
+      expect(result.probability).toBeGreaterThan(0.5);
+      expect(result.probability).toBeLessThan(0.7);
+    } finally {
+      getConfig().bot.sigmaFloorBracketWidthFactor = originalFloor;
+    }
   });
 });
 
@@ -1080,6 +1111,94 @@ describe("ProbabilityEstimator — empirical sigma blend", () => {
   });
 });
 
+describe("ProbabilityEstimator — sigma floor (plan #4)", () => {
+  const originalFloorFactor = getConfig().bot.sigmaFloorBracketWidthFactor;
+
+  beforeEach(() => {
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0.6;
+  });
+
+  afterAll(() => {
+    getConfig().bot.sigmaFloorBracketWidthFactor = originalFloorFactor;
+  });
+
+  /** Tight empirical sigma + tight ensemble → blend collapses below the floor. */
+  function seedTightSigma() {
+    getDb().insert(stationBias).values({
+      id: "KNYC_high_temp_1",
+      stationId: "KNYC",
+      category: "high_temp",
+      forecastHorizonDays: 1,
+      meanBias: 0,
+      stdBias: 0.1, // overfit-tight empirical error
+      sampleSize: 50, // saturates the blend weight at the 0.7 cap
+      windowDays: 30,
+      updatedAt: new Date().toISOString(),
+    }).run();
+  }
+  const tightEnsemble = [29.8, 29.9, 30, 30, 30.1, 30.2];
+
+  test("floors collapsed sigma at factor × bracket width (1°F bracket → 0.6F)", async () => {
+    seedTightSigma();
+    const estimator = new ProbabilityEstimator();
+
+    const result = await estimator.estimate(makeMarket(), tightEnsemble);
+
+    // Blend would be 0.7×0.1 + 0.3×corrStd(≈0.13) ≈ 0.11F — mechanically
+    // overconfident on a 1°F bracket. The floor lifts it to 0.6 × 1.0.
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.6, 6);
+    expect(result.reasoning.sigmaFloorApplied).toBeCloseTo(0.6, 6);
+  });
+
+  test("factor 0 disables the floor", async () => {
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0;
+    seedTightSigma();
+    const estimator = new ProbabilityEstimator();
+
+    const result = await estimator.estimate(makeMarket(), tightEnsemble);
+
+    expect(result.reasoning.sigmaUsed).toBeLessThan(0.2);
+    expect(result.reasoning.sigmaFloorApplied).toBeNull();
+  });
+
+  test("scales with bracket width (2°F bracket → 1.2F floor)", async () => {
+    seedTightSigma();
+    const estimator = new ProbabilityEstimator();
+    const market = { ...makeMarket(), bracketHigh: 32 }; // 30–32 → width 2
+
+    const result = await estimator.estimate(market, tightEnsemble);
+
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(1.2, 6);
+    expect(result.reasoning.sigmaFloorApplied).toBeCloseTo(1.2, 6);
+  });
+
+  test("tail markets use width 1.0", async () => {
+    seedTightSigma();
+    const estimator = new ProbabilityEstimator();
+    const market = {
+      ...makeMarket(),
+      marketType: "upper_tail",
+      bracketHigh: null,
+    };
+
+    const result = await estimator.estimate(market, tightEnsemble);
+
+    expect(result.reasoning.sigmaUsed).toBeCloseTo(0.6, 6);
+    expect(result.reasoning.sigmaFloorApplied).toBeCloseTo(0.6, 6);
+  });
+
+  test("does not bind when the blend is already wider than the floor", async () => {
+    const estimator = new ProbabilityEstimator();
+    // No bias row → pure ensemble spread (~1.7F) > 0.6 floor
+    const wide = [27, 28, 29, 30, 31, 32, 33];
+
+    const result = await estimator.estimate(makeMarket(), wide);
+
+    expect(result.reasoning.sigmaFloorApplied).toBeNull();
+    expect(result.reasoning.sigmaUsed).toBeGreaterThan(1);
+  });
+});
+
 describe("ProbabilityEstimator — observation adjustment", () => {
   test("tightens sigma when observation confirms forecast", async () => {
     const estimator = new ProbabilityEstimator();
@@ -1295,14 +1414,23 @@ describe("ProbabilityEstimator — tail probability floor", () => {
   });
 
   test("no bias record + certain bracket → probability capped at 97%", async () => {
-    const estimator = new ProbabilityEstimator();
-    // All members inside bracket, no bias record
-    const ensemble = Array.from({ length: 200 }, () => 30.5);
-    const result = await estimator.estimate(makeMarket(), ensemble);
+    // Sigma floor pinned off so the zero-spread pool keeps its pre-floor
+    // near-certainty — this test covers the 0.97 cap, not the floor (which
+    // would pull the probability to ~0.6 before the cap could ever bind).
+    const originalFloor = getConfig().bot.sigmaFloorBracketWidthFactor;
+    getConfig().bot.sigmaFloorBracketWidthFactor = 0;
+    try {
+      const estimator = new ProbabilityEstimator();
+      // All members inside bracket, no bias record
+      const ensemble = Array.from({ length: 200 }, () => 30.5);
+      const result = await estimator.estimate(makeMarket(), ensemble);
 
-    expect(result.reasoning.countingProbability).toBe(1);
-    expect(result.probability).toBeLessThanOrEqual(0.97 + 1e-9);
-    expect(result.probability).toBeGreaterThan(0.9);
+      expect(result.reasoning.countingProbability).toBe(1);
+      expect(result.probability).toBeLessThanOrEqual(0.97 + 1e-9);
+      expect(result.probability).toBeGreaterThan(0.9);
+    } finally {
+      getConfig().bot.sigmaFloorBracketWidthFactor = originalFloor;
+    }
   });
 
   test("with empirical bias record (sample >= 10) → floor narrows to 1%", async () => {
