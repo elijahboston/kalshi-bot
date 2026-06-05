@@ -1121,6 +1121,58 @@ describe("executeSignal confirmation mode (win-rate-80 #2)", () => {
     expect(readOrder(ticker)).toBeUndefined();
   });
 
+  test("confirmation is exempt from minBetSizeCents (caught live 2026-06-05)", async () => {
+    // At confirmation prices (80-93¢), floor(500/price) × price is structurally
+    // < 500¢ (e.g. 5 × 91¢ = 455¢), so the min-bet guard rejected every
+    // confirmation entry on the first live tick. The guard targets Kelly
+    // dust-bets, not flat market-follow sizing — confirmation bypasses it.
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 89, yesAsk: 91, lastYesPrice: 90 });
+    mockBotConfig.minBetSizeCents = 500;
+    mockBotConfig.confirmationBetSizeCents = 500;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.90,
+        estimatedProb: 0.6,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    const order = readOrder(ticker)!;
+    expect(order.limitPrice).toBe(91); // ask
+    expect(order.quantity).toBe(5); // floor(500/91) — 455¢ spend, below the floor, still fires
+  });
+
+  test("regular signals still respect minBetSizeCents", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B41";
+    seedMarket(ticker, { yesBid: 89, yesAsk: 91, lastYesPrice: 90 });
+    mockBotConfig.minBetSizeCents = 500;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "buy_yes",
+        marketPrice: 0.90,
+        estimatedProb: 0.99,
+        edge: 0.09,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toContain("< min 500¢");
+  });
+
   test("confirm_no fires and pays 100 − bid", async () => {
     const ticker = "KXHIGHNY-26MAR04-B40";
     seedMarket(ticker, { yesBid: 11, yesAsk: 13, lastYesPrice: 12 });

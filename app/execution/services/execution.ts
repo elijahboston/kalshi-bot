@@ -413,8 +413,20 @@ export class ExecutionService {
     // Minimum bet size filter. When the Kelly- and cap-sized spend falls below
     // the floor, skip the signal entirely rather than placing a micro-position
     // that doesn't move the needle. 0 = disabled.
+    //
+    // Confirmation entries are exempt: at 80-93¢ contract prices,
+    // floor(confirmationBetSizeCents / price) × price is structurally below the
+    // flat target (e.g. 5 × 91¢ = 455¢ < 500¢ for ANY price that doesn't divide
+    // it evenly), so the guard would silently reject every confirmation trade —
+    // caught live 2026-06-05, first tick after the pathway shipped. The guard's
+    // intent is to kill Kelly dust-bets, not deliberately-flat market-follow
+    // entries whose size is already pinned by config.
     const actualSpend = contracts * price;
-    if (config.bot.minBetSizeCents > 0 && actualSpend < config.bot.minBetSizeCents) {
+    if (
+      !isConfirmation &&
+      config.bot.minBetSizeCents > 0 &&
+      actualSpend < config.bot.minBetSizeCents
+    ) {
       const reason =
         `bet ${actualSpend}¢ (${contracts} × ${price}¢) < min ${config.bot.minBetSizeCents}¢`;
       log.info(`Skipping ${signal.ticker}: ${reason}`);
