@@ -12,7 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { useApiContext } from "@/src/lib/api-context"
-import { fmtMoney, fmtPnl, fmtPct, fmtEdge, fmtRelTime } from "@/src/lib/format"
+import { fmtPrice, fmtPnl, fmtPct, fmtEdge, fmtRelTime } from "@/src/lib/format"
 import type { Resolution } from "@/src/lib/types"
 
 export interface ResolutionSummary {
@@ -144,7 +144,7 @@ export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps
                         </Badge>
                       </TableCell>
                       <TableCell className="py-2.5 text-right font-mono text-xs tabular-nums text-muted-foreground">
-                        {fmtMoney(r.marketPrice)}
+                        {fmtPrice(r.marketPrice)}
                       </TableCell>
                       <TableCell
                         className={cn(

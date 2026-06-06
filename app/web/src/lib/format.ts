@@ -14,6 +14,11 @@ export function fmtPct(prob: number): string {
   return (prob * 100).toFixed(1) + "%"
 }
 
+/** Format a contract price (0-1) as cents: 0.21 → "21¢" */
+export function fmtPrice(price: number): string {
+  return Math.round(price * 100) + "¢"
+}
+
 /** Format edge (0-1) as signed cents: 0.12 → "+12.0¢", -0.05 → "-5.0¢" */
 export function fmtEdge(edge: number): string {
   const cents = edge * 100
