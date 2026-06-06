@@ -34,6 +34,7 @@ To add a new command: create the `CommandDef[]` array, import it in `commands/in
 | `calibration` | `cal` | `summary\|detail [series]\|bias [station]\|retrain` | Calibration reports |
 | `explain` | — | `<ticker>` | Show signal reasoning for a market |
 | `backtest` | — | `<series> --days <N>` | Run estimator against historical data |
+| `wins` | `w` | `[summary\|by_gate\|by_path\|by_confidence\|by_station\|by_hour] [all]` | Win-rate attribution (plan #10). Defaults to the new regime (since 2026-06-05T20:00Z); `all` = full history. `by_gate` shows would-have-won rates for BLOCKED signals (<50% ⇒ the gate is saving money), deduped to the last signal per (ticker, gate family). PnL columns are entry-attributed / settle-assumed (early exits ignored — round-trips live in `calibration`). |
 | `help` | — | — | List all commands |
 | `exit` / `quit` | — | — | Return to dashboard |
 

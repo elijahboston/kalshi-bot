@@ -163,11 +163,13 @@ Strategy and market research in [`docs/research/`](research/). These are analyse
 | Drizzle schema + migrations | See [database-schema.md](features/database-schema.md) |
 | Kalshi client (REST + WebSocket) | RSA-PSS auth, cursor pagination, gap detection |
 | Engine (orchestrator, loop, reconciliation) | 5-phase tick with sniper/scout gate |
-| Market discovery | High/low temp, precip, snowfall — all categories end-to-end |
-| Weather data | Open-Meteo (primary ~120 members) + HRRR + Tomorrow.io + NWS synthetic fallback |
-| Probability estimator | Multi-model ensemble, distribution fitting, empirical sigma, same-day obs, horizon-weighted blending |
-| Adaptive thresholds + station bias | Per-bucket edge, rolling bias per (station, horizon) |
-| Execution (Kelly + orders + exit) | Stop-loss, edge-reversal exits, churn guards, exposure caps |
+| Market discovery | High/low temp, precip, snowfall — all categories end-to-end; **temperature brackets parsed from titles with rounded-integer settlement semantics** (Finding 11, 2026-06-05) |
+| Weather data | Open-Meteo (~120 members) + HRRR (`gfs_hrrr`, fixed 2026-06-05) + Tomorrow.io + NWS; per-estimate `sourceMix` attribution, 2h same-day TTL, sniper-entry cache refresh |
+| Probability estimator | **Event-coherent vector** (one distribution per event, sums to 1), sigma floor, obs running-max clamp + post-peak collapse, adaptive market prior (0.3→0.7 ramp), market-agreement confidence |
+| Calibration ground truth | **Settlement-truth chain: CLI exact value → settlement interval → local-day obs max**, hourly health telemetry, auto station-health gate (hysteresis) |
+| Entry gates | Contra-market blocks, concordance cap (25pp), coin-flip dead zone, station health, HRRR-in-sniper, obs staleness, tail price cap, event argmax |
+| Confirmation pathway | Market ≥80¢ + model agreement → take the popular side flat; own exit policy (hold to settlement, conviction-floor bail-out) |
+| Execution (orders + exits) | Book-aware crossing-price entries, spread guard, honest paper fills, net-held over-sell clamp, winner-hold + confirmation exit carve-outs |
 | Ink TUI | 6 views, Ctrl+R REPL, ink-chart + custom Table component |
 | REST + WebSocket API | Elysia in-process, 12 REST endpoints, full bus forwarding |
 | Web SPA | React 19, TanStack Router, shadcn/ui, dark-mode dense dashboard |
@@ -177,10 +179,13 @@ Strategy and market research in [`docs/research/`](research/). These are analyse
 
 | Task | Location | Notes |
 |------|----------|-------|
+| **Measure the new regime** | — | All win-rate-80 build items shipped 2026-06-05/06; accumulate ~30 settled trades, then judge vs the 80% target (`wins` REPL command) |
+| Ultra-sniper enablement | runtime_config | Shipped dark; set `ultra_sniper_horizon_hours=4` after a few clean live days |
+| Entry-hour re-cut (N12) | analysis | After ~2 weeks of new-regime data, decide if an hour gate is still needed post-obs-anchor |
 | Rate-limit backoff | `packages/kalshi-client/src/client.ts` | Exponential backoff on 429 |
-| Historical hit-rate prior | `app/signals/services/estimator.ts` | See [improvements.md](improvements/improvements.md) §3 |
+| Hit-rate bracket matching (plan #5) | `app/signals/services/estimator.ts` | Deprioritized — geometry fix addressed the worst of it |
 | Stale-order cancellation | `app/engine/services/reconciliation.ts` | See [improvements.md](improvements/improvements.md) §4 |
-| Per-category bias | `calibration.ts` schema + `recomputeStationBias` | See [improvements.md](improvements/improvements.md) §5 |
+| Precip/snowfall expansion | discovery + estimator | Deliberately deferred until `high_temp` proves ≥80% (audit settlement semantics first — see Finding 11 memory) |
 | Multi-bot refactor | See [multi-bot-plan.md](research/multi-bot-plan.md) | Prerequisite for oilbot |
 
 ---

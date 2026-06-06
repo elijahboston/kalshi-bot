@@ -325,6 +325,7 @@ Each item has impact estimate, files, and verification. They are ordered by impa
 **Change:** Discovery already supports these; just enable in config. Estimator already has precip-specific handling. Hold this until the core strategy is hitting 80%+ on `high_temp`.
 
 ### 10. Telemetry: persist outcome attribution per gate
+**Status:** ✅ Shipped 2026-06-06 — as the on-demand `wins` REPL command (alias `w`) rather than a materialized view (the joins are cheap with server-side pre-aggregation; a view would just go stale). Subcommands: `summary | by_gate | by_path | by_confidence | by_station | by_hour`, each defaulting to the new regime (signals after 2026-06-05T20:00Z) with an `all` modifier. `by_gate` reports would-have-won rates on blocked signals (deduped to the last signal per ticker × gate family) and flags each family SAVING vs ⚠ COSTING. `by_confidence` also satisfies plan #6's `confidence_calibration` persistence follow-up as a live view. PnL columns are labeled entry-attributed / settle-assumed.
 **Impact:** Lets the next round of optimization be data-driven, not anecdotal.
 **Effort:** 0.5 day.
 **Files:** `app/engine/services/reconciliation.ts`, new `signal_outcomes` view or table.

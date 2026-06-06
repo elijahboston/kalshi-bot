@@ -6,6 +6,7 @@ import { configCommands } from "./config";
 import { calibrationCommands } from "./calibration";
 import { explainCommands } from "./explain";
 import { backtestCommands } from "./backtest";
+import { winsCommands } from "./wins";
 
 export type CommandResult = string | React.ReactElement;
 
@@ -25,6 +26,7 @@ const commandGroups: Record<string, CommandDef[]> = {
   calibration: calibrationCommands,
   explain: explainCommands,
   backtest: backtestCommands,
+  wins: winsCommands,
 };
 
 /** Flat lookup of all commands by name and alias */
