@@ -1668,6 +1668,151 @@ describe("backfillActualValue — settlement priority over obs (N1)", () => {
   });
 });
 
+describe("backfillActualValue — CLI priority over settlement (N1 item 2)", () => {
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(weatherForecasts).run();
+    db.delete(signals).run();
+    db.delete(marketsTable).run();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const ticker = "KXHIGHNY-26APR20-B72.5";
+  const stationId = "KNYC";
+  const targetDate = "2026-04-20";
+  const category = "high_temp";
+
+  /** A stubbed NwsService that returns a fixed CLI report (or null). */
+  function stubNws(report: { maxTempF: number | null; minTempF: number | null } | null) {
+    return {
+      getCliReport: async () =>
+        report == null
+          ? null
+          : {
+              maxTempF: report.maxTempF,
+              minTempF: report.minTempF,
+              reportDate: targetDate,
+              issuedAt: `${targetDate}T21:30:00Z`,
+            },
+    } as any;
+  }
+
+  function seedUnfilledForecastRow(id: string) {
+    getDb().insert(weatherForecasts).values({
+      id,
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: category,
+      forecastHorizon: 1,
+      pointForecast: 71.5,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: null,
+      actualSource: null,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+  }
+
+  test("CLI exact value wins over a differing settled YES bracket; source = 'cli'", async () => {
+    const db = getDb();
+    seedUnfilledForecastRow("wf-cli");
+
+    // Settled YES bracket 72–73 → midpoint 72.5 (interval truth).
+    seedYesMarket({ ticker, stationId, targetDate, marketType: "bracket", bracketLow: 72, bracketHigh: 73 });
+
+    // CLI says the exact high was 73 — deliberately different from 72.5.
+    // Any obs fetch must NOT be reached.
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as any;
+
+    const svc = new ReconciliationService({} as never, undefined, stubNws({ maxTempF: 73, minTempF: 61 }));
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row!.actualValue).toBe(73);
+    expect(row!.actualSource).toBe("cli");
+  });
+
+  test("low_temp uses CLI minTempF", async () => {
+    const db = getDb();
+    getDb().insert(weatherForecasts).values({
+      id: "wf-cli-low",
+      stationId,
+      targetDate,
+      source: "multi_ensemble",
+      forecastType: "low_temp",
+      forecastHorizon: 1,
+      pointForecast: 60,
+      ensembleValues: null,
+      ensembleSize: null,
+      ensembleMean: null,
+      ensembleStd: null,
+      actualValue: null,
+      actualSource: null,
+      fetchedAt: "2026-04-19T10:00:00.000Z",
+    }).run();
+
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as any;
+
+    const svc = new ReconciliationService({} as never, undefined, stubNws({ maxTempF: 73, minTempF: 58 }));
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category: "low_temp" });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row!.actualValue).toBe(58);
+    expect(row!.actualSource).toBe("cli");
+  });
+
+  test("falls back to settlement when CLI is null", async () => {
+    const db = getDb();
+    seedUnfilledForecastRow("wf-fallback-settle");
+    seedYesMarket({ ticker, stationId, targetDate, marketType: "bracket", bracketLow: 72, bracketHigh: 73 });
+
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as any;
+
+    const svc = new ReconciliationService({} as never, undefined, stubNws(null));
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row!.actualValue).toBe(72.5);
+    expect(row!.actualSource).toBe("settlement");
+  });
+
+  test("CLI maxTempF null for high_temp → falls through to settlement", async () => {
+    const db = getDb();
+    seedUnfilledForecastRow("wf-cli-nullmax");
+    seedYesMarket({ ticker, stationId, targetDate, marketType: "bracket", bracketLow: 72, bracketHigh: 73 });
+
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as any;
+
+    // CLI present but its max is MM (null) — must not be used for high_temp.
+    const svc = new ReconciliationService({} as never, undefined, stubNws({ maxTempF: null, minTempF: 60 }));
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row!.actualValue).toBe(72.5);
+    expect(row!.actualSource).toBe("settlement");
+  });
+
+  test("no CLI + no settlement → obs_max fallback still works", async () => {
+    const db = getDb();
+    seedUnfilledForecastRow("wf-obs-fallback");
+    // No YES market seeded → settlement null. Obs returns 22.2°C → 72.0°F.
+    mockNwsResponse(22.2);
+
+    const svc = new ReconciliationService({} as never, undefined, stubNws(null));
+    await (svc as any).backfillActualValue({ ticker, stationId, targetDate, category });
+
+    const [row] = db.select().from(weatherForecasts).all();
+    expect(row!.actualValue).toBeCloseTo(71.96, 1);
+    expect(row!.actualSource).toBe("obs_max");
+  });
+});
+
 describe("localDayWindowUtc — local calendar day window (N1 Task 2)", () => {
   test("America/New_York (EDT, UTC−4 in April) maps the local day to 04:00Z–04:00Z next day", () => {
     const { startUtc, endUtc } = localDayWindowUtc("2026-04-20", "America/New_York");

@@ -34,6 +34,138 @@ function stationTz(stationId: string): string {
   return STATION_TZ[stationId] ?? DEFAULT_TZ;
 }
 
+/**
+ * Station → NWS issuing office (WFO) for the CLI climate product (N1 item 2,
+ * win-rate-80-addendum-2026-06-05.md Finding 11). The CLI product is fetched per
+ * office (`/products/types/CLI/locations/{office}`); one office serves multiple
+ * sites, so {@link CLI_SITE_CODE} filters the office's product list down to the
+ * station we want. Hardcoded — these mappings are stable airport→WFO routings.
+ */
+const STATION_OFFICE: Record<string, string> = {
+  KNYC: "OKX", // New York (Upton)
+  KMIA: "MFL", // Miami
+  KORD: "LOT", // Chicago
+  KAUS: "EWX", // Austin/San Antonio (Austin)
+  KDEN: "BOU", // Denver/Boulder
+  KLAX: "LOX", // Los Angeles/Oxnard
+  KPHL: "PHI", // Philadelphia/Mount Holly
+  KATL: "FFC", // Atlanta/Peachtree City
+  KSFO: "MTR", // San Francisco/Monterey
+  KDFW: "FWD", // Dallas/Fort Worth
+  KIAH: "HGX", // Houston/Galveston
+};
+
+/**
+ * Station → 3-letter CLI site code embedded in the product text's `CLI<SITE>`
+ * header line (e.g. `CLINYC`). An office's CLI product list contains reports for
+ * several sites; we filter by this code before date-matching. Three letters =
+ * the station id minus its leading `K`.
+ */
+const CLI_SITE_CODE: Record<string, string> = {
+  KNYC: "NYC",
+  KMIA: "MIA",
+  KORD: "ORD",
+  KAUS: "AUS",
+  KDEN: "DEN",
+  KLAX: "LAX",
+  KPHL: "PHL",
+  KATL: "ATL",
+  KSFO: "SFO",
+  KDFW: "DFW",
+  KIAH: "IAH",
+};
+
+/** Month name → 1-based index, for parsing the CLI summary line's date. */
+const MONTHS: Record<string, number> = {
+  JANUARY: 1,
+  FEBRUARY: 2,
+  MARCH: 3,
+  APRIL: 4,
+  MAY: 5,
+  JUNE: 6,
+  JULY: 7,
+  AUGUST: 8,
+  SEPTEMBER: 9,
+  OCTOBER: 10,
+  NOVEMBER: 11,
+  DECEMBER: 12,
+};
+
+/**
+ * Official NWS CLI (Climate Report) values for one climate day — the LITERAL
+ * source Kalshi settles temperature markets on (win-rate-80-addendum-2026-06-05.md
+ * N1 item 2). Preferred over the settlement-interval midpoint (±1°F uniform
+ * noise after the Finding-11 geometry fix) because it carries the exact value.
+ */
+export interface CliReport {
+  /** Official maximum temperature (°F) for the climate day, or null if not in the product. */
+  maxTempF: number | null;
+  /** Official minimum temperature (°F). */
+  minTempF: number | null;
+  /** The local calendar date the report covers (YYYY-MM-DD). */
+  reportDate: string;
+  /** Product issuance timestamp (ISO). */
+  issuedAt: string;
+}
+
+/**
+ * Parse a fixed-width NWS CLI climate product into its report date + official
+ * max/min temperatures. Pure + exported so it's testable on fixtures.
+ *
+ * The product opens with a `CLIMATE SUMMARY FOR <MONTH> <D> <YYYY>` line (the
+ * climate day this report covers) and, under a `TEMPERATURE (F)` header, rows
+ * like `MAXIMUM   87   3:24 PM ...` / `MINIMUM   66   5:51 AM ...`. We take the
+ * FIRST integer token after `MAXIMUM` / `MINIMUM`. A value of `M` or `MM`
+ * (missing) yields null for that field. `reportDate` is whatever the product
+ * covers (null if the summary line is absent); the CALLER decides whether that
+ * matches the target date — this function never rejects on date.
+ */
+export function parseCliProduct(text: string): {
+  reportDate: string | null;
+  maxTempF: number | null;
+  minTempF: number | null;
+} {
+  const lines = text.split(/\r?\n/);
+
+  // Report date from the "CLIMATE SUMMARY FOR <MONTH> <D> <YYYY>" line.
+  let reportDate: string | null = null;
+  const summaryRe = /CLIMATE\s+SUMMARY\s+FOR\s+([A-Z]+)\s+(\d{1,2})\s+(\d{4})/i;
+  for (const line of lines) {
+    const m = line.match(summaryRe);
+    if (m) {
+      const month = MONTHS[m[1]!.toUpperCase()];
+      if (month) {
+        const day = Number(m[2]);
+        const year = Number(m[3]);
+        reportDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      }
+      break;
+    }
+  }
+
+  // First integer (or M/MM missing token) after the MAXIMUM / MINIMUM label.
+  // `M`/`MM` (missing data) and a bare label with no numeric → null.
+  const tempAfter = (label: "MAXIMUM" | "MINIMUM"): number | null => {
+    const re = new RegExp(`^\\s*${label}\\b(.*)$`, "i");
+    for (const line of lines) {
+      const m = line.match(re);
+      if (!m) continue;
+      const rest = m[1]!;
+      // Missing-data sentinel before any digit ⇒ null.
+      if (/^\s+MM?\b/.test(rest)) return null;
+      const num = rest.match(/-?\d+/);
+      return num ? Number(num[0]) : null;
+    }
+    return null;
+  };
+
+  return {
+    reportDate,
+    maxTempF: tempAfter("MAXIMUM"),
+    minTempF: tempAfter("MINIMUM"),
+  };
+}
+
 /** Celsius → Fahrenheit (matches the existing `* 9 / 5 + 32` convention in this file). */
 function cToF(c: number): number {
   return c * 9 / 5 + 32;
@@ -164,6 +296,15 @@ export interface NwsGridForecast {
 export class NwsService {
   private baseUrl = "https://api.weather.gov";
   private userAgent = "KalshiClimateBot/1.0 (contact@example.com)";
+
+  /**
+   * In-memory CLI cache keyed `${stationId}:${targetDate}` (value possibly null
+   * = "looked up, not found"). The CLI report for a past climate day never
+   * changes, so caching avoids refetching the office product list + texts on
+   * every hourly resolution pass (N1 item 2). Process-lifetime; cleared on
+   * restart.
+   */
+  private cliCache = new Map<string, CliReport | null>();
 
   private async fetch<T>(url: string): Promise<T> {
     const res = await fetch(url, {
@@ -343,6 +484,102 @@ export class NwsService {
       log.debug(
         `Failed to get today's observations for ${stationId}: ${err instanceof Error ? err.message : err}`
       );
+      return null;
+    }
+  }
+
+  /**
+   * Fetch + parse the official NWS CLI climate report for a station's climate
+   * day (win-rate-80-addendum-2026-06-05.md N1 item 2). The CLI product is the
+   * LITERAL source Kalshi settles temperature markets on, so its `MAXIMUM` /
+   * `MINIMUM` are EXACT values — preferred over the settlement-interval midpoint
+   * (±1°F uniform noise) and the obs-max fallback.
+   *
+   * Pipeline: station → issuing office ({@link STATION_OFFICE}); GET the office's
+   * recent CLI list (`/products/types/CLI/locations/{office}`, newest first);
+   * fetch the most recent few product texts (`/products/{id}`, field
+   * `productText`); keep only products whose `CLI<SITE>` header matches the
+   * station's {@link CLI_SITE_CODE}; pick the one whose parsed `reportDate`
+   * equals `targetDate`. Result (including a not-found null) is memoized per
+   * (station, date).
+   *
+   * Errors / unknown station / missing product → null, logged at debug. Never
+   * throws.
+   *
+   * @param targetDate The climate day to resolve (YYYY-MM-DD).
+   */
+  async getCliReport(
+    stationId: string,
+    targetDate: string,
+  ): Promise<CliReport | null> {
+    const cacheKey = `${stationId}:${targetDate}`;
+    const cached = this.cliCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const office = STATION_OFFICE[stationId];
+    const siteCode = CLI_SITE_CODE[stationId];
+    if (!office || !siteCode) {
+      log.debug(`No CLI office/site mapping for ${stationId}`);
+      this.cliCache.set(cacheKey, null);
+      return null;
+    }
+
+    try {
+      // Recent CLI products for the office, newest first.
+      const list = await this.fetch<{
+        "@graph"?: Array<{ id: string; issuanceTime: string }>;
+      }>(`${this.baseUrl}/products/types/CLI/locations/${office}`);
+
+      const entries = list["@graph"] ?? [];
+      if (entries.length === 0) {
+        this.cliCache.set(cacheKey, null);
+        return null;
+      }
+
+      // Inspect the most recent few texts (one office issues daily CLIs for
+      // several sites; the target day's report is near the top of the list).
+      const LIMIT = 8;
+      for (const entry of entries.slice(0, LIMIT)) {
+        let product: { productText?: string; issuanceTime?: string };
+        try {
+          product = await this.fetch<{
+            productText?: string;
+            issuanceTime?: string;
+          }>(`${this.baseUrl}/products/${entry.id}`);
+        } catch (err) {
+          log.debug(
+            `Failed to fetch CLI product ${entry.id}: ${err instanceof Error ? err.message : err}`
+          );
+          continue;
+        }
+
+        const text = product.productText;
+        if (!text) continue;
+
+        // Filter to the station's CLI site (e.g. `CLINYC`) before date-matching.
+        const siteRe = new RegExp(`\\bCLI${siteCode}\\b`);
+        if (!siteRe.test(text)) continue;
+
+        const parsed = parseCliProduct(text);
+        if (parsed.reportDate !== targetDate) continue;
+
+        const report: CliReport = {
+          maxTempF: parsed.maxTempF,
+          minTempF: parsed.minTempF,
+          reportDate: parsed.reportDate,
+          issuedAt: product.issuanceTime ?? entry.issuanceTime,
+        };
+        this.cliCache.set(cacheKey, report);
+        return report;
+      }
+
+      this.cliCache.set(cacheKey, null);
+      return null;
+    } catch (err) {
+      log.debug(
+        `Failed to get CLI report for ${stationId} ${targetDate}: ${err instanceof Error ? err.message : err}`
+      );
+      // Do NOT cache a transient fetch failure — a later pass should retry.
       return null;
     }
   }

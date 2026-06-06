@@ -5,7 +5,13 @@ import { test, expect, describe, mock, beforeEach, afterEach } from "bun:test";
 // break other test files' drizzle-orm / event-bus imports. nws.ts only needs
 // the real logger from @kcb/engine; we intercept global fetch instead.
 
-import { NwsService, localDayStartUtc, type TodayObservations } from "./nws";
+import {
+  NwsService,
+  localDayStartUtc,
+  parseCliProduct,
+  type TodayObservations,
+  type CliReport,
+} from "./nws";
 
 const originalFetch = globalThis.fetch;
 
@@ -238,5 +244,273 @@ describe("NwsService.getTodayObservations", () => {
     const url = new URL(fx.getUrl());
     // Default America/New_York → EDT 04:00Z.
     expect(url.searchParams.get("start")).toBe("2026-06-15T04:00:00.000Z");
+  });
+});
+
+// ── CLI climate-product parser + fetch (N1 item 2) ─────────
+// win-rate-80-addendum-2026-06-05.md N1 item 2 / Finding 11: the NWS CLI
+// product is the LITERAL source Kalshi settles on — exact max/min, no ±1°F
+// interval-midpoint noise. Fixtures below mirror the real fixed-width format.
+
+/** A normal KNYC CLI for 2026-06-15: MAXIMUM 87 @ 3:24 PM, MINIMUM 66 @ 5:51 AM. */
+const CLI_NYC_NORMAL = `
+000
+CDUS41 KOKX 152130
+CLINYC
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE NEW YORK, NY
+524 PM EDT MON JUN 15 2026
+
+...................................
+
+...THE CENTRAL PARK NY CLIMATE SUMMARY FOR JUNE 15 2026...
+
+WEATHER ITEM   OBSERVED TIME   RECORD YEAR NORMAL DEPARTURE LAST
+                VALUE   (LST)  VALUE       VALUE  FROM      YEAR
+                                                  NORMAL
+...................................................................
+TEMPERATURE (F)
+ TODAY
+  MAXIMUM         87    324 PM  99    1973  80      7       85
+  MINIMUM         66    551 AM  50    1933  64      2       63
+  AVERAGE         77                        72      5       74
+`;
+
+/** A KMIA CLI for 2026-06-15 with MM (missing) max temperature. */
+const CLI_MIA_MISSING = `
+000
+CDUS42 KMFL 152200
+CLIMIA
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE MIAMI FL
+600 PM EDT MON JUN 15 2026
+
+...THE MIAMI FL CLIMATE SUMMARY FOR JUNE 15 2026...
+
+TEMPERATURE (F)
+ TODAY
+  MAXIMUM         MM    MM      96    2020  90      M       89
+  MINIMUM         78    430 AM  64    1945  77      1       79
+`;
+
+/** A KNYC CLI for the PREVIOUS day (2026-06-14) — same site, different date. */
+const CLI_NYC_PRIORDAY = `
+000
+CDUS41 KOKX 142130
+CLINYC
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE NEW YORK, NY
+
+...THE CENTRAL PARK NY CLIMATE SUMMARY FOR JUNE 14 2026...
+
+TEMPERATURE (F)
+ TODAY
+  MAXIMUM         82    301 PM  99    1973  80      2       79
+  MINIMUM         61    509 AM  50    1933  63     -2       60
+`;
+
+describe("parseCliProduct", () => {
+  test("normal product → exact max 87 / min 66 + reportDate", () => {
+    const r = parseCliProduct(CLI_NYC_NORMAL);
+    expect(r.maxTempF).toBe(87);
+    expect(r.minTempF).toBe(66);
+    expect(r.reportDate).toBe("2026-06-15");
+  });
+
+  test("MM missing max → null max, real min; reportDate still parsed", () => {
+    const r = parseCliProduct(CLI_MIA_MISSING);
+    expect(r.maxTempF).toBeNull();
+    expect(r.minTempF).toBe(78);
+    expect(r.reportDate).toBe("2026-06-15");
+  });
+
+  test("reports the product's own date (caller decides if it matches target)", () => {
+    const r = parseCliProduct(CLI_NYC_PRIORDAY);
+    expect(r.reportDate).toBe("2026-06-14");
+    expect(r.maxTempF).toBe(82);
+    expect(r.minTempF).toBe(61);
+  });
+
+  test("no summary line → reportDate null (still tries temps)", () => {
+    const r = parseCliProduct("TEMPERATURE (F)\n  MAXIMUM   77   2:00 PM\n  MINIMUM   55   6:00 AM\n");
+    expect(r.reportDate).toBeNull();
+    expect(r.maxTempF).toBe(77);
+    expect(r.minTempF).toBe(55);
+  });
+
+  test("negative temperature is parsed (cold climate day)", () => {
+    const txt = "...CLIMATE SUMMARY FOR JANUARY 5 2026...\nTEMPERATURE (F)\n  MAXIMUM   12   1:00 PM\n  MINIMUM   -4   6:00 AM\n";
+    const r = parseCliProduct(txt);
+    expect(r.maxTempF).toBe(12);
+    expect(r.minTempF).toBe(-4);
+  });
+});
+
+// ── getCliReport (fetch mocked) ────────────────────────────
+// Mocks the two-stage fetch: the office product list, then per-id product
+// texts. Each call inspects the requested URL to decide what to return.
+
+/** A CLI list response (NWS `@graph` array, newest first). */
+function cliListResponse(
+  entries: Array<{ id: string; issuanceTime: string }>,
+): Response {
+  return new Response(JSON.stringify({ "@graph": entries }), { status: 200 });
+}
+
+/** A single CLI product response (`productText` field). */
+function cliProductResponse(id: string, productText: string, issuanceTime: string): Response {
+  return new Response(
+    JSON.stringify({ "@id": id, productText, issuanceTime }),
+    { status: 200 },
+  );
+}
+
+/**
+ * Install a fetch mock routing CLI list + product-text URLs. `texts` maps a
+ * product id → its raw text. Records how many fetches happened.
+ */
+function mockCliFetch(
+  entries: Array<{ id: string; issuanceTime: string }>,
+  texts: Record<string, string>,
+): { calls: () => number } {
+  let calls = 0;
+  globalThis.fetch = mock((url: string) => {
+    calls++;
+    if (url.includes("/products/types/CLI/locations/")) {
+      return Promise.resolve(cliListResponse(entries));
+    }
+    // /products/{id}
+    const id = url.split("/products/").pop()!;
+    const text = texts[id];
+    if (text == null) {
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    }
+    const issuance = entries.find((e) => e.id === id)?.issuanceTime ?? "";
+    return Promise.resolve(cliProductResponse(id, text, issuance));
+  }) as any;
+  return { calls: () => calls };
+}
+
+describe("NwsService.getCliReport", () => {
+  beforeEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("returns the matching site + date report (exact max/min)", async () => {
+    const svc = new NwsService();
+    mockCliFetch(
+      [
+        { id: "nyc-15", issuanceTime: "2026-06-15T21:30:00Z" },
+        { id: "nyc-14", issuanceTime: "2026-06-14T21:30:00Z" },
+      ],
+      { "nyc-15": CLI_NYC_NORMAL, "nyc-14": CLI_NYC_PRIORDAY },
+    );
+
+    const r = (await svc.getCliReport("KNYC", "2026-06-15")) as CliReport;
+    expect(r).not.toBeNull();
+    expect(r.maxTempF).toBe(87);
+    expect(r.minTempF).toBe(66);
+    expect(r.reportDate).toBe("2026-06-15");
+    expect(r.issuedAt).toBe("2026-06-15T21:30:00Z");
+  });
+
+  test("picks the right date when an earlier-day product is newest in the list", async () => {
+    const svc = new NwsService();
+    // List ordered newest-first contains both days; ask for the older day.
+    mockCliFetch(
+      [
+        { id: "nyc-15", issuanceTime: "2026-06-15T21:30:00Z" },
+        { id: "nyc-14", issuanceTime: "2026-06-14T21:30:00Z" },
+      ],
+      { "nyc-15": CLI_NYC_NORMAL, "nyc-14": CLI_NYC_PRIORDAY },
+    );
+
+    const r = (await svc.getCliReport("KNYC", "2026-06-14")) as CliReport;
+    expect(r.reportDate).toBe("2026-06-14");
+    expect(r.maxTempF).toBe(82);
+  });
+
+  test("filters by CLI site code — ignores another site's product for the same office", async () => {
+    const svc = new NwsService();
+    // OKX office list also contains a non-NYC site; only CLINYC should match.
+    const cliBdrOtherSite = CLI_NYC_NORMAL.replace("CLINYC", "CLIBDR").replace(
+      "87",
+      "99",
+    );
+    mockCliFetch(
+      [
+        { id: "bdr-15", issuanceTime: "2026-06-15T21:35:00Z" }, // newer, wrong site
+        { id: "nyc-15", issuanceTime: "2026-06-15T21:30:00Z" },
+      ],
+      { "bdr-15": cliBdrOtherSite, "nyc-15": CLI_NYC_NORMAL },
+    );
+
+    const r = (await svc.getCliReport("KNYC", "2026-06-15")) as CliReport;
+    expect(r.maxTempF).toBe(87); // KNYC's value, not the 99 from CLIBDR
+  });
+
+  test("MM missing max surfaces as maxTempF null", async () => {
+    const svc = new NwsService();
+    mockCliFetch(
+      [{ id: "mia-15", issuanceTime: "2026-06-15T22:00:00Z" }],
+      { "mia-15": CLI_MIA_MISSING },
+    );
+
+    const r = (await svc.getCliReport("KMIA", "2026-06-15")) as CliReport;
+    expect(r.maxTempF).toBeNull();
+    expect(r.minTempF).toBe(78);
+  });
+
+  test("returns null when no product covers the target date", async () => {
+    const svc = new NwsService();
+    mockCliFetch(
+      [{ id: "nyc-14", issuanceTime: "2026-06-14T21:30:00Z" }],
+      { "nyc-14": CLI_NYC_PRIORDAY },
+    );
+
+    const r = await svc.getCliReport("KNYC", "2026-06-15");
+    expect(r).toBeNull();
+  });
+
+  test("returns null (not throw) when the product-list API fails", async () => {
+    const svc = new NwsService();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("rate limited", { status: 429 })),
+    ) as any;
+
+    const r = await svc.getCliReport("KNYC", "2026-06-15");
+    expect(r).toBeNull();
+  });
+
+  test("returns null (not throw) when fetch rejects", async () => {
+    const svc = new NwsService();
+    globalThis.fetch = mock(() => Promise.reject(new Error("network down"))) as any;
+    const r = await svc.getCliReport("KNYC", "2026-06-15");
+    expect(r).toBeNull();
+  });
+
+  test("unknown station → null without any fetch", async () => {
+    const svc = new NwsService();
+    globalThis.fetch = mock(() => Promise.reject(new Error("should not fetch"))) as any;
+    const r = await svc.getCliReport("KZZZ", "2026-06-15");
+    expect(r).toBeNull();
+  });
+
+  test("memoizes by (station, date) — second call does not refetch", async () => {
+    const svc = new NwsService();
+    const fx = mockCliFetch(
+      [{ id: "nyc-15", issuanceTime: "2026-06-15T21:30:00Z" }],
+      { "nyc-15": CLI_NYC_NORMAL },
+    );
+
+    const a = (await svc.getCliReport("KNYC", "2026-06-15")) as CliReport;
+    const callsAfterFirst = fx.calls();
+    const b = (await svc.getCliReport("KNYC", "2026-06-15")) as CliReport;
+    expect(b.maxTempF).toBe(a.maxTempF);
+    // No additional fetches on the cached second call.
+    expect(fx.calls()).toBe(callsAfterFirst);
   });
 });

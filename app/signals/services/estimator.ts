@@ -8,7 +8,14 @@ const log = createLogger("estimator");
 export interface EstimateResult {
   /** Estimated probability of YES (0-1) */
   probability: number;
-  /** Confidence in the estimate (0-1), based on ensemble spread and bias data quality */
+  /**
+   * Confidence in the estimate (0-1) — win-rate-80 plan #6. A weighted blend of
+   * spread (0.30), bias-sample (0.20), ensemble-size (0.15) and market-agreement
+   * (0.35, where agreement = `1 − |probability − marketPrice|`, neutral 0.5 when
+   * no price). Unlike the legacy data-presence score this separates good from bad
+   * signals: perfect data + perfect agreement → ~1.0; perfect data + 25pp
+   * disagreement → ~0.91. See {@link computeConfidence}.
+   */
   confidence: number;
   /** Number of ensemble members used */
   ensembleSize: number;
@@ -59,6 +66,20 @@ export interface ReasoningTrace {
   empiricalSigmaWeight: number | null;
   /** Sigma floor that clipped the blend (plan #4), or null when it didn't bind. */
   sigmaFloorApplied?: number | null;
+  /**
+   * Decomposition of the `confidence` score (win-rate-80 plan #6) so `explain`
+   * can show why a signal scored the way it did. Each entry is the post-divisor
+   * factor in [0, 1] BEFORE its weight is applied; the weighted sum
+   * (`spread·0.30 + bias·0.20 + ensemble·0.15 + marketAgreement·0.35`) equals
+   * `confidence`. `marketAgreement` is 0.5 (neutral) when no market price was
+   * supplied. null on legacy callers / paths that don't populate it.
+   */
+  confidenceFactors?: {
+    spread: number;
+    bias: number;
+    ensemble: number;
+    marketAgreement: number;
+  } | null;
   /**
    * Same-day observation adjustment applied. The base fields
    * (`observedTemp`/`sigmaBefore`/`sigmaAfter`/`meanShift`) keep their existing
@@ -411,7 +432,11 @@ export class ProbabilityEstimator {
       ? blendedProbability
       : Math.min(1 - floor, Math.max(floor, blendedProbability));
 
-    // Step 4: Compute confidence
+    // Step 4: Compute confidence (win-rate-80 plan #6). Reweighted from the
+    // legacy data-presence check to add a market-agreement factor: confidence
+    // now tracks whether the FINAL probability sits close to the (well-
+    // calibrated) market price, which is what actually predicts win-rate. See
+    // computeConfidence() for the weights + scale anchors.
     const spreadNorm = isPrecipCategory
       ? (corrMean > 0 ? corrStd / corrMean : corrStd)
       : sigmaUsed; // Use sigmaUsed (may be empirical) for confidence
@@ -421,8 +446,16 @@ export class ProbabilityEstimator {
       ? Math.min(1, biasCorrection.sampleSize / 30)
       : 0.5;
     const ensembleFactor = Math.min(1, ensembleValues.length / 120);
-
-    const confidence = (spreadFactor * 0.4 + biasFactor * 0.4 + ensembleFactor * 0.2);
+    // Market agreement uses the FINAL per-market probability vs the same price
+    // fed to the market-prior blend. 0.5 (neutral) when no price was supplied.
+    const marketAgreementFactor =
+      marketPrice != null ? 1 - Math.abs(probability - marketPrice) : 0.5;
+    const { confidence, factors: confidenceFactors } = computeConfidence(
+      spreadFactor,
+      biasFactor,
+      ensembleFactor,
+      marketAgreementFactor
+    );
 
     const reasoning: ReasoningTrace = {
       stationId: market.stationId,
@@ -439,6 +472,7 @@ export class ProbabilityEstimator {
       sigmaUsed,
       empiricalSigmaWeight,
       sigmaFloorApplied,
+      confidenceFactors,
       observationAdjustment: obsAdj,
       obsStale,
       membersInBracket,
@@ -725,7 +759,14 @@ export class ProbabilityEstimator {
       }
     }
 
-    // ── Step 6: Confidence — computed ONCE per event, identical for every market. ──
+    // ── Step 6: Shared confidence factors (win-rate-80 plan #6). ──
+    // spread/bias/ensemble derive from the SHARED event distribution, so they
+    // are computed ONCE here. The market-agreement factor is per-market (it
+    // depends on each bracket's final probability vs its own market price), so
+    // the final confidence is assembled per slot in Step 7 — the bracket where
+    // the model agrees with the market reads HIGHER confidence than the wing
+    // where it disagrees, instead of the old N2 behavior of one identical
+    // confidence across the whole event.
     const spreadNorm = isPrecipCategory
       ? (corrMean > 0 ? corrStd / corrMean : corrStd)
       : sigmaUsed;
@@ -733,7 +774,6 @@ export class ProbabilityEstimator {
     const spreadFactor = Math.max(0, 1 - spreadNorm / spreadDivisor);
     const biasFactor = biasCorrection ? Math.min(1, biasCorrection.sampleSize / 30) : 0.5;
     const ensembleFactor = Math.min(1, ensembleValues.length / 120);
-    const confidence = spreadFactor * 0.4 + biasFactor * 0.4 + ensembleFactor * 0.2;
 
     const finalSum = slots.reduce((s, x) => s + x.raw, 0);
 
@@ -754,6 +794,18 @@ export class ProbabilityEstimator {
 
     const results = new Map<string, EstimateResult>();
     for (const s of slots) {
+      // Per-market confidence (plan #6): shared spread/bias/ensemble + this
+      // bracket's own market-agreement. 0.5 (neutral) when this market is
+      // unpriced. probability is the FINAL per-market value (s.raw, post all
+      // blends/floors), marketPrice the same price fed to the market-prior blend.
+      const marketAgreementFactor =
+        s.marketPrice != null ? 1 - Math.abs(s.raw - s.marketPrice) : 0.5;
+      const { confidence, factors: confidenceFactors } = computeConfidence(
+        spreadFactor,
+        biasFactor,
+        ensembleFactor,
+        marketAgreementFactor
+      );
       const reasoning: ReasoningTrace = {
         stationId,
         targetDate: ref.targetDate || "unknown",
@@ -769,6 +821,7 @@ export class ProbabilityEstimator {
         sigmaUsed,
         empiricalSigmaWeight,
         sigmaFloorApplied,
+        confidenceFactors,
         observationAdjustment: obsAdj,
         obsStale,
         membersInBracket: s.membersInBracket,
@@ -898,6 +951,71 @@ const MAX_EMPIRICAL_SIGMA_WEIGHT = 0.7;
 /** Clamp a value into the [0, 1] probability/weight range. */
 export function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
+}
+
+/**
+ * Confidence-factor weights (win-rate-80 plan #6). Sum to exactly 1.0 so the
+ * weighted blend stays in [0, 1]. Re-weighted from the legacy
+ * `spread·0.4 + bias·0.4 + ensemble·0.2` "data-presence" check: the old score
+ * read ~0.93 for any signal that merely HAD a bias row and a full ensemble, so
+ * the historical 0.80–0.95 band was a death zone (11–34% win) barely separable
+ * from the only-profitable ≥0.95 band (41%). Shifting 0.35 of the mass onto
+ * market-agreement makes confidence track *whether the model agrees with the
+ * well-calibrated market* — the dominant predictor of win-rate — instead of
+ * data quantity.
+ */
+const CONFIDENCE_WEIGHTS = {
+  spread: 0.3,
+  bias: 0.2,
+  ensemble: 0.15,
+  marketAgreement: 0.35,
+} as const;
+
+/**
+ * Compute the confidence score (win-rate-80 plan #6) from its four factors.
+ *
+ * Confidence is a *per-market* "is the model likely right here?" score, NOT a
+ * data-presence check. Factors (each pre-weight, in [0, 1]):
+ *  - **spread**     — tightness of the sigma used (existing math). weight 0.30
+ *  - **bias**       — bias-correction sample size / 30 (existing math). weight 0.20
+ *  - **ensemble**   — ensemble member count / 120 (existing math). weight 0.15
+ *  - **marketAgreement** — `1 − |probability − marketPrice|`, i.e. how close the
+ *    FINAL per-market probability sits to the market price (the same price fed
+ *    to the market-prior blend). `0.5` (neutral) when no market price is
+ *    available. weight 0.35
+ *
+ * Scale anchors (so the `minConfidence`=0.80 gate and `highConfidenceThreshold`
+ * =0.95 sizing tier now MEAN something):
+ *  - perfect data (spread/bias/ensemble = 1) + perfect agreement (= 1) → **1.0**.
+ *  - perfect data + 25pp disagreement (agreement 0.75) →
+ *    0.30 + 0.20 + 0.15 + 0.35·0.75 = **0.9125** (≈0.91). A 25pp-off signal can
+ *    no longer reach the 0.95 tier no matter how clean its data is.
+ *  - the 0.95 tier therefore now requires strong data AND ≤ ~14pp disagreement
+ *    (with perfect spread/bias/ensemble, 0.95 ⇒ agreement ≥ (0.95−0.65)/0.35 ≈
+ *    0.857 ⇒ |p − marketPrice| ≤ ~0.143).
+ *
+ * @param marketAgreement `1 − |probability − marketPrice|`, or 0.5 when no price.
+ */
+export function computeConfidence(
+  spreadFactor: number,
+  biasFactor: number,
+  ensembleFactor: number,
+  marketAgreement: number
+): { confidence: number; factors: NonNullable<ReasoningTrace["confidenceFactors"]> } {
+  const confidence =
+    spreadFactor * CONFIDENCE_WEIGHTS.spread +
+    biasFactor * CONFIDENCE_WEIGHTS.bias +
+    ensembleFactor * CONFIDENCE_WEIGHTS.ensemble +
+    marketAgreement * CONFIDENCE_WEIGHTS.marketAgreement;
+  return {
+    confidence,
+    factors: {
+      spread: spreadFactor,
+      bias: biasFactor,
+      ensemble: ensembleFactor,
+      marketAgreement,
+    },
+  };
 }
 
 export function mean(values: number[]): number {

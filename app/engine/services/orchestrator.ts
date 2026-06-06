@@ -1,4 +1,4 @@
-import { getDb, markets, signals, positions, balanceHistory, eq, and, sql, desc } from "@kcb/db";
+import { getDb, markets, signals, positions, orders, balanceHistory, eq, and, sql, desc } from "@kcb/db";
 import type { Market } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, KalshiFeed } from "@kcb/kalshi-client";
@@ -350,7 +350,11 @@ export async function initOrchestrator(): Promise<void> {
       const stationSurcharge = market.stationId
         ? (config.bot.stationEdgeSurcharge[market.stationId] ?? 0)
         : 0;
-      const edgeThreshold = baseThreshold + stationSurcharge;
+      // Effective threshold = adaptive base + per-station surcharge. The
+      // ultra-sniper discount (plan #8) is applied below, once the forecast
+      // horizon and source mix are known.
+      const preDiscountThreshold = baseThreshold + stationSurcharge;
+      let edgeThreshold = preDiscountThreshold;
 
       // Determine recommendation
       let recommendation:
@@ -390,6 +394,30 @@ export async function initOrchestrator(): Promise<void> {
         sniperHorizon > 0 &&
         forecastHorizonHours != null &&
         forecastHorizonHours <= sniperHorizon;
+
+      // Ultra-sniper discount (win-rate-80 plan #8): inside the final
+      // ultraSniperHorizonHours before close, HRRR (hourly, 3km) + the obs
+      // running-max anchor make estimates sharpest, so the standard threshold
+      // (tuned for noisier horizons) over-suppresses entries. Discount the
+      // effective threshold only when HRRR is actually in the pool AND the obs
+      // anchor is live (fresh running max) for same-day high_temp. Ships dark
+      // (ultraSniperHorizonHours default 0). The signal row's edgeThreshold
+      // stores this DISCOUNTED value (it already records the effective bar).
+      const obsAnchorActive =
+        market.category === "high_temp" &&
+        estimate.reasoning.observationAdjustment?.runningMax != null &&
+        !estimate.reasoning.obsStale;
+      const ultraSniper = ultraSniperThreshold({
+        baseThreshold: preDiscountThreshold,
+        forecastHorizonHours,
+        config: {
+          ultraSniperHorizonHours: config.bot.ultraSniperHorizonHours,
+          ultraSniperEdgeDiscount: config.bot.ultraSniperEdgeDiscount,
+        },
+        hrrrMembers: sourceMix["hrrr"] ?? 0,
+        obsAnchorActive,
+      });
+      edgeThreshold = ultraSniper.threshold;
 
       // Tail-market entry gate. Tails historically bled on mid-priced contracts
       // (audit window: 11% win, -$38 across 9 resolved trades, losses spanning
@@ -461,10 +489,17 @@ export async function initOrchestrator(): Promise<void> {
         // reason as the HRRR gate: their information source is the market itself.
         skipReason = obsSkipReason;
       } else if (edge < edgeThreshold) {
+        // The ultra-sniper discount (plan #8) lowers the bar inside the final
+        // hours before close; surface it so attribution can see why a thin edge
+        // still cleared (or didn't). When the discount applies, edgeThreshold is
+        // the post-discount value, so we annotate "(ultra-sniper −N¢)".
+        const ultraSuffix = ultraSniper.applied
+          ? ` (ultra-sniper −${(config.bot.ultraSniperEdgeDiscount * 100).toFixed(0)}¢)`
+          : "";
         skipReason =
-          stationSurcharge > 0
+          stationSurcharge > 0 && !ultraSniper.applied
             ? `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(baseThreshold * 100).toFixed(1)}¢ + ${(stationSurcharge * 100).toFixed(0)}¢ ${market.stationId} surcharge`
-            : `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢`;
+            : `edge ${(edge * 100).toFixed(1)}¢ < threshold ${(edgeThreshold * 100).toFixed(1)}¢${ultraSuffix}`;
       } else if (estimate.confidence < config.bot.minConfidence) {
         skipReason = `confidence ${estimate.confidence.toFixed(2)} < ${config.bot.minConfidence}`;
       } else if (!tailGate.allowed) {
@@ -917,6 +952,54 @@ export function obsGate(
     return `obs stale (${Math.round(age)}m > ${maxAgeMinutes}m) in sniper window`;
   }
   return null;
+}
+
+/** Hard floor on the discounted edge threshold — never trade a sub-5¢ edge. */
+const ULTRA_SNIPER_THRESHOLD_FLOOR = 0.05;
+
+/**
+ * Effective edge threshold after the ultra-sniper discount (plan #8). Inside
+ * the final ultraSniperHorizonHours before close, HRRR (hourly, 3km) + the
+ * obs running-max anchor make estimates sharpest — the standard threshold,
+ * tuned for noisier horizons, over-suppresses entries exactly when the
+ * information edge peaks. Discount applies ONLY when:
+ *   - ultraSniperHorizonHours > 0 (ships dark),
+ *   - the market is within that horizon,
+ *   - HRRR is actually in the pool (sourceMix.hrrr > 0), and
+ *   - the obs anchor is active (runningMax present + fresh) — for high_temp.
+ * The discounted threshold floors at 0.05 (never trade sub-5¢ edges).
+ *
+ * Pure function so it's unit-testable in isolation like {@link selectArgmaxPerEvent};
+ * the orchestrator passes the result's `threshold` into the Phase 3 ladder and
+ * uses `applied` to annotate the skip-reason + persisted `edgeThreshold`.
+ *
+ * @returns `{threshold: max(0.05, base − discount), applied: true}` when ALL
+ *   conditions hold; otherwise `{threshold: base, applied: false}`.
+ */
+export function ultraSniperThreshold(args: {
+  baseThreshold: number;
+  forecastHorizonHours: number | undefined;
+  config: { ultraSniperHorizonHours: number; ultraSniperEdgeDiscount: number };
+  hrrrMembers: number; // sourceMix.hrrr ?? 0
+  obsAnchorActive: boolean; // high_temp: fresh runningMax present; other categories: false
+}): { threshold: number; applied: boolean } {
+  const { baseThreshold, forecastHorizonHours, config, hrrrMembers, obsAnchorActive } = args;
+  const horizon = config.ultraSniperHorizonHours;
+
+  const inWindow =
+    horizon > 0 &&
+    forecastHorizonHours != null &&
+    forecastHorizonHours <= horizon;
+
+  if (!inWindow || hrrrMembers <= 0 || !obsAnchorActive) {
+    return { threshold: baseThreshold, applied: false };
+  }
+
+  const discounted = Math.max(
+    ULTRA_SNIPER_THRESHOLD_FLOOR,
+    baseThreshold - config.ultraSniperEdgeDiscount
+  );
+  return { threshold: discounted, applied: true };
 }
 
 export { startLoop as start, stopLoop as stop, getLoopState as getState, stopFeed };

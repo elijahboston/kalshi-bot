@@ -16,8 +16,8 @@ import {
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi-client";
-import { persistAdaptiveThresholds } from "@kcb/signals";
-import { EnsembleService } from "@kcb/data";
+import { persistAdaptiveThresholds, updateStationHealthGate } from "@kcb/signals";
+import { EnsembleService, NwsService } from "@kcb/data";
 import { bus, createLogger } from "../events";
 import { uuid, now } from "@kcb/shared";
 
@@ -127,14 +127,21 @@ function stationTz(stationId: string): string {
 export class ReconciliationService {
   private kalshi: KalshiClient;
   private ensembleService: EnsembleService;
+  private nwsService: NwsService;
   /** Timestamp gates to rate-limit periodic background work. */
   private lastMultiHorizonWarmAt = 0;
   private lastActualsBackfillAt = 0;
   private lastGroundTruthHealthAt = 0;
+  private lastStationHealthAt = 0;
 
-  constructor(kalshiClient?: KalshiClient, ensembleService?: EnsembleService) {
+  constructor(
+    kalshiClient?: KalshiClient,
+    ensembleService?: EnsembleService,
+    nwsService?: NwsService,
+  ) {
     this.kalshi = kalshiClient || new KalshiClient();
     this.ensembleService = ensembleService || new EnsembleService();
+    this.nwsService = nwsService || new NwsService();
   }
 
   /** Run all reconciliation steps in sequence */
@@ -154,6 +161,7 @@ export class ReconciliationService {
       await this.warmMultiHorizonForecasts();
       await this.backfillHistoricalForecastActuals();
       await this.checkGroundTruthHealth();
+      await this.runStationHealthGate();
       await this.snapshotBalance();
     } catch (err) {
       log.error(
@@ -1096,12 +1104,12 @@ export class ReconciliationService {
   /**
    * Try to backfill the actual observed value for a resolved market.
    *
-   * Priority (win-rate-80-addendum-2026-06-05.md N1): Kalshi settlement is the
-   * authoritative truth. We derive the official high from the settled YES
-   * bracket and store its center with `actual_source = 'settlement'`. Only when
-   * no YES settlement is available do we fall back to the NWS-observation path
-   * (`actual_source = 'obs_max'`), which is interval-biased and disagreed with
-   * settlement on ~70% of days — see `deriveSettlementActual` / Finding 1.
+   * Priority (win-rate-80-addendum-2026-06-05.md N1 item 2 / Finding 11), via
+   * `resolveActualValue`: the NWS CLI climate report (`actual_source = 'cli'`,
+   * the exact settlement value) → the settled YES bracket center
+   * (`'settlement'`, unbiased but interval-censored ±1°F) → the NWS-observation
+   * fallback (`'obs_max'`, interval-biased; disagreed with settlement on ~70% of
+   * days — see Finding 1).
    *
    * When cached forecast rows exist, their `actual_value`/`actual_source` are
    * filled. When no row exists (cache evicted, DB reset, retention gap), a
@@ -1176,17 +1184,33 @@ export class ReconciliationService {
   }
 
   /**
-   * Resolve the authoritative actual value for a station/date/category, with
-   * settlement-derived truth taking priority over the NWS-observation fallback.
-   * Returns `{ value, source }` or null if neither path can produce a number.
-   * Centralizes the N1 priority so every backfill caller behaves identically.
+   * Resolve the authoritative actual value for a station/date/category.
+   *
+   * Priority (win-rate-80-addendum-2026-06-05.md N1 item 2 / Finding 11):
+   *   1. NWS CLI report — the LITERAL settlement source; an EXACT value.
+   *   2. Kalshi settlement interval — unbiased but interval-censored, so its
+   *      midpoint carries ±1°F uniform noise (σ≈0.58°F) on the 2°F brackets.
+   *   3. obs_max — max/min of NWS hourly obs (interval-biased; disagreed with
+   *      settlement ~70% of days).
+   * Returns `{ value, source }` or null if no path produces a number.
+   * Centralizes the priority so every backfill caller behaves identically.
    */
   private async resolveActualValue(
     stationId: string,
     targetDate: string,
     category: string
-  ): Promise<{ value: number; source: "settlement" | "obs_max" } | null> {
-    // 1. Primary: Kalshi settlement (interval-censored but unbiased).
+  ): Promise<{ value: number; source: "cli" | "settlement" | "obs_max" } | null> {
+    // 1. Primary: official NWS CLI climate report (exact settlement value).
+    //    Only the temperature categories have a CLI max/min; accept only a
+    //    non-null reading for the requested category.
+    if (category === "high_temp" || category === "low_temp") {
+      const cli = await this.nwsService.getCliReport(stationId, targetDate);
+      const cliValue =
+        category === "high_temp" ? cli?.maxTempF : cli?.minTempF;
+      if (cliValue != null) return { value: cliValue, source: "cli" };
+    }
+
+    // 2. Kalshi settlement (interval-censored but unbiased).
     const settled = await this.deriveSettlementActual(
       stationId,
       targetDate,
@@ -1194,7 +1218,7 @@ export class ReconciliationService {
     );
     if (settled != null) return settled;
 
-    // 2. Fallback: max/min of NWS hourly observations over the local day.
+    // 3. Fallback: max/min of NWS hourly observations over the local day.
     const obs = await this.fetchNwsActualValue(stationId, targetDate, category);
     if (obs != null) return { value: obs, source: "obs_max" };
 
@@ -1348,7 +1372,7 @@ export class ReconciliationService {
     targetDate: string,
     category: string,
     actual: number,
-    actualSource: "settlement" | "obs_max" = "obs_max"
+    actualSource: "cli" | "settlement" | "obs_max" = "obs_max"
   ): Promise<boolean> {
     const db = getDb();
 
@@ -1525,6 +1549,35 @@ export class ReconciliationService {
    *
    * Rate-limited to once per hour (same pattern as warmMultiHorizonForecasts).
    */
+  /**
+   * Run the N9 auto station-health gate (addendum N9). Rolling settled win
+   * rates per station disable losers below 45% and re-enable above 55%
+   * (hysteresis), writing the `disabled_stations` runtime row that
+   * `evaluateEntryGates` consumes. Confirmation trades are excluded from the
+   * rates inside the gate itself. Rate-limited to once per hour.
+   */
+  async runStationHealthGate(): Promise<void> {
+    const HOUR_MS = 60 * 60 * 1000;
+    if (Date.now() - this.lastStationHealthAt < HOUR_MS) return;
+    this.lastStationHealthAt = Date.now();
+
+    try {
+      const decisions = await updateStationHealthGate();
+      const acted = decisions.filter((d) => d.action !== "hold");
+      if (acted.length > 0) {
+        log.info(
+          `station health gate: ${acted
+            .map((d) => `${d.stationId} ${d.action} (${d.reason})`)
+            .join("; ")}`
+        );
+      }
+    } catch (err) {
+      log.warn(
+        `station health gate failed: ${err instanceof Error ? err.message : err}`
+      );
+    }
+  }
+
   async checkGroundTruthHealth(): Promise<void> {
     const HOUR_MS = 60 * 60 * 1000;
     if (Date.now() - this.lastGroundTruthHealthAt < HOUR_MS) return;

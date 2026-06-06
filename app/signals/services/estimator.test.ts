@@ -10,6 +10,8 @@ import {
   medianRegularBracketWidth,
   cdfProbForMarket,
   countMembersInMarket,
+  computeConfidence,
+  clamp01,
 } from "./estimator";
 import { runMigrations, getDb, calibration, stationBias, markets } from "@kcb/db";
 import { getConfig } from "@kcb/config";
@@ -524,6 +526,115 @@ describe("ProbabilityEstimator — market prior blend (adaptive ramp)", () => {
     const withoutMix = await estimator.estimate(makeMarket(), ensemble);
     expect(withoutMix.reasoning.sourceMix).toBeNull();
     expect(withMix.probability).toBeCloseTo(withoutMix.probability, 10);
+  });
+});
+
+describe("ProbabilityEstimator — confidence recalibration (plan #6)", () => {
+  const original = {
+    marketPriorWeight: getConfig().bot.marketPriorWeight,
+    historicalPriorWeight: getConfig().bot.historicalPriorWeight,
+  };
+
+  // Pin the market-prior blend OFF so a supplied marketPrice moves ONLY the
+  // confidence agreement factor, not the returned probability — isolating the
+  // agreement math from the blend that also consumes the price.
+  beforeEach(() => {
+    getConfig().bot.marketPriorWeight = 0;
+    getConfig().bot.historicalPriorWeight = 0;
+  });
+
+  afterEach(() => {
+    Object.assign(getConfig().bot, original);
+  });
+
+  test("agreement factor: marketPrice == probability lifts confidence by ≈ 0.35×0.25 over a 25pp-apart case", async () => {
+    const estimator = new ProbabilityEstimator();
+    // A centered ensemble so the bracket probability is a stable, middling value.
+    const ensemble = Array.from({ length: 60 }, (_, i) => 29.5 + (i % 6) * 0.25); // ~30-31 centered
+    const market = makeMarket();
+
+    // Learn the model's probability for this exact configuration.
+    const baseline = await estimator.estimate(market, ensemble);
+    const p = baseline.probability;
+
+    // Case A: market price == probability → perfect agreement (factor ≈ 1.0).
+    const agree = await estimator.estimate(market, ensemble, undefined, p);
+    // Case B: market price 0.25 away → agreement factor ≈ 0.75.
+    const disagreePrice = clamp01(p + 0.25);
+    const disagree = await estimator.estimate(market, ensemble, undefined, disagreePrice);
+
+    // Probability is identical across all three (market blend is off).
+    expect(agree.probability).toBeCloseTo(p, 9);
+    expect(disagree.probability).toBeCloseTo(p, 9);
+
+    // The agreement factors are ~1.0 and ~0.75 respectively.
+    expect(agree.reasoning.confidenceFactors!.marketAgreement).toBeCloseTo(1, 9);
+    const actualGap = Math.abs(p - disagreePrice); // ≈ 0.25 (exact unless clamped)
+    expect(disagree.reasoning.confidenceFactors!.marketAgreement).toBeCloseTo(1 - actualGap, 9);
+
+    // Confidence delta is exactly the 0.35-weighted agreement delta.
+    expect(agree.confidence - disagree.confidence).toBeCloseTo(0.35 * actualGap, 9);
+    // …and that is ≈ 0.35 × 0.25 for the nominal 25pp-apart case.
+    expect(agree.confidence - disagree.confidence).toBeCloseTo(0.35 * 0.25, 6);
+  });
+
+  test("no marketPrice → neutral 0.5 agreement; confidence sits between the agree and disagree cases", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = Array.from({ length: 60 }, (_, i) => 29.5 + (i % 6) * 0.25);
+    const market = makeMarket();
+
+    const baseline = await estimator.estimate(market, ensemble);
+    const p = baseline.probability;
+
+    const neutral = await estimator.estimate(market, ensemble); // no price → agreement 0.5
+    const agree = await estimator.estimate(market, ensemble, undefined, p); // agreement ≈ 1.0
+    // Maximal disagreement: the endpoint (0 or 1) farthest from the model p, so
+    // the gap is max(p, 1−p) ≥ 0.5 → agreement = 1 − that ≤ 0.5 regardless of p.
+    const farPrice = p < 0.5 ? 1 : 0;
+    const disagree = await estimator.estimate(market, ensemble, undefined, farPrice);
+
+    expect(neutral.reasoning.confidenceFactors!.marketAgreement).toBe(0.5);
+    expect(agree.reasoning.confidenceFactors!.marketAgreement).toBeCloseTo(1, 9);
+    expect(disagree.reasoning.confidenceFactors!.marketAgreement).toBeLessThanOrEqual(0.5);
+    // Neutral sits strictly between the perfect-agreement and the strong-
+    // disagreement cases — agreement 0.5 is between ~1.0 and < 0.5.
+    expect(neutral.confidence).toBeLessThan(agree.confidence);
+    expect(neutral.confidence).toBeGreaterThan(disagree.confidence);
+  });
+
+  test("trace decomposition is populated and its weighted sum equals confidence", async () => {
+    const estimator = new ProbabilityEstimator();
+    const ensemble = [28, 29, 30, 30, 31, 32, 33];
+    const result = await estimator.estimate(makeMarket(), ensemble, undefined, 0.45);
+
+    const f = result.reasoning.confidenceFactors!;
+    expect(f).not.toBeNull();
+    // Each factor is a valid [0,1] value.
+    for (const v of [f.spread, f.bias, f.ensemble, f.marketAgreement]) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+    // Weighted sum with the documented weights reproduces confidence exactly.
+    const recomposed =
+      f.spread * 0.3 + f.bias * 0.2 + f.ensemble * 0.15 + f.marketAgreement * 0.35;
+    expect(recomposed).toBeCloseTo(result.confidence, 9);
+  });
+
+  test("confidence weights sum to 1.0 (computeConfidence with all-ones factors → 1.0)", () => {
+    // All four factors = 1 → confidence must be exactly the weight sum, which the
+    // formula requires to be 1.0. This pins the weights as a probability-like blend.
+    const { confidence, factors } = computeConfidence(1, 1, 1, 1);
+    expect(confidence).toBeCloseTo(1, 12);
+    // And the trace factors echo the inputs.
+    expect(factors).toEqual({ spread: 1, bias: 1, ensemble: 1, marketAgreement: 1 });
+  });
+
+  test("scale anchor: perfect data + 25pp disagreement → confidence ≈ 0.9125", () => {
+    // perfect spread/bias/ensemble (=1) + agreement 0.75 (25pp off):
+    //   0.30 + 0.20 + 0.15 + 0.35×0.75 = 0.9125. Pins the documented anchor that
+    //   the 0.95 sizing tier is unreachable at 25pp disagreement.
+    const { confidence } = computeConfidence(1, 1, 1, 0.75);
+    expect(confidence).toBeCloseTo(0.9125, 9);
   });
 });
 
@@ -1743,7 +1854,11 @@ describe("ProbabilityEstimator — estimateEvent (addendum N2)", () => {
     expect(coverage).toBeLessThanOrEqual(1 + 1e-9);
   });
 
-  test("confidence identical across the event's results", async () => {
+  test("no market prices → confidence identical across the event (neutral 0.5 agreement)", async () => {
+    // Plan #6: with no marketPrices every market gets the neutral 0.5 agreement
+    // factor, so the shared spread/bias/ensemble factors fully determine a single
+    // uniform confidence across the event (the original N2 behavior, now only for
+    // the unpriced case).
     const estimator = new ProbabilityEstimator();
     const event = makeEvent({ lo: 78, n: 6 });
     const ensemble = [78, 79, 80, 80, 81, 81, 82, 82, 83, 84];
@@ -1752,6 +1867,57 @@ describe("ProbabilityEstimator — estimateEvent (addendum N2)", () => {
     const confidences = [...results.values()].map((r) => r.confidence);
     const first = confidences[0]!;
     for (const c of confidences) expect(c).toBe(first);
+    // Every market reports the neutral market-agreement factor.
+    for (const r of results.values()) {
+      expect(r.reasoning.confidenceFactors!.marketAgreement).toBe(0.5);
+    }
+  });
+
+  test("per-market confidence varies with agreement: shared factors identical, agreement differs (plan #6)", async () => {
+    // The core plan-#6 change: confidence must separate good from bad signals
+    // WITHIN an event. The bracket whose final probability AGREES with its market
+    // price reads higher confidence than the wing where the model DISAGREES.
+    // marketPriorWeight stays 0 (beforeEach default) so prices move ONLY the
+    // agreement factor, not s.raw — isolating the effect cleanly.
+    const estimator = new ProbabilityEstimator();
+    const event = makeEvent({ lo: 78, n: 6 });
+    // Centered ~81 → peak probability sits on the 80-81 / 81-82 brackets; the
+    // tails carry almost no model probability.
+    const ensemble = [78, 79, 80, 80, 81, 81, 82, 82, 83, 84];
+
+    // Price the central bracket to AGREE with the model and the lower tail to
+    // DISAGREE (model ~0 there, price 0.90 → ~0.90 disagreement).
+    const peakTicker = event[3]!.ticker; // 80-81 bracket
+    const lowerTailTicker = event[0]!.ticker; // < 78
+    const prices = new Map<string, number>();
+
+    // First pass to learn the model's probability on the peak bracket, then set
+    // its price equal to that → near-perfect agreement.
+    const probe = await estimator.estimateEvent(event, ensemble);
+    const peakProb = probe.get(peakTicker)!.probability;
+    prices.set(peakTicker, peakProb); // agreement ≈ 1.0
+    prices.set(lowerTailTicker, 0.9); // agreement ≈ 1 − 0.9 ≈ 0.1
+
+    const results = await estimator.estimateEvent(event, ensemble, undefined, prices);
+
+    const peak = results.get(peakTicker)!;
+    const tail = results.get(lowerTailTicker)!;
+
+    // Shared spread/bias/ensemble factors are identical across the event…
+    expect(peak.reasoning.confidenceFactors!.spread).toBe(tail.reasoning.confidenceFactors!.spread);
+    expect(peak.reasoning.confidenceFactors!.bias).toBe(tail.reasoning.confidenceFactors!.bias);
+    expect(peak.reasoning.confidenceFactors!.ensemble).toBe(tail.reasoning.confidenceFactors!.ensemble);
+    // …but the per-market agreement factor differs, so confidence differs.
+    expect(peak.reasoning.confidenceFactors!.marketAgreement).toBeGreaterThan(0.95);
+    expect(tail.reasoning.confidenceFactors!.marketAgreement).toBeLessThan(0.2);
+    // The agreeing bracket reads materially higher confidence than the wing.
+    expect(peak.confidence).toBeGreaterThan(tail.confidence);
+    // The gap is driven by the 0.35-weighted agreement delta (with a tolerance
+    // for the small float difference in the two agreement values).
+    const agreementDelta =
+      peak.reasoning.confidenceFactors!.marketAgreement -
+      tail.reasoning.confidenceFactors!.marketAgreement;
+    expect(peak.confidence - tail.confidence).toBeCloseTo(0.35 * agreementDelta, 6);
   });
 
   test("throws on empty event", async () => {

@@ -19,6 +19,6 @@
  * - OpenWeather: https://openweathermap.org — historical + forecast
  */
 
-export { NwsService, localDayStartUtc } from "./services/nws";
-export type { TodayObservations } from "./services/nws";
+export { NwsService, localDayStartUtc, parseCliProduct } from "./services/nws";
+export type { TodayObservations, CliReport } from "./services/nws";
 export { EnsembleService, resetSniperRefreshTracking } from "./services/ensemble";

@@ -262,12 +262,31 @@ Each item has impact estimate, files, and verification. They are ordered by impa
 **Verification:** Recompute historical hit rate for a KNYC tight-near-mean bracket. Expect 40–55% instead of 17–22%.
 
 ### 6. Recalibrate `confidence` to actually predict win-rate ⭐ MEDIUM IMPACT
+**Status:** ✅ Estimator-side shipped 2026-06-06 — `computeConfidence` in `estimator.ts`, wired into BOTH the per-market `estimate()` path and the event `estimateEvent()` path. The reconciliation `confidence_calibration` persistence (below) is a separate follow-up and remains open.
 **Impact:** The current confidence isn't a useful gate. A reformulated score lets `highConfidenceBetSizeCents` actually reward the best signals.
 **Effort:** 1 day.
 **Files:** `app/signals/services/estimator.ts`, `app/engine/services/reconciliation.ts`.
 
-**Change:**
-- Add a fourth factor to the confidence formula: **market agreement** — `marketAgreementFactor = 1 - |estimatedProb - marketPrice|`. Weight 0.3, redistribute current weights: spread 0.3, bias_n 0.25, ensemble_n 0.15, agreement 0.3.
+**Change (shipped, estimator):**
+- New formula (weights hardcoded, sum to 1.0):
+  `confidence = spread·0.30 + bias·0.20 + ensemble·0.15 + marketAgreement·0.35`,
+  where `marketAgreement = 1 − |probability − marketPrice|` (the FINAL per-market
+  probability vs the same price fed to the market-prior blend), or `0.5` (neutral)
+  when no price is supplied. spread/bias/ensemble keep their existing math.
+- **Now per-market in the event path** (was: one identical confidence per event).
+  Shared spread/bias/ensemble are computed once from the shared event distribution;
+  the agreement factor — and therefore the final confidence — is assembled per
+  market, so the bracket that agrees with the market reads higher confidence than
+  the wing that disagrees.
+- New trace field `confidenceFactors: { spread, bias, ensemble, marketAgreement }`
+  so `explain` can show the decomposition (weighted sum == confidence).
+- **Scale anchors** (the `minConfidence`=0.80 gate and `highConfidenceThreshold`
+  =0.95 sizing tier now mean something): perfect data + perfect agreement → ~1.0;
+  perfect data + 25pp disagreement → **0.9125** (≈0.91); the 0.95 tier now requires
+  strong data AND ≤ ~14pp disagreement (agreement ≥ (0.95−0.65)/0.35 ≈ 0.857).
+  A 25pp-off signal can no longer reach the 0.95 tier no matter how clean its data.
+
+**Change (still open, reconciliation — not in this agent's scope):**
 - Persist computed-confidence histogram to a new `confidence_calibration` table on reconciliation; expose in the dashboard.
 
 **Verification:** Backtest: bot's 0.95+ band should still hit 50–60% win, and the 0.80–0.85 band should drop to ~0.65–0.70 (correctly reflecting agreement deficit).
@@ -286,6 +305,7 @@ Each item has impact estimate, files, and verification. They are ordered by impa
 **Verification:** Live tick logs show 0 signals acted on those stations.
 
 ### 8. Add `<6h` ultra-sniper window for HRRR-driven decisions
+**Status:** ✅ Shipped DARK 2026-06-06 (threshold discount). The edge-threshold tier landed as the exported pure helper `ultraSniperThreshold` in `orchestrator.ts`, wired into the Phase 3 ladder where the effective threshold (base + station surcharge) is computed. Inside the final `ultra_sniper_horizon_hours` before close it discounts the threshold by `ultra_sniper_edge_discount` (0.10), floored at **0.05**, and **only** when HRRR is actually in the pool (`sourceMix.hrrr > 0`) AND the obs running-max anchor is live (`reasoning.observationAdjustment.runningMax != null && !reasoning.obsStale`, `high_temp` only) — so the discount fires only when the "sharper information" premise is real, not merely "close to settlement". The persisted `signals.edgeThreshold` stores the discounted value (invariant preserved); the `edge < threshold` skip-reason annotates `(ultra-sniper −10¢)`. **Ships dark:** `ultra_sniper_horizon_hours` default 0 — enabling is a runtime decision (set runtime row `ultra_sniper_horizon_hours`, plan suggests 4) after observing HRRR + obs-anchor behavior live. The cache half of this item (re-fetch HRRR + obs inside the window, don't trust the 6h cache) was already delivered by **N6** (sniper-entry forced refresh + 2h same-day TTL). The `market_prior_weight` cap bump to 0.7 is covered by plan #3's adaptive ramp (already shipped) and was intentionally NOT duplicated here. 11 pure-helper tests in `orchestrator-ultra-sniper.test.ts`.
 **Impact:** Captures the actual sniper edge (HRRR 0-6h is genuinely sharper than the market).
 **Effort:** 1 day.
 **Files:** `app/engine/services/orchestrator.ts`, `app/data/services/ensemble.ts`.

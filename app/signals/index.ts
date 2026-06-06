@@ -29,3 +29,11 @@ export type {
   ConfirmationInput,
   ConfirmationResult,
 } from "./services/entry-gates";
+export {
+  evaluateStationHealth,
+  updateStationHealthGate,
+} from "./services/station-health";
+export type {
+  StationTradeOutcome,
+  StationHealthDecision,
+} from "./services/station-health";
