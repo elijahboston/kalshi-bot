@@ -291,3 +291,96 @@ describe("evaluateExit — winner-hold carve-out (N8)", () => {
     expect(reason).toContain("edge reversal");
   });
 });
+
+describe("evaluateExit — confirmation entry policy (2026-06-06 churn fix)", () => {
+  const CONFIRM_CONFIG = {
+    ...DEFAULT_CONFIG,
+    confirmationExitConvictionFloor: 0.6,
+  };
+
+  test("edge-reversal never fires on confirmation positions (negative model edge)", () => {
+    // The exact 2026-06-05 churn case: confirmation NO at 85¢, model edge −0.30,
+    // edge < exitEdgeThreshold → old code exited one tick after entry.
+    const reason = evaluateExit(
+      input({
+        edge: -0.3,
+        position: { quantity: 5, costBasis: 425 }, // 5 × 85¢
+        currentSidePrice: 85,
+        entryKind: "confirmation",
+        config: CONFIRM_CONFIG,
+      })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("time decay never fires on confirmation positions", () => {
+    const now = Date.now();
+    const closeTime = new Date(now + 2 * 60 * 60 * 1000).toISOString(); // 2h to close
+    const reason = evaluateExit(
+      input({
+        edge: 0.04, // above edge threshold, below exitTimeMinEdge 0.08
+        position: { quantity: 5, costBasis: 425 },
+        currentSidePrice: 86,
+        closeTime,
+        now,
+        entryKind: "confirmation",
+        config: CONFIRM_CONFIG,
+      })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("conviction collapse exits the confirmation position", () => {
+    const reason = evaluateExit(
+      input({
+        edge: -0.1,
+        position: { quantity: 5, costBasis: 425 },
+        currentSidePrice: 55, // our side fell from 85¢ to 55¢ — thesis broken
+        entryKind: "confirmation",
+        config: CONFIRM_CONFIG,
+      })
+    );
+    expect(reason).toContain("confirmation conviction collapsed");
+    expect(reason).toContain("55¢ < 60¢");
+  });
+
+  test("conviction floor disabled (0) → no collapse exit", () => {
+    // costBasis 350 (avg 70¢) keeps the −21% drawdown under the 25% stop-loss
+    // so the only candidate exit is the (disabled) conviction floor.
+    const reason = evaluateExit(
+      input({
+        edge: -0.1,
+        position: { quantity: 5, costBasis: 350 },
+        currentSidePrice: 55,
+        entryKind: "confirmation",
+        config: { ...DEFAULT_CONFIG, confirmationExitConvictionFloor: 0 },
+      })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("stop-loss still protects confirmation positions", () => {
+    const reason = evaluateExit(
+      input({
+        edge: -0.1,
+        position: { quantity: 5, costBasis: 425 }, // entered at 85¢
+        currentSidePrice: 61, // above the 60¢ conviction floor, but −28% drawdown
+        entryKind: "confirmation",
+        config: CONFIRM_CONFIG,
+      })
+    );
+    expect(reason).toContain("stop-loss");
+  });
+
+  test("contrarian default unchanged: edge reversal fires without entryKind", () => {
+    const reason = evaluateExit(
+      input({
+        edge: 0.01,
+        position: { quantity: 3, costBasis: 157 },
+        currentSidePrice: 50,
+        config: CONFIRM_CONFIG,
+      })
+    );
+    expect(reason).toContain("edge reversal");
+  });
+});

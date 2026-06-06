@@ -557,6 +557,38 @@ export class ExecutionService {
       return null;
     }
 
+    // Authoritative net-held check against the orders table — the same source
+    // of truth the buy path uses. The pending-sell guard above is blind in
+    // dry-run mode (paper sells fill instantly, never 'open'), and the
+    // positions table lags reconciliation by up to a tick; on 2026-06-05 that
+    // combination double-sold every exited confirmation position into a
+    // phantom short (buy 6 → sell 6 → sell 6 again). Sell at most what the
+    // ledger says we actually hold.
+    const [netRow] = await db
+      .select({
+        netHeld: sql<number>`COALESCE(SUM(
+          CASE
+            WHEN ${orders.action} = 'buy' THEN ${orders.filledQuantity}
+            ELSE -${orders.filledQuantity}
+          END
+        ), 0)`,
+      })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.ticker, position.ticker),
+          sql`${orders.status} IN ('open', 'partial', 'filled')`
+        )
+      );
+    const netHeld = Number(netRow?.netHeld ?? 0);
+    if (netHeld <= 0) {
+      log.info(
+        `Skipping exit for ${position.ticker}: net held ${netHeld} per orders table (position row is stale)`
+      );
+      return null;
+    }
+    const sellQuantity = Math.min(position.quantity, netHeld);
+
     // Price the sell at the current bid side to fill quickly.
     // Sell 1¢ below the current price to cross the spread, but floor at 2¢.
     // Selling at 1¢ can fail with insufficient_balance on Kalshi due to
@@ -574,7 +606,7 @@ export class ExecutionService {
     const exitSignalId = origSignal?.id ?? "bot-exit";
 
     log.info(
-      `Exiting ${side.toUpperCase()} ${position.ticker} × ${position.quantity} @ ${price}¢ — ${reason}`
+      `Exiting ${side.toUpperCase()} ${position.ticker} × ${sellQuantity} @ ${price}¢ — ${reason}`
     );
 
     if (config.bot.dryRun) {
@@ -587,8 +619,8 @@ export class ExecutionService {
         action: "sell",
         side,
         limitPrice: price,
-        quantity: position.quantity,
-        filledQuantity: position.quantity,
+        quantity: sellQuantity,
+        filledQuantity: sellQuantity,
         status: "filled",
         signalId: exitSignalId,
         dryRun: true,
@@ -603,7 +635,7 @@ export class ExecutionService {
         action: "sell",
         side,
         price,
-        quantity: position.quantity,
+        quantity: sellQuantity,
         dryRun: true,
       });
 
@@ -616,7 +648,7 @@ export class ExecutionService {
       action: "sell",
       side,
       type: "limit",
-      count: position.quantity,
+      count: sellQuantity,
       ...(side === "yes"
         ? { yes_price: price }
         : { no_price: price }),
@@ -629,7 +661,7 @@ export class ExecutionService {
       action: "sell",
       side,
       limitPrice: price,
-      quantity: position.quantity,
+      quantity: sellQuantity,
       filledQuantity: 0,
       status: "open",
       signalId: exitSignalId,
@@ -645,7 +677,7 @@ export class ExecutionService {
       action: "sell",
       side,
       price,
-      quantity: position.quantity,
+      quantity: sellQuantity,
       dryRun: false,
     });
 

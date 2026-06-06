@@ -649,12 +649,37 @@ export async function initOrchestrator(): Promise<void> {
           ? (market.lastYesPrice ?? 50)
           : (market.lastNoPrice ?? 50);
 
+        // How was this position entered? Confirmation positions carry model
+        // edge ≤ 0 by design — the edge-keyed exits must not apply to them
+        // (2026-06-05: edge-reversal churned every confirmation entry one
+        // tick after it filled). Resolve via the most recent filled buy's
+        // originating signal.
+        const [entrySignal] = await db
+          .select({ recommendation: signals.recommendation })
+          .from(orders)
+          .innerJoin(signals, eq(orders.signalId, signals.id))
+          .where(
+            and(
+              eq(orders.ticker, position.ticker),
+              eq(orders.action, "buy"),
+              eq(orders.status, "filled")
+            )
+          )
+          .orderBy(desc(orders.createdAt))
+          .limit(1);
+        const entryKind =
+          entrySignal?.recommendation === "confirm_yes" ||
+          entrySignal?.recommendation === "confirm_no"
+            ? ("confirmation" as const)
+            : ("contrarian" as const);
+
         const exitReason = evaluateExit({
           edge,
           position: { quantity: position.quantity, costBasis: position.costBasis },
           currentSidePrice,
           closeTime: market.closeTime,
           now: Date.now(),
+          entryKind,
           config: {
             exitEdgeThreshold: config.bot.exitEdgeThreshold,
             stopLossPct: config.bot.stopLossPct,
@@ -665,6 +690,9 @@ export async function initOrchestrator(): Promise<void> {
             // instead of selling at ~89¢ for a position that pays 100¢ at close.
             exitHoldWinnerPrice: config.bot.exitHoldWinnerPrice,
             exitHoldWinnerMaxHoursToClose: config.bot.exitHoldWinnerMaxHoursToClose,
+            // Confirmation bail-out: exit only when the market's own conviction
+            // collapses (2026-06-06 churn fix).
+            confirmationExitConvictionFloor: config.bot.confirmationExitConvictionFloor,
           },
         });
 

@@ -8,6 +8,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
+## 2026-06-06
+
+### `execution` — Confirmation exit policy + over-sell guard (first-live-night fixes)
+- **Change:** (1) `evaluateExit` gains `entryKind`: positions entered via `confirm_yes`/`confirm_no` are exempt from edge-reversal and time-decay exits (their model edge is ≤ 0 **by design** — the thesis is "the market is right", not "the model sees edge"); they hold to settlement with stop-loss intact plus a new bail-out when our side's price drops below `confirmation_exit_conviction_floor` (0.60) — the market's conviction, our entire thesis, has collapsed. Orchestrator resolves entryKind from the position's most recent filled buy → originating signal. (2) `executeExit` now computes **net-held from the orders ledger** (same source of truth as the buy path) and clamps the sell quantity; net ≤ 0 skips the exit entirely.
+- **Why:** First live night (2026-06-05): edge-reversal fired one tick after every confirmation entry (edge −0.30 < threshold), and the dry-run pending-sell guard is blind (paper sells fill instantly, never 'open') while the positions row lags reconciliation — so exits **double-fired**, selling 6 then 6 again into a phantom short, then cooldown expired and the bot re-bought. Four winning confirmation positions were churned into realized losses + bogus shorts. Both holes closed; the 4 trades would have settled 4/4 WIN.
+- **Doc:** [`improvements/win-rate-80-plan-2026-06-05.md`](improvements/win-rate-80-plan-2026-06-05.md) (#2 — exit policy completion)
+
 ## 2026-06-05
 
 ### `estimator` — Observation running-max anchor: CLAMP the distribution + post-peak collapse (N3 estimator/orchestrator)

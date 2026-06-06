@@ -30,7 +30,7 @@ mock.module("@kcb/config", () => ({
   getConfig: () => ({ bot: mockBotConfig }),
 }));
 
-import { getDb, runMigrations, orders, positions, markets } from "@kcb/db";
+import { getDb, runMigrations, orders, positions, markets, and } from "@kcb/db";
 import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
 import { bus } from "@kcb/engine";
 import { eq, sql } from "drizzle-orm";
@@ -109,6 +109,31 @@ describe("computeKelly", () => {
   });
 });
 
+/**
+ * Seed a filled BUY order backing a position. The 2026-06-06 over-sell fix
+ * makes executeExit clamp to net-held from the orders ledger — a position with
+ * no backing buy reads as netHeld 0 and the exit is (correctly) skipped.
+ */
+function seedBackingBuy(ticker: string, side: string, quantity: number, price = 50) {
+  const db = getDb();
+  const nowTs = new Date().toISOString();
+  db.insert(orders).values({
+    orderId: `seed-buy-${ticker}-${Math.random().toString(36).slice(2, 8)}`,
+    ticker,
+    action: "buy",
+    side,
+    limitPrice: price,
+    quantity,
+    filledQuantity: quantity,
+    status: "filled",
+    signalId: null,
+    dryRun: true,
+    kellyFraction: null,
+    createdAt: nowTs,
+    updatedAt: nowTs,
+  }).run();
+}
+
 describe("ExecutionService.executeExit", () => {
   test("dry-run exit inserts a filled sell order", async () => {
     const service = new ExecutionService(stubKalshi);
@@ -123,6 +148,7 @@ describe("ExecutionService.executeExit", () => {
       openedAt: "2026-02-20T00:00:00Z",
       updatedAt: "2026-02-25T00:00:00Z",
     };
+    seedBackingBuy(position.ticker, "yes", 5);
 
     const orderId = await service.executeExit(position as any, "edge reversal", 55);
 
@@ -164,6 +190,7 @@ describe("ExecutionService.executeExit", () => {
       updatedAt: "2026-02-25T00:00:00Z",
     };
 
+    seedBackingBuy(position.ticker, "no", 3);
     // currentYesPrice=60 → NO side price = (100-60) - 1 = 39
     await service.executeExit(position as any, "stop-loss", 60);
     unsub();
@@ -190,12 +217,72 @@ describe("ExecutionService.executeExit", () => {
       updatedAt: "2026-02-25T00:00:00Z",
     };
 
+    seedBackingBuy(position.ticker, "yes", 10);
     // currentYesPrice=45 → YES side: 45 - 1 = 44
     const orderId = await service.executeExit(position as any, "time decay", 45);
 
     const db = getDb();
     const rows = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
     expect(rows[0].limitPrice).toBe(44);
+  });
+
+  test("over-sell guard: second exit on the same position is skipped (2026-06-06 fix)", async () => {
+    // The 2026-06-05 double-exit: dry-run sells fill instantly so the
+    // pending-sell guard never trips, and the stale position row re-triggers
+    // the exit next tick — selling 6 more than held into a phantom short.
+    const service = new ExecutionService(stubKalshi);
+    const position = {
+      ticker: "KXTEMP-26FEB25-NYC-B41",
+      side: "yes",
+      quantity: 6,
+      avgEntryPrice: 82,
+      costBasis: 492,
+      marketValue: 480,
+      unrealizedPnl: -12,
+      openedAt: "2026-02-20T00:00:00Z",
+      updatedAt: "2026-02-25T00:00:00Z",
+    };
+    seedBackingBuy(position.ticker, "yes", 6, 82);
+
+    const first = await service.executeExit(position as any, "edge reversal", 80);
+    expect(first).toBeString();
+
+    // Position row is stale (still shows quantity 6) but the ledger now nets 0.
+    const second = await service.executeExit(position as any, "edge reversal", 80);
+    expect(second).toBeNull();
+
+    // Exactly one sell order exists.
+    const db = getDb();
+    const sells = db
+      .select()
+      .from(orders)
+      .where(and(eq(orders.ticker, position.ticker), eq(orders.action, "sell")))
+      .all();
+    expect(sells).toHaveLength(1);
+    expect(sells[0]!.filledQuantity).toBe(6);
+  });
+
+  test("over-sell guard: sell quantity clamps to net held when position row overstates", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const position = {
+      ticker: "KXTEMP-26FEB25-NYC-B42",
+      side: "no",
+      quantity: 8, // stale row says 8
+      avgEntryPrice: 85,
+      costBasis: 680,
+      marketValue: 660,
+      unrealizedPnl: -20,
+      openedAt: "2026-02-20T00:00:00Z",
+      updatedAt: "2026-02-25T00:00:00Z",
+    };
+    seedBackingBuy(position.ticker, "no", 5, 85); // ledger says 5
+
+    const orderId = await service.executeExit(position as any, "stop-loss", 20);
+    expect(orderId).toBeString();
+
+    const db = getDb();
+    const rows = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(rows[0]!.quantity).toBe(5); // clamped to ledger, not the stale 8
   });
 });
 

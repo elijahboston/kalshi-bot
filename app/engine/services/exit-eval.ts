@@ -9,6 +9,17 @@ export interface ExitEvaluationInput {
   closeTime: string | null;
   /** Current wall-clock epoch millis — injected for testability */
   now: number;
+  /**
+   * How the position was entered. Confirmation positions ("the market is
+   * right, follow it") carry model edge ≤ 0 BY DESIGN, so the edge-reversal
+   * and time-decay exits — which key on model edge — must never apply to them
+   * (first live night 2026-06-05: edge-reversal fired one tick after every
+   * confirmation entry, churning 4 winning positions into realized losses).
+   * Their exit policy is: hold to settlement; stop-loss still applies; bail
+   * only when the market's own conviction collapses (see
+   * confirmationExitConvictionFloor). Defaults to "contrarian".
+   */
+  entryKind?: "contrarian" | "confirmation";
   /** Exit-related config values */
   config: {
     exitEdgeThreshold: number;
@@ -30,6 +41,12 @@ export interface ExitEvaluationInput {
      * when the carve-out is enabled (exitHoldWinnerPrice > 0) but this is absent.
      */
     exitHoldWinnerMaxHoursToClose?: number;
+    /**
+     * Confirmation-position bail-out: exit when our side's market price (the
+     * market's conviction — the entire thesis of a confirmation entry) drops
+     * below this, in probability units (0-1). Absent/0 disables. Default 0.60.
+     */
+    confirmationExitConvictionFloor?: number;
   };
 }
 
@@ -60,6 +77,27 @@ export interface ExitEvaluationInput {
  */
 export function evaluateExit(input: ExitEvaluationInput): string | null {
   const { edge, position, currentSidePrice, closeTime, now, config } = input;
+
+  // Confirmation positions: model-edge-based exits never apply (their edge is
+  // ≤ 0 by construction). Hold to settlement unless (a) stop-loss, or (b) the
+  // market's own conviction — the thesis — collapses below the floor.
+  if (input.entryKind === "confirmation") {
+    const convictionFloor = config.confirmationExitConvictionFloor ?? 0;
+    if (convictionFloor > 0 && currentSidePrice < convictionFloor * 100) {
+      return (
+        `confirmation conviction collapsed ` +
+        `(${currentSidePrice}¢ < ${(convictionFloor * 100).toFixed(0)}¢ floor)`
+      );
+    }
+    if (position.costBasis > 0) {
+      const liveUnrealized = position.quantity * currentSidePrice - position.costBasis;
+      const lossPct = liveUnrealized / position.costBasis;
+      if (lossPct < -config.stopLossPct) {
+        return `stop-loss (${(lossPct * 100).toFixed(1)}% loss on confirmation position)`;
+      }
+    }
+    return null;
+  }
 
   // Winner-hold determination (computed up front; consulted by the
   // discretionary exit branches below).

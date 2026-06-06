@@ -132,6 +132,30 @@ export interface BotConfig {
     /** Mean offset (°F) added to the running max after the post-peak collapse (residual late-day heating allowance). */
     obsPostPeakMeanOffset: number;
 
+    // ── Confirmation exit policy (2026-06-06 churn fix) ──
+    /** Exit a confirmation position when our side's market probability drops below this (the market's conviction — our entire thesis — has collapsed). 0 = disabled. Edge-reversal/time-decay exits never apply to confirmation positions (their model edge is ≤ 0 by design). */
+    confirmationExitConvictionFloor: number;
+
+    // ── Ultra-sniper window (win-rate-80-plan #8) ──
+    /** Hours before close when the ultra-sniper tier activates (0 = disabled). Inside it the edge threshold drops by ultraSniperEdgeDiscount — HRRR + obs anchor are sharpest here. */
+    ultraSniperHorizonHours: number;
+    /** Subtracted from the effective edge threshold inside the ultra-sniper window (floored at 0.05). */
+    ultraSniperEdgeDiscount: number;
+
+    // ── Auto station health gate (addendum N9) ──
+    /** Enable the self-healing per-station health gate (writes disabled_stations from rolling settled win rates). */
+    stationHealthEnabled: boolean;
+    /** Rolling window (days) of settled trades per station. */
+    stationHealthWindowDays: number;
+    /** Disable a station when its rolling win rate falls below this (with ≥ stationHealthMinTrades). */
+    stationHealthDisableBelow: number;
+    /** Re-enable when the trailing stationHealthReenableTrades settled trades win at/above this. */
+    stationHealthReenableAbove: number;
+    /** Minimum settled trades in the window before the gate may disable. */
+    stationHealthMinTrades: number;
+    /** Trailing trade count used for the re-enable check (hysteresis). */
+    stationHealthReenableTrades: number;
+
     // ── Data-quality gates (addendum N4/N5/N6) ──
     /** Skip same-day signals when HRRR contributed zero members inside the sniper window (addendum N5). */
     requireHrrrInSniper: boolean;
@@ -265,6 +289,15 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   confirmation_min_model_agreement: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMinModelAgreement = n; },
   confirmation_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationBetSizeCents = n; },
   confirmation_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMaxEntryPrice = n; },
+  confirmation_exit_conviction_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationExitConvictionFloor = n; },
+  ultra_sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperHorizonHours = n; },
+  ultra_sniper_edge_discount: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperEdgeDiscount = n; },
+  station_health_enabled: (c, v) => { c.bot.stationHealthEnabled = v === "true" || v === "1"; },
+  station_health_window_days: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stationHealthWindowDays = n; },
+  station_health_disable_below: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stationHealthDisableBelow = n; },
+  station_health_reenable_above: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stationHealthReenableAbove = n; },
+  station_health_min_trades: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stationHealthMinTrades = n; },
+  station_health_reenable_trades: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.stationHealthReenableTrades = n; },
   sigma_floor_bracket_width_factor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.sigmaFloorBracketWidthFactor = n; },
   event_coherent_estimation: (c, v) => { c.bot.eventCoherentEstimation = v === "true" || v === "1"; },
   obs_peak_hour: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.obsPeakHour = n; },
@@ -349,6 +382,18 @@ export function loadConfig(): BotConfig {
       confirmationMinModelAgreement: envNum("CONFIRMATION_MIN_MODEL_AGREEMENT", 0.50),
       confirmationBetSizeCents: envNum("CONFIRMATION_BET_SIZE_CENTS", 500),
       confirmationMaxEntryPrice: envNum("CONFIRMATION_MAX_ENTRY_PRICE", 0.93),
+      // Confirmation exit policy (2026-06-06 churn fix)
+      confirmationExitConvictionFloor: envNum("CONFIRMATION_EXIT_CONVICTION_FLOOR", 0.60),
+      // Ultra-sniper window (win-rate-80-plan #8) — ships dark; runtime row enables
+      ultraSniperHorizonHours: envNum("ULTRA_SNIPER_HORIZON_HOURS", 0),
+      ultraSniperEdgeDiscount: envNum("ULTRA_SNIPER_EDGE_DISCOUNT", 0.10),
+      // Auto station health gate (addendum N9)
+      stationHealthEnabled: envBool("STATION_HEALTH_ENABLED", true),
+      stationHealthWindowDays: envNum("STATION_HEALTH_WINDOW_DAYS", 30),
+      stationHealthDisableBelow: envNum("STATION_HEALTH_DISABLE_BELOW", 0.45),
+      stationHealthReenableAbove: envNum("STATION_HEALTH_REENABLE_ABOVE", 0.55),
+      stationHealthMinTrades: envNum("STATION_HEALTH_MIN_TRADES", 10),
+      stationHealthReenableTrades: envNum("STATION_HEALTH_REENABLE_TRADES", 15),
       // Sigma floor (win-rate-80-plan #4)
       sigmaFloorBracketWidthFactor: envNum("SIGMA_FLOOR_BRACKET_WIDTH_FACTOR", 0.6),
       // Event-coherent estimation (addendum N2)
