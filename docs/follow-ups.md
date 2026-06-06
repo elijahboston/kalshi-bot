@@ -19,9 +19,37 @@ The regime boundary for all measurements is **2026-06-05T20:00Z** (first trade a
 
 ## Scheduled automation
 
-A daily Claude Code cron task (8:53am local) sweeps this file, runs due checks against the local DB, and acts under **full autonomy** within hard guardrails (never `dry_run=false`, never delete data, never new market categories; alarming findings lead the report). Set up 2026-06-06.
+A daily sweep (8:53am local) reads this file, runs due checks against the local DB, and acts under **full autonomy** within hard guardrails (never `dry_run=false`, never delete data, never new market categories; alarming findings lead the report). Set up 2026-06-06. Two mechanisms, preferred first:
 
-**The task is session-bound** (Claude Code's scheduler doesn't persist to disk in this environment) — it dies with the Claude session. Re-arm in any new session by calling `CronCreate` with `cron "53 8 * * *"`, `recurring: true`, and this canonical prompt:
+**1. launchd (machine-level, survives reboots & closed sessions)** — runs [`scripts/follow-ups-sweep.sh`](../scripts/follow-ups-sweep.sh) headless (`claude -p --dangerously-skip-permissions --max-turns 100`; output → `logs/follow-ups-sweep.log`). The harness won't let Claude install LaunchAgents itself — install manually once:
+
+```sh
+cat > ~/Library/LaunchAgents/com.elijah.kalshi-bot.follow-ups.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.elijah.kalshi-bot.follow-ups</string>
+    <key>ProgramArguments</key>
+    <array><string>/bin/bash</string><string>/Users/elijah/projects/kalshi-bot/scripts/follow-ups-sweep.sh</string></array>
+    <key>WorkingDirectory</key><string>/Users/elijah/projects/kalshi-bot</string>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>53</integer></dict>
+    <key>StandardOutPath</key><string>/Users/elijah/projects/kalshi-bot/logs/follow-ups-launchd.log</string>
+    <key>StandardErrorPath</key><string>/Users/elijah/projects/kalshi-bot/logs/follow-ups-launchd.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.elijah.kalshi-bot.follow-ups.plist
+launchctl list | grep kalshi   # verify loaded
+# optional immediate test-fire:
+# launchctl kickstart gui/$(id -u)/com.elijah.kalshi-bot.follow-ups
+```
+
+Once launchd is confirmed, delete any in-session cron duplicate (`CronList` → `CronDelete`) to avoid double sweeps.
+
+**2. In-session Claude Code cron (fallback)** — session-bound (the scheduler doesn't persist to disk here); dies with the Claude session. Re-arm in any new session by calling `CronCreate` with `cron "53 8 * * *"`, `recurring: true`, and this canonical prompt:
 
 > [Scheduled daily follow-ups check — kalshi-bot]
 >
