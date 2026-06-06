@@ -270,3 +270,7 @@ After v0 generates the project:
 - REST mutations (place order, update config) — the API is read-only today
 - Historical deep-dive views (drill into a single market/signal)
 - Mobile-responsive refinements beyond a simple single-column collapse
+
+## Changelog
+
+- **2026-06-06** — Recent Resolutions now also shown on the Dashboard tab. The table was extracted into a shared component `app/web/components/dashboard/recent-resolutions.tsx` (used by both the Dashboard route and the Calibration view). Dashboard shows the latest 8 rows with a W/L + net P&L summary in the header and a "View all" link to Calibration; Calibration shows all loaded rows. Pure helper `resolutionSummary()` is unit-tested in `recent-resolutions.test.ts`.
