@@ -19,7 +19,11 @@ The regime boundary for all measurements is **2026-06-05T20:00Z** (first trade a
 
 ## Scheduled automation
 
-A daily sweep (8:53am local) reads this file, runs due checks against the local DB, and acts under **full autonomy** within hard guardrails (never `dry_run=false`, never delete data, never new market categories; alarming findings lead the report). Set up 2026-06-06. Two mechanisms, preferred first:
+A daily sweep (8:53am local) reads this file, runs due checks against the local DB, and acts under **full autonomy** within hard guardrails (never `dry_run=false`, never delete data, never new market categories; alarming findings lead the report). Set up 2026-06-06.
+
+**Operate it with `bun ops`** (`status | due | knobs | history | set --why | sweep | pause | resume`) — the project skill at [`.claude/skills/ops/SKILL.md`](../.claude/skills/ops/SKILL.md) teaches Claude sessions the rules (all config changes attributed via `ops set --why`; regime-boundary clamping for window analytics; pause before invasive work).
+
+Two scheduling mechanisms, preferred first:
 
 **1. launchd (machine-level, survives reboots & closed sessions)** — runs [`scripts/follow-ups-sweep.sh`](../scripts/follow-ups-sweep.sh) headless (`claude -p --dangerously-skip-permissions --max-turns 100`; output → `logs/follow-ups-sweep.log`). The harness won't let Claude install LaunchAgents itself — install manually once:
 
