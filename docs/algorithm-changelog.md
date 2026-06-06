@@ -10,6 +10,11 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ## 2026-06-06
 
+### `calibration` — `wins` attribution command + follow-ups tracker (measurement phase begins)
+- **Change:** New REPL command `wins [summary|by_gate|by_path|by_confidence|by_station|by_hour] [all]` (alias `w`) — settled-market win-rate attribution, defaulting to the new-regime window (**2026-06-05T20:00Z**, the strategy-redirection boundary). `by_gate` scores BLOCKED signals by would-have-won rate (<50% ⇒ the gate is saving money; ⚠ COSTING flagged), deduped to the last signal per (ticker, gate family) with server-side pre-aggregation over the 500k-row signals table. `by_confidence` doubles as plan #6's calibration persistence (live view, not a table). New [`docs/follow-ups.md`](follow-ups.md) tracks every deferred decision with a due date and an exact check (ultra-sniper enablement, the 2-week 80% verdict, prior-weight revalidation on clean-geometry data, station probation, sigma-floor binding rate, N12 hour re-cut).
+- **Why:** The build phase is complete; the next iteration must be data-driven. First live read at creation: new regime **4/4 wins, +$3.38**; `edge < threshold` blocked 31 signals at 0% would-have-won; the only "costing" family was the already-fixed June-5 min-bet hole — the attribution validating its own fix.
+- **Doc:** [`improvements/win-rate-80-plan-2026-06-05.md`](improvements/win-rate-80-plan-2026-06-05.md) (#10), [`follow-ups.md`](follow-ups.md)
+
 ### `calibration` — NWS CLI exact actuals lead the resolution chain (N1 item 2)
 - **Change:** New `NwsService.getCliReport(stationId, targetDate)` fetches and parses the official NWS CLI climate product (`api.weather.gov/products/types/CLI/locations/{office}`, site-code filtered, per-(station,date) cached; exported pure `parseCliProduct` handles the fixed-width text incl. `M`/`MM` missing markers). `resolveActualValue` priority is now **cli → settlement → obs_max** for temp categories, tagging `actual_source='cli'`.
 - **Why:** Post-Finding-11, brackets are 2°F wide, so settlement-midpoint actuals carry up to ±1°F error (σ≈0.58°F of avoidable noise in `station_bias` mean/std). The CLI report is the LITERAL source Kalshi settles on — exact values. Historical rebuild not re-run: api.weather.gov retains CLI products only ~days, so backfill would fall through to settlement for old rows anyway; the forward path now self-corrects with exact values as markets settle.
@@ -234,3 +239,5 @@ When shipping a new algorithm change, prepend an entry under a new date heading 
 ```
 
 Skip the `Doc:` line for trivial changes that don't justify a standalone document. Don't add UI / infrastructure / refactor entries here — those live in their own docs and in commit history.
+
+**If a change ships with a "re-check after N days/trades" condition** (gated knobs, dark launches, tuning that needs a sample), add a row to [`follow-ups.md`](follow-ups.md) with the due date and the exact check — that file is reviewed at the start of every working session; this one is not.

@@ -118,6 +118,8 @@ Ranked backlog and completed upgrade plans live in [`docs/improvements/`](improv
 
 **For a chronological summary of *what the bot actually does differently over time* — estimator, sizing, execution, calibration changes — see [`algorithm-changelog.md`](algorithm-changelog.md). Update it whenever you ship an algorithm change.**
 
+**For deferred decisions with due dates — "check this after N days/trades" items like dark-launch enablements and tuning that needs a sample — see [`follow-ups.md`](follow-ups.md). Review it at the start of every working session; record outcomes in its Log as items close.**
+
 | Doc | What's inside |
 |-----|---------------|
 | [`improvements/forecast-sharpening.md`](improvements/forecast-sharpening.md) | Five changes to close the gap with top bots — **all done**: HRRR ingestion, sniper mode, empirical sigma, same-day observations, horizon-weighted model blending. Includes Monte Carlo ROI simulations. |
