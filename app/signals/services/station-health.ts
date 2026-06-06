@@ -8,13 +8,14 @@ import {
   and,
   gte,
   inArray,
+  sql,
 } from "@kcb/db";
 // `notLike` / `isNotNull` are not among @kcb/db's re-exported drizzle operators;
 // pull them straight from drizzle-orm (the established pattern across app/*).
 import { notLike, isNotNull } from "drizzle-orm";
 import { getConfig } from "@kcb/config";
 import { createLogger } from "@kcb/engine";
-import { now } from "@kcb/shared";
+import { now, REGIME_BOUNDARY_ISO } from "@kcb/shared";
 
 const log = createLogger("station-health");
 
@@ -275,7 +276,13 @@ export async function updateStationHealthGate(): Promise<StationHealthDecision[]
 
   const db = getDb();
   const windowDays = config.bot.stationHealthWindowDays;
-  const cutoff = new Date(Date.now() - windowDays * 86400_000).toISOString();
+  // Clamp the rolling window to the regime boundary: on 2026-06-06 the
+  // unclamped 30-day window reached across the 2026-06-05 redirection into
+  // the old bot's 33%-win-rate era and disabled ALL SIX stations (including
+  // the profitable ones) on its first hourly run. Old-regime outcomes measure
+  // a bot that no longer exists; the gate must only ever judge the current one.
+  const rawCutoff = new Date(Date.now() - windowDays * 86400_000).toISOString();
+  const cutoff = rawCutoff > REGIME_BOUNDARY_ISO ? rawCutoff : REGIME_BOUNDARY_ISO;
 
   // Settled, model-driven trade outcomes within the window.
   const rows = await db
@@ -343,6 +350,16 @@ export async function updateStationHealthGate(): Promise<StationHealthDecision[]
       target: runtimeConfig.key,
       set: { value: csv, updatedAt: timestamp },
     });
+
+  // Attribute the audit row the 0006 trigger just wrote (actor stays NULL
+  // from triggers; `bun ops history` shows who did what and why).
+  await db.run(sql`
+    UPDATE runtime_config_log
+    SET actor = 'station-health-gate',
+        note = ${acted.map((d) => `${d.stationId} ${d.action}: ${d.reason}`).join("; ")}
+    WHERE id = (SELECT MAX(id) FROM runtime_config_log WHERE key = 'disabled_stations')
+      AND actor IS NULL
+  `);
 
   for (const d of acted) {
     log.info(`station health: ${d.action} ${d.stationId} — ${d.reason}`);

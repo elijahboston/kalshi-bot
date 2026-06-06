@@ -12,6 +12,7 @@ import {
   markets,
   runtimeConfig,
   eq,
+  sql,
 } from "@kcb/db";
 import { getConfig } from "@kcb/config";
 
@@ -419,5 +420,34 @@ describe("updateStationHealthGate — DB wrapper", () => {
     const acted = await updateStationHealthGate();
     expect(acted).toHaveLength(0);
     expect(readDisabledCsv()).toBeNull();
+  });
+
+  test("REGRESSION: window clamps to the regime boundary — old-regime losses cannot disable (2026-06-06 incident)", async () => {
+    // The unclamped 30-day window reached across 2026-06-05T20:00Z into the
+    // old bot's 33%-win era and disabled ALL SIX stations (including the
+    // profitable ones) on the gate's first hourly run. Old-regime outcomes
+    // are inside the raw window but BEFORE the boundary — they must not count.
+    const oldRegime = "2026-06-05T12:00:00.000Z"; // pre-boundary, recent enough for a 30d window
+    for (let i = 0; i < 20; i++) {
+      seedTrade({ station: "KMIA", side: "no", result: "yes", settledAt: oldRegime });
+    }
+    const acted = await updateStationHealthGate();
+    expect(acted).toHaveLength(0);
+    expect(readDisabledCsv()).toBeNull();
+  });
+
+  test("gate writes are attributed in the audit log", async () => {
+    for (let i = 0; i < 12; i++) {
+      seedTrade({ station: "KNYC", side: "no", result: "yes" }); // now = post-boundary
+    }
+    const acted = await updateStationHealthGate();
+    expect(acted).toHaveLength(1);
+
+    const db = getDb();
+    const log = await db.all(
+      sql`SELECT actor, note FROM runtime_config_log WHERE key = 'disabled_stations' ORDER BY id DESC LIMIT 1`
+    ) as Array<{ actor: string | null; note: string | null }>;
+    expect(log[0]!.actor).toBe("station-health-gate");
+    expect(log[0]!.note).toContain("KNYC disable");
   });
 });

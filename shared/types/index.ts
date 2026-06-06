@@ -116,3 +116,14 @@ export function uuid(): string {
 export function now(): string {
   return new Date().toISOString();
 }
+
+/**
+ * The win-rate-80 regime boundary: the first trade after the 2026-06-05
+ * strategy redirection (entry gates, confirmation mode, event-coherent
+ * estimation, geometry fix, ground-truth repair). Trades and signals BEFORE
+ * this instant measure the old, broken bot — rolling-window analytics that
+ * feed live decisions (e.g. the station-health gate) must clamp their window
+ * start to this boundary or they will act on the old regime's statistics.
+ * See docs/improvements/win-rate-80-plan-2026-06-05.md.
+ */
+export const REGIME_BOUNDARY_ISO = "2026-06-05T20:00:00.000Z";

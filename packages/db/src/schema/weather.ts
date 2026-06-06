@@ -66,6 +66,24 @@ export const runtimeConfig = sqliteTable("runtime_config", {
   updatedAt: text("updated_at").notNull(),
 });
 
+/**
+ * Audit trail for runtime_config changes. Populated automatically by SQLite
+ * triggers (migration 0006) on every INSERT/UPDATE to runtime_config — catches
+ * ALL writers (REPL `config set`, the station-health gate, the autonomous
+ * follow-ups sweep, ad-hoc sqlite3) with zero cooperation required. `actor`
+ * and `note` are NULL from the trigger; attributed writers (e.g. `bun ops set
+ * --why`) annotate their latest row after writing.
+ */
+export const runtimeConfigLog = sqliteTable("runtime_config_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  key: text("key").notNull(),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  actor: text("actor"),
+  note: text("note"),
+  changedAt: text("changed_at").notNull(),
+});
+
 export type WeatherForecast = typeof weatherForecasts.$inferSelect;
 export type NewWeatherForecast = typeof weatherForecasts.$inferInsert;
 export type BalanceRecord = typeof balanceHistory.$inferSelect;

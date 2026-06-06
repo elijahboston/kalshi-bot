@@ -67,7 +67,7 @@ Once launchd is confirmed, delete any in-session cron duplicate (`CronList` → 
 
 Record outcomes here as items close (newest first):
 
-- *(none yet)*
+- **2026-06-06 — ⚠ incident (caught by `bun ops status` on its first run):** the station-health gate's 30-day window reached across the regime boundary into old-bot statistics and **disabled all six stations** at 17:24Z (KAUS 38%, KMIA 40%, KDEN 41% — all old-regime rates below the 45% floor). Restored `disabled_stations=KORD,KLAX,KNYC` via `bun ops set` (audited); root-caused and fixed: the gate's window now clamps to `REGIME_BOUNDARY_ISO` (2026-06-05T20:00Z, exported from `@kcb/shared`) so it can only ever judge the current bot; regression test added; gate writes are now attributed in `runtime_config_log` as `station-health-gate`.
 
 ---
 

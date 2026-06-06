@@ -43,6 +43,13 @@
       "when": 1780617600000,
       "tag": "0005_bid_ask_actual_source",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1780704000000,
+      "tag": "0006_runtime_config_audit",
+      "breakpoints": true
     }
   ]
 }

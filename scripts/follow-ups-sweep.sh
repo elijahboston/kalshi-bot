@@ -19,6 +19,12 @@ LOG="$REPO/logs/follow-ups-sweep.log"
 cd "$REPO"
 mkdir -p logs
 
+# Pause sentinel — `bun ops pause` creates it, `bun ops resume` removes it.
+if [ -f "$REPO/.sweep-paused" ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) sweep skipped: .sweep-paused sentinel present (bun ops resume to re-enable)" >> "$LOG"
+  exit 0
+fi
+
 {
   echo ""
   echo "===== follow-ups sweep $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
