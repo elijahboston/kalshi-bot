@@ -228,11 +228,15 @@ function seedTrade(opts: {
   result: "yes" | "no";
   recommendation?: string;
   settledAt?: string;
+  /** Order/signal entry time; defaults to settledAt. Lets tests model a
+   * pre-boundary trade whose MARKET row was touched post-boundary. */
+  enteredAt?: string;
 }) {
   const db = getDb();
   const id = crypto.randomUUID();
   const ticker = `KXHIGH-${id.slice(0, 8)}`;
   const settledAt = opts.settledAt ?? new Date().toISOString();
+  const enteredAt = opts.enteredAt ?? settledAt;
   db.insert(signals)
     .values({
       id,
@@ -245,7 +249,7 @@ function seedTrade(opts: {
       edgeThreshold: 0.05,
       recommendation: opts.recommendation ?? (opts.side === "yes" ? "buy_yes" : "buy_no"),
       side: opts.side,
-      createdAt: settledAt,
+      createdAt: enteredAt,
     })
     .run();
   db.insert(markets)
@@ -273,8 +277,8 @@ function seedTrade(opts: {
       quantity: 1,
       status: "filled",
       signalId: id,
-      createdAt: settledAt,
-      updatedAt: settledAt,
+      createdAt: enteredAt,
+      updatedAt: enteredAt,
     })
     .run();
 }
@@ -430,6 +434,29 @@ describe("updateStationHealthGate — DB wrapper", () => {
     const oldRegime = "2026-06-05T12:00:00.000Z"; // pre-boundary, recent enough for a 30d window
     for (let i = 0; i < 20; i++) {
       seedTrade({ station: "KMIA", side: "no", result: "yes", settledAt: oldRegime });
+    }
+    const acted = await updateStationHealthGate();
+    expect(acted).toHaveLength(0);
+    expect(readDisabledCsv()).toBeNull();
+  });
+
+  test("REGRESSION round 2: pre-boundary trade whose MARKET row was touched post-boundary cannot disable (2026-06-06 incident, 21:09Z)", async () => {
+    // The first clamp bound on markets.updated_at — a settled-at proxy that is
+    // rewritten by ANY touch of the market row. The bracket-geometry migration
+    // bumped 1,584 old markets' updated_at past the boundary, and seven minutes
+    // after the manual restore the gate re-disabled all six stations from those
+    // same old-regime trades. The clamp must bind on the ORDER's immutable
+    // entry time: entered pre-boundary → excluded, no matter what updated_at says.
+    const preBoundaryEntry = "2026-05-01T18:00:00.000Z";
+    const postBoundaryTouch = new Date().toISOString(); // migration-style touch
+    for (let i = 0; i < 20; i++) {
+      seedTrade({
+        station: "KAUS",
+        side: "no",
+        result: "yes",
+        enteredAt: preBoundaryEntry,
+        settledAt: postBoundaryTouch,
+      });
     }
     const acted = await updateStationHealthGate();
     expect(acted).toHaveLength(0);

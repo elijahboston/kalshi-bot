@@ -35,31 +35,16 @@ function stationTz(stationId: string): string {
 }
 
 /**
- * Station → NWS issuing office (WFO) for the CLI climate product (N1 item 2,
- * win-rate-80-addendum-2026-06-05.md Finding 11). The CLI product is fetched per
- * office (`/products/types/CLI/locations/{office}`); one office serves multiple
- * sites, so {@link CLI_SITE_CODE} filters the office's product list down to the
- * station we want. Hardcoded — these mappings are stable airport→WFO routings.
- */
-const STATION_OFFICE: Record<string, string> = {
-  KNYC: "OKX", // New York (Upton)
-  KMIA: "MFL", // Miami
-  KORD: "LOT", // Chicago
-  KAUS: "EWX", // Austin/San Antonio (Austin)
-  KDEN: "BOU", // Denver/Boulder
-  KLAX: "LOX", // Los Angeles/Oxnard
-  KPHL: "PHI", // Philadelphia/Mount Holly
-  KATL: "FFC", // Atlanta/Peachtree City
-  KSFO: "MTR", // San Francisco/Monterey
-  KDFW: "FWD", // Dallas/Fort Worth
-  KIAH: "HGX", // Houston/Galveston
-};
-
-/**
- * Station → 3-letter CLI site code embedded in the product text's `CLI<SITE>`
- * header line (e.g. `CLINYC`). An office's CLI product list contains reports for
- * several sites; we filter by this code before date-matching. Three letters =
- * the station id minus its leading `K`.
+ * Station → 3-letter CLI site code (N1 item 2, win-rate-80-addendum Finding 11).
+ * Used both as the products-API location (`/products/types/CLI/locations/{site}`)
+ * and to match the product text's `CLI<SITE>` header line (e.g. `CLINYC`).
+ * Three letters = the station id minus its leading `K`.
+ *
+ * NOTE (2026-06-07, follow-up #1): the products API does NOT index CLI products
+ * by WFO office code — `/products/types/CLI/locations/OKX` returns an empty
+ * `@graph` (no error). The original station→WFO mapping (KNYC→OKX, KMIA→MFL, …)
+ * therefore silently produced zero `cli` actuals for every station; the API
+ * indexes by this SITE code, so fetch by it directly.
  */
 const CLI_SITE_CODE: Record<string, string> = {
   KNYC: "NYC",
@@ -495,12 +480,12 @@ export class NwsService {
    * `MINIMUM` are EXACT values — preferred over the settlement-interval midpoint
    * (±1°F uniform noise) and the obs-max fallback.
    *
-   * Pipeline: station → issuing office ({@link STATION_OFFICE}); GET the office's
-   * recent CLI list (`/products/types/CLI/locations/{office}`, newest first);
-   * fetch the most recent few product texts (`/products/{id}`, field
-   * `productText`); keep only products whose `CLI<SITE>` header matches the
-   * station's {@link CLI_SITE_CODE}; pick the one whose parsed `reportDate`
-   * equals `targetDate`. Result (including a not-found null) is memoized per
+   * Pipeline: station → CLI site ({@link CLI_SITE_CODE}); GET the site's recent
+   * CLI list (`/products/types/CLI/locations/{site}`, newest first — the API
+   * indexes CLI by site code, NOT by WFO office); fetch the most recent few
+   * product texts (`/products/{id}`, field `productText`); sanity-check the
+   * `CLI<SITE>` header; pick the one whose parsed `reportDate` equals
+   * `targetDate`. Result (including a not-found null) is memoized per
    * (station, date).
    *
    * Errors / unknown station / missing product → null, logged at debug. Never
@@ -516,19 +501,18 @@ export class NwsService {
     const cached = this.cliCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    const office = STATION_OFFICE[stationId];
     const siteCode = CLI_SITE_CODE[stationId];
-    if (!office || !siteCode) {
-      log.debug(`No CLI office/site mapping for ${stationId}`);
+    if (!siteCode) {
+      log.debug(`No CLI site mapping for ${stationId}`);
       this.cliCache.set(cacheKey, null);
       return null;
     }
 
     try {
-      // Recent CLI products for the office, newest first.
+      // Recent CLI products for the site, newest first.
       const list = await this.fetch<{
         "@graph"?: Array<{ id: string; issuanceTime: string }>;
-      }>(`${this.baseUrl}/products/types/CLI/locations/${office}`);
+      }>(`${this.baseUrl}/products/types/CLI/locations/${siteCode}`);
 
       const entries = list["@graph"] ?? [];
       if (entries.length === 0) {

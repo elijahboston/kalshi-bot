@@ -283,6 +283,13 @@ export async function updateStationHealthGate(): Promise<StationHealthDecision[]
   // a bot that no longer exists; the gate must only ever judge the current one.
   const rawCutoff = new Date(Date.now() - windowDays * 86400_000).toISOString();
   const cutoff = rawCutoff > REGIME_BOUNDARY_ISO ? rawCutoff : REGIME_BOUNDARY_ISO;
+  // The regime clamp must bind on the ORDER's entry time, not the market's
+  // updated_at: updated_at is rewritten by any touch of the market row (the
+  // 2026-06-05 bracket-geometry migration bumped 1,584 old markets past the
+  // boundary, and seven minutes after the manual restore the gate re-disabled
+  // all six stations from those same old-regime trades — 2026-06-06 incident,
+  // round two). orders.created_at is immutable and is what "trades made by the
+  // current bot" actually means.
 
   // Settled, model-driven trade outcomes within the window.
   const rows = await db
@@ -304,7 +311,8 @@ export async function updateStationHealthGate(): Promise<StationHealthDecision[]
         notLike(signals.recommendation, "confirm_%"),
         inArray(markets.result, ["yes", "no"]),
         isNotNull(markets.stationId),
-        gte(markets.updatedAt, cutoff)
+        gte(markets.updatedAt, cutoff),
+        gte(orders.createdAt, REGIME_BOUNDARY_ISO)
       )
     );
 

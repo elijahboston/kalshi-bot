@@ -8,6 +8,18 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
+## 2026-06-07
+
+### `calibration` — CLI products fetched by SITE code, not WFO office (follow-up #1: zero `cli` actuals ever landed)
+- **Change:** `getCliReport` now queries `/products/types/CLI/locations/{site}` (e.g. `NYC`) instead of `{office}` (e.g. `OKX`); the `STATION_OFFICE` map is gone, `CLI_SITE_CODE` is the single source. Regression test asserts the exact URL path (the old mock matched any `/locations/` URL, which is how the bug survived testing).
+- **Why:** Follow-up #1 came due and found zero `cli`-source actuals — every actual since the N1 fix was `settlement` (midpoint, ±1°F). The NWS products API does not index CLI by WFO: `/locations/OKX` returns an empty `@graph` with HTTP 200, the same silent-failure class as the HRRR model id. Live-verified exact values for all stations (e.g. KDEN Jun 6: CLI 91 vs settlement-mid 90.5). Forward path self-corrects as markets settle; retro-upgrade of existing settlement rows needs an explicit human go-ahead (in-place ground-truth rewrite).
+- **Doc:** [`follow-ups.md`](follow-ups.md) (Log, 2026-06-07)
+
+### `calibration` — Station-health regime clamp binds on order entry time (incident round 2)
+- **Change:** The gate's settled-outcome query adds `orders.created_at >= REGIME_BOUNDARY_ISO`. The `markets.updated_at >= cutoff` window filter remains for recency, but the regime clamp no longer trusts it.
+- **Why:** Seven minutes after the 2026-06-06 manual restore, the gate **re-disabled all six stations**: the first clamp bound on `markets.updated_at`, which the bracket-geometry migration had rewritten on 1,584 old markets — old-regime trades (Apr 26–Jun 4 entries) passed the "post-boundary" filter. `updated_at` is a proxy rewritten by any touch of the row; `orders.created_at` is immutable and is what "trades made by the current bot" means. Overnight impact negligible (zero would-be entries at the wrongly-disabled stations).
+- **Doc:** [`follow-ups.md`](follow-ups.md) (Log, 2026-06-07 incident round 2)
+
 ## 2026-06-06
 
 ### `calibration` — Station-health gate clamps to the regime boundary (incident fix) + config audit trail

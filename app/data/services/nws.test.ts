@@ -433,6 +433,31 @@ describe("NwsService.getCliReport", () => {
     expect(r.maxTempF).toBe(82);
   });
 
+  test("REGRESSION: fetches the product list by CLI SITE code, not WFO office (follow-up #1)", async () => {
+    // The products API indexes CLI by site code; /locations/OKX (the WFO)
+    // returns an empty @graph with no error, so the original office-keyed
+    // fetch silently produced zero `cli` actuals for every station. The mock
+    // here matched any /locations/ URL, which is why tests never caught it —
+    // assert the exact path.
+    const svc = new NwsService();
+    const urls: string[] = [];
+    globalThis.fetch = mock((url: string) => {
+      urls.push(url);
+      if (url.includes("/products/types/CLI/locations/")) {
+        return Promise.resolve(
+          cliListResponse([{ id: "nyc-15", issuanceTime: "2026-06-15T21:30:00Z" }]),
+        );
+      }
+      return Promise.resolve(
+        cliProductResponse("nyc-15", CLI_NYC_NORMAL, "2026-06-15T21:30:00Z"),
+      );
+    }) as any;
+
+    await svc.getCliReport("KNYC", "2026-06-15");
+    const listUrl = urls.find((u) => u.includes("/products/types/CLI/locations/"));
+    expect(listUrl).toEndWith("/products/types/CLI/locations/NYC");
+  });
+
   test("filters by CLI site code — ignores another site's product for the same office", async () => {
     const svc = new NwsService();
     // OKX office list also contains a non-NYC site; only CLINYC should match.
