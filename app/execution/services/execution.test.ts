@@ -24,6 +24,12 @@ const mockBotConfig = {
   maxSpreadCents: 10,
   confirmationBetSizeCents: 500,
   confirmationMaxEntryPrice: 0.93,
+  // Confidence-scaled %-of-balance sizing (2026-06-09) — off by default.
+  confidenceSizePctEnabled: false,
+  confidenceSizeMinPct: 0.01,
+  confidenceSizeMaxPct: 0.10,
+  confidenceSizeFloorConfidence: 0.80,
+  maxExposurePctOfBalance: 0,
 };
 
 mock.module("@kcb/config", () => ({
@@ -31,7 +37,7 @@ mock.module("@kcb/config", () => ({
 }));
 
 import { getDb, runMigrations, orders, positions, markets, and } from "@kcb/db";
-import { ExecutionService, computeKelly, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
+import { ExecutionService, computeKelly, confidenceSizedPct, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
 import { bus } from "@kcb/engine";
 import { eq, sql } from "drizzle-orm";
 
@@ -57,6 +63,11 @@ beforeEach(async () => {
   mockBotConfig.maxSpreadCents = 10;
   mockBotConfig.confirmationBetSizeCents = 500;
   mockBotConfig.confirmationMaxEntryPrice = 0.93;
+  mockBotConfig.confidenceSizePctEnabled = false;
+  mockBotConfig.confidenceSizeMinPct = 0.01;
+  mockBotConfig.confidenceSizeMaxPct = 0.10;
+  mockBotConfig.confidenceSizeFloorConfidence = 0.80;
+  mockBotConfig.maxExposurePctOfBalance = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -1345,5 +1356,191 @@ describe("executeSignal confirmation mode (win-rate-80 #2)", () => {
     expect(confirm.skipReason).toBeNull();
     expect(confirm.orderId).toBeString();
     expect(readOrder(ticker)!.limitPrice).toBe(10);
+  });
+});
+
+describe("confidenceSizedPct (pure)", () => {
+  test("floor confidence → minPct", () => {
+    expect(confidenceSizedPct(0.80, 0.80, 0.01, 0.10)).toBeCloseTo(0.01, 6);
+  });
+  test("confidence 1.0 → maxPct", () => {
+    expect(confidenceSizedPct(1.0, 0.80, 0.01, 0.10)).toBeCloseTo(0.10, 6);
+  });
+  test("midpoint of the band → midpoint pct", () => {
+    // 0.90 is halfway across [0.80, 1.0] → halfway across [0.01, 0.10] = 0.055
+    expect(confidenceSizedPct(0.90, 0.80, 0.01, 0.10)).toBeCloseTo(0.055, 6);
+  });
+  test("below floor clamps to minPct", () => {
+    expect(confidenceSizedPct(0.50, 0.80, 0.01, 0.10)).toBeCloseTo(0.01, 6);
+  });
+  test("above 1 clamps to maxPct", () => {
+    expect(confidenceSizedPct(1.5, 0.80, 0.01, 0.10)).toBeCloseTo(0.10, 6);
+  });
+  test("degenerate floor ≥ 1 collapses to maxPct", () => {
+    expect(confidenceSizedPct(0.99, 1.0, 0.01, 0.10)).toBe(0.10);
+  });
+});
+
+describe("executeSignal confidence-scaled %-of-balance sizing (2026-06-09)", () => {
+  test("sizes a confirmation entry as a confidence-scaled % of balance", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 86, yesAsk: 88, lastYesPrice: 87 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12; // scaled cap, doesn't clip here
+
+    const service = new ExecutionService(stubKalshi);
+    // conf 0.90 → 0.055 of $100 = 550¢; floor(550/88) = 6 contracts.
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.87,
+        estimatedProb: 0.55,
+        confidence: 0.90,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(6);
+  });
+
+  test("higher confidence → larger wager", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B41";
+    seedMarket(ticker, { yesBid: 86, yesAsk: 88, lastYesPrice: 87 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+
+    const service = new ExecutionService(stubKalshi);
+    // conf 0.97 → 0.01 + (0.17/0.20)*0.09 = 0.0865 → 865¢; floor(865/88) = 9.
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.87,
+        estimatedProb: 0.55,
+        confidence: 0.97,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(9); // > the 6 from conf 0.90
+  });
+
+  test("pct sizing overrides the flat confirmation size", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B42";
+    seedMarket(ticker, { yesBid: 86, yesAsk: 88, lastYesPrice: 87 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+    mockBotConfig.confirmationBetSizeCents = 500; // would give floor(500/88)=5
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.87,
+        estimatedProb: 0.55,
+        confidence: 0.90,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(6); // pct (550¢→6), not flat (500¢→5)
+  });
+
+  test("per-ticker exposure cap scales to balance %, bypassing the fixed contract cap", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B43";
+    // confirm_no at 100 − bid(80) = 20¢.
+    seedMarket(ticker, { yesBid: 80, yesAsk: 82, lastYesPrice: 81 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.confidenceSizeMinPct = 0.50; // force a huge bet so the cap binds
+    mockBotConfig.confidenceSizeMaxPct = 0.50;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+    mockBotConfig.maxContractsPerOrder = 15; // fixed cap must NOT bind in pct mode
+
+    const service = new ExecutionService(stubKalshi);
+    // betAmount = 50% of 10000 = 5000¢ → floor(5000/20)=250, but the scaled
+    // exposure cap = round(10000*0.12)=1200¢ → floor(1200/20)=60 contracts.
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "no",
+        recommendation: "confirm_no",
+        marketPrice: 0.18,
+        estimatedProb: 0.45,
+        confidence: 0.90,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(60); // 1200¢ cap, not the 15 fixed cap
+  });
+
+  test("with maxExposurePctOfBalance=0 the fixed caps still clamp in pct mode", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B44";
+    seedMarket(ticker, { yesBid: 86, yesAsk: 88, lastYesPrice: 87 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.confidenceSizeMinPct = 0.50;
+    mockBotConfig.confidenceSizeMaxPct = 0.50;
+    mockBotConfig.maxExposurePctOfBalance = 0; // disabled → fixed caps apply
+    mockBotConfig.maxExposurePerTicker = 500; // fixed cap binds: floor(500/88)=5
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.87,
+        estimatedProb: 0.55,
+        confidence: 0.90,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(5); // clamped by fixed $5 exposure cap
+  });
+
+  test("pct mode bypasses minBetSizeCents (small low-confidence bets are intentional)", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B45";
+    seedMarket(ticker, { yesBid: 48, yesAsk: 50, lastYesPrice: 49 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+    mockBotConfig.minBetSizeCents = 500; // would normally reject a sub-$5 regular bet
+
+    const service = new ExecutionService(stubKalshi);
+    // conf 0.80 (floor) → 1% of $100 = 100¢; floor(100/50)=2 contracts (100¢ < 500¢ floor).
+    // Regular buy_yes with positive Kelly (est 0.7 > market 0.5) — would be
+    // skipped by the dust guard if pct mode didn't exempt it.
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "buy_yes",
+        marketPrice: 0.50,
+        estimatedProb: 0.70,
+        confidence: 0.80,
+        edge: 0.20,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(2);
   });
 });

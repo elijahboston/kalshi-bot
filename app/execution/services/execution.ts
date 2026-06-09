@@ -346,18 +346,63 @@ export class ExecutionService {
       config.bot.highConfidenceThreshold > 0 &&
       signal.confidence >= config.bot.highConfidenceThreshold &&
       config.bot.highConfidenceBetSizeCents > 0;
-    const flatSize = isConfirmation
-      ? config.bot.confirmationBetSizeCents
-      : isHighConfidence
-        ? config.bot.highConfidenceBetSizeCents
-        : config.bot.flatBetSizeCents;
-    const betAmount = flatSize > 0
-      ? flatSize
-      : Math.floor(balance * cappedKelly);
+
+    // Confidence-scaled %-of-balance sizing (2026-06-09). When enabled it is the
+    // sizing method for EVERY entry — a confidence-ramped fraction of available
+    // balance (`balance` here is already net of exit reserve / floor / profit
+    // reserve, set in the orchestrator) — taking precedence over the flat /
+    // confirmation / high-confidence / Kelly dollar paths. The EV-sign gate
+    // above still applies to non-confirmation entries.
+    const pctMode = config.bot.confidenceSizePctEnabled;
+    let betAmount: number;
+    let sizingPct = 0;
+    if (pctMode) {
+      sizingPct = confidenceSizedPct(
+        signal.confidence,
+        config.bot.confidenceSizeFloorConfidence,
+        config.bot.confidenceSizeMinPct,
+        config.bot.confidenceSizeMaxPct
+      );
+      betAmount = Math.floor(balance * sizingPct);
+    } else {
+      const flatSize = isConfirmation
+        ? config.bot.confirmationBetSizeCents
+        : isHighConfidence
+          ? config.bot.highConfidenceBetSizeCents
+          : config.bot.flatBetSizeCents;
+      betAmount = flatSize > 0
+        ? flatSize
+        : Math.floor(balance * cappedKelly);
+    }
+
+    // Per-ticker exposure cap. In pct mode it scales to a fraction of available
+    // balance (when maxExposurePctOfBalance > 0) so it tracks the bankroll
+    // instead of the fixed $10 tuned for the old $5 flats; otherwise the fixed
+    // cap stands. The per-order contract cap likewise scales: in pct mode the
+    // bet is already bounded by the exposure cap, so the fixed
+    // maxContractsPerOrder must not clip it — derive the ceiling from the
+    // (scaled) exposure cap instead.
+    const effectiveMaxExposure =
+      pctMode && config.bot.maxExposurePctOfBalance > 0
+        ? Math.round(balance * config.bot.maxExposurePctOfBalance)
+        : config.bot.maxExposurePerTicker;
+    const effectiveMaxContracts =
+      pctMode && config.bot.maxExposurePctOfBalance > 0
+        ? Math.floor(effectiveMaxExposure / price)
+        : config.bot.maxContractsPerOrder;
+
     let contracts = Math.min(
       Math.floor(betAmount / price),
-      config.bot.maxContractsPerOrder
+      effectiveMaxContracts
     );
+
+    if (pctMode) {
+      log.info(
+        `${signal.ticker}: pct-size conf ${signal.confidence.toFixed(2)} → ` +
+        `${(sizingPct * 100).toFixed(1)}% of ${balance}¢ = ${betAmount}¢ → ` +
+        `${contracts} @ ${price}¢ (exposure cap ${effectiveMaxExposure}¢)`
+      );
+    }
 
     if (contracts <= 0) {
       const reason = `0 contracts at ${price}¢ (betAmount=${betAmount}¢)`;
@@ -396,9 +441,9 @@ export class ExecutionService {
       .where(eq(positions.ticker, signal.ticker))
       .limit(1);
     const currentExposure = existingPosition?.costBasis ?? 0;
-    const remainingRoom = config.bot.maxExposurePerTicker - currentExposure;
+    const remainingRoom = effectiveMaxExposure - currentExposure;
     if (remainingRoom <= 0) {
-      const reason = `at max exposure ${currentExposure}¢/${config.bot.maxExposurePerTicker}¢`;
+      const reason = `at max exposure ${currentExposure}¢/${effectiveMaxExposure}¢`;
       log.info(`Skipping ${signal.ticker}: ${reason}`);
       return skip(reason);
     }
@@ -421,9 +466,14 @@ export class ExecutionService {
     // caught live 2026-06-05, first tick after the pathway shipped. The guard's
     // intent is to kill Kelly dust-bets, not deliberately-flat market-follow
     // entries whose size is already pinned by config.
+    // pct mode is also exempt: a low-confidence entry is *meant* to be a small
+    // fraction of balance (1% of a small bankroll can fall under the floor), so
+    // the dust guard — which exists to kill Kelly micro-bets — would wrongly
+    // reject deliberately-small confidence-scaled entries.
     const actualSpend = contracts * price;
     if (
       !isConfirmation &&
+      !pctMode &&
       config.bot.minBetSizeCents > 0 &&
       actualSpend < config.bot.minBetSizeCents
     ) {
@@ -439,15 +489,17 @@ export class ExecutionService {
     // distinguishable from exits while signalling no-Kelly sizing.
     const recordedKelly = isConfirmation ? 0 : cappedKelly;
 
-    const tierTag = isConfirmation
-      ? ` CONFIRM`
-      : isHighConfidence
-        ? ` HIGH-CONF(${signal.confidence.toFixed(2)})`
-        : "";
+    const tierTag = pctMode
+      ? ` PCT(${(sizingPct * 100).toFixed(1)}%)`
+      : isConfirmation
+        ? ` CONFIRM`
+        : isHighConfidence
+          ? ` HIGH-CONF(${signal.confidence.toFixed(2)})`
+          : "";
     log.info(
       `Executing:${tierTag} ${side.toUpperCase()} ${signal.ticker} × ${contracts} @ ${price}¢ ` +
       `(Kelly: ${cappedKelly.toFixed(4)}, edge: ${(signal.edge * 100).toFixed(1)}¢, ` +
-      `flat: ${flatSize}¢)`
+      `bet: ${betAmount}¢)`
     );
 
     if (config.bot.dryRun) {
@@ -710,4 +762,26 @@ function computeKelly(
   return Math.max(0, kelly);
 }
 
-export { computeKelly };
+/**
+ * Confidence-scaled fraction of balance to wager (2026-06-09 feature).
+ *
+ * Linear ramp: confidence ≤ `floorConfidence` → `minPct`; confidence 1.0 →
+ * `maxPct`; in between, interpolated. Confidence is clamped to
+ * [floorConfidence, 1] first, so the result is always within [minPct, maxPct]
+ * regardless of input. A degenerate `floorConfidence ≥ 1` collapses to `maxPct`.
+ *
+ * Pure — exported for unit tests.
+ */
+function confidenceSizedPct(
+  confidence: number,
+  floorConfidence: number,
+  minPct: number,
+  maxPct: number
+): number {
+  if (floorConfidence >= 1) return maxPct;
+  const clamped = Math.max(floorConfidence, Math.min(1, confidence));
+  const t = (clamped - floorConfidence) / (1 - floorConfidence);
+  return minPct + t * (maxPct - minPct);
+}
+
+export { computeKelly, confidenceSizedPct };

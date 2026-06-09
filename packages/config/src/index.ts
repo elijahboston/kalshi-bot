@@ -114,6 +114,29 @@ export interface BotConfig {
     /** Max contract price (0-1) the bot may pay on a confirmation entry — keeps minimum payoff ≥ (1 − this). */
     confirmationMaxEntryPrice: number;
 
+    // ── Confidence-scaled %-of-balance sizing (2026-06-09) ──
+    /** Master switch: when true, every entry is sized as a confidence-scaled
+     * fraction of AVAILABLE balance (the value passed to executeSignal, net of
+     * exit reserve / floor / profit reserve), taking precedence over the flat /
+     * confirmation / high-confidence / Kelly dollar paths. 0/false = disabled. */
+    confidenceSizePctEnabled: boolean;
+    /** Fraction of available balance wagered at `confidenceSizeFloorConfidence`
+     * (the low-confidence end). e.g. 0.01 = 1%. */
+    confidenceSizeMinPct: number;
+    /** Fraction of available balance wagered at confidence 1.0 (the high end).
+     * e.g. 0.10 = 10%. Linear ramp between min and max across the band. */
+    confidenceSizeMaxPct: number;
+    /** Confidence (0-1) mapped to `confidenceSizeMinPct`; confidences at/below it
+     * all size at the min. Default 0.80 = the `minConfidence` entry gate, so the
+     * ramp spans exactly the tradable confidence range. */
+    confidenceSizeFloorConfidence: number;
+    /** When > 0 AND pct sizing is on, the per-ticker exposure cap becomes this
+     * fraction of available balance instead of the fixed `maxExposurePerTicker`,
+     * and the fixed `maxContractsPerOrder` clip is replaced by what this cap
+     * allows — so the scaled bet is never silently clipped by caps tuned for the
+     * old $5 flats. 0 = keep the fixed caps. */
+    maxExposurePctOfBalance: number;
+
     // ── Sigma floor (win-rate-80-plan #4) ──
     /** Floor on the CDF sigma as a fraction of bracket width (tails use width 1.0). Prevents the (possibly overfit) empirical-sigma blend from collapsing the CDF into overconfidence on tight near-mean brackets. 0 = disabled. Applied before observation adjustments — post-peak obs knowledge (N3) is real information and may deliberately go below it. */
     sigmaFloorBracketWidthFactor: number;
@@ -289,6 +312,11 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   confirmation_min_model_agreement: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMinModelAgreement = n; },
   confirmation_bet_size_cents: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationBetSizeCents = n; },
   confirmation_max_entry_price: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationMaxEntryPrice = n; },
+  confidence_size_pct_enabled: (c, v) => { c.bot.confidenceSizePctEnabled = v === "true" || v === "1"; },
+  confidence_size_min_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confidenceSizeMinPct = n; },
+  confidence_size_max_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confidenceSizeMaxPct = n; },
+  confidence_size_floor_confidence: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confidenceSizeFloorConfidence = n; },
+  max_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePctOfBalance = n; },
   confirmation_exit_conviction_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationExitConvictionFloor = n; },
   ultra_sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperHorizonHours = n; },
   ultra_sniper_edge_discount: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperEdgeDiscount = n; },
@@ -382,6 +410,12 @@ export function loadConfig(): BotConfig {
       confirmationMinModelAgreement: envNum("CONFIRMATION_MIN_MODEL_AGREEMENT", 0.50),
       confirmationBetSizeCents: envNum("CONFIRMATION_BET_SIZE_CENTS", 500),
       confirmationMaxEntryPrice: envNum("CONFIRMATION_MAX_ENTRY_PRICE", 0.93),
+      // Confidence-scaled %-of-balance sizing (2026-06-09) — ships off; runtime row enables
+      confidenceSizePctEnabled: envBool("CONFIDENCE_SIZE_PCT_ENABLED", false),
+      confidenceSizeMinPct: envNum("CONFIDENCE_SIZE_MIN_PCT", 0.01),
+      confidenceSizeMaxPct: envNum("CONFIDENCE_SIZE_MAX_PCT", 0.10),
+      confidenceSizeFloorConfidence: envNum("CONFIDENCE_SIZE_FLOOR_CONFIDENCE", 0.80),
+      maxExposurePctOfBalance: envNum("MAX_EXPOSURE_PCT_OF_BALANCE", 0),
       // Confirmation exit policy (2026-06-06 churn fix)
       confirmationExitConvictionFloor: envNum("CONFIRMATION_EXIT_CONVICTION_FLOOR", 0.60),
       // Ultra-sniper window (win-rate-80-plan #8) — ships dark; runtime row enables

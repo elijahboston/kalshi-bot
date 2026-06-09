@@ -8,7 +8,12 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
-## 2026-06-07
+## 2026-06-09
+
+### `sizing` — Confidence-scaled %-of-balance wagers (replaces flat sizing when enabled)
+- **Change:** New sizing mode: when `confidence_size_pct_enabled=true`, every entry is sized as a confidence-ramped fraction of **available** balance (the value the orchestrator already passes to `executeSignal`, net of exit reserve / $50 floor / profit reserve), taking precedence over the flat / confirmation / high-confidence / Kelly dollar paths. Linear ramp via the pure, unit-tested `confidenceSizedPct(confidence, floor, minPct, maxPct)`: confidence ≤ `confidence_size_floor_confidence` (default 0.80, = the `minConfidence` gate) → `confidence_size_min_pct` (1%); confidence 1.0 → `confidence_size_max_pct` (10%); interpolated between. Because scaling to 1–10% of balance produces bets far larger than the old $5 flats, the per-ticker exposure cap and per-order contract cap would silently clip them — so when `max_exposure_pct_of_balance>0` the exposure cap becomes that fraction of available balance and the fixed `maxContractsPerOrder` ceiling is replaced by what that scaled cap allows. pct mode also bypasses the `minBetSizeCents` dust guard (a low-confidence 1% bet is *meant* to be small; the guard exists to kill Kelly micro-bets). Trade SELECTION is unchanged (only sizes move) — confirmation entries already bypassed the EV-sign and dust guards, so the win-rate measurement stays comparable across the change.
+- **Why:** Direct request — scale conviction into position size instead of flat $5 on every trade. On the 30 settled confirmation trades, confidence spans 0.85–0.97 (avg 0.916), so the 0.80→1.0 ramp puts real trades at ~3.4%–9.6% of balance, exercising most of the band. Sizing up the high-confidence book (which is also the higher-win-rate book) is the lever from "+$5 on a validated 90% pathway" toward meaningful paper P&L. Ships **off** (config default); enabled in paper via audited `ops set` with `max_exposure_pct_of_balance=0.12` (just above the 10% max single bet).
+- **Doc:** [`follow-ups.md`](follow-ups.md) (a sizing-impact check is queued for the next sweep)
 
 ### `calibration` — CLI products fetched by SITE code, not WFO office (follow-up #1: zero `cli` actuals ever landed)
 - **Change:** `getCliReport` now queries `/products/types/CLI/locations/{site}` (e.g. `NYC`) instead of `{office}` (e.g. `OKX`); the `STATION_OFFICE` map is gone, `CLI_SITE_CODE` is the single source. Regression test asserts the exact URL path (the old mock matched any `/locations/` URL, which is how the bug survived testing).
