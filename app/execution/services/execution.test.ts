@@ -1515,17 +1515,17 @@ describe("executeSignal confidence-scaled %-of-balance sizing (2026-06-09)", () 
     expect(readOrder(ticker)!.quantity).toBe(5); // clamped by fixed $5 exposure cap
   });
 
-  test("pct mode bypasses minBetSizeCents (small low-confidence bets are intentional)", async () => {
+  test("pct mode floors a small wager up to minBetSizeCents ($5 minimum)", async () => {
     const ticker = "KXHIGHNY-26MAR04-B45";
     seedMarket(ticker, { yesBid: 48, yesAsk: 50, lastYesPrice: 49 });
     mockBotConfig.confidenceSizePctEnabled = true;
     mockBotConfig.maxExposurePctOfBalance = 0.12;
-    mockBotConfig.minBetSizeCents = 500; // would normally reject a sub-$5 regular bet
+    mockBotConfig.minBetSizeCents = 500; // $5 wager floor
 
     const service = new ExecutionService(stubKalshi);
-    // conf 0.80 (floor) → 1% of $100 = 100¢; floor(100/50)=2 contracts (100¢ < 500¢ floor).
-    // Regular buy_yes with positive Kelly (est 0.7 > market 0.5) — would be
-    // skipped by the dust guard if pct mode didn't exempt it.
+    // conf 0.80 (floor) → 1% of $100 = 100¢, below the $5 floor → floored to
+    // 500¢ → floor(500/50)=10 contracts (not the un-floored 2). Regular buy_yes
+    // with positive Kelly (est 0.7 > market 0.5) so the EV gate passes.
     const { orderId, skipReason } = await service.executeSignal(
       makeSignal({
         ticker,
@@ -1540,6 +1540,58 @@ describe("executeSignal confidence-scaled %-of-balance sizing (2026-06-09)", () 
     );
 
     expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(10); // floored to $5, not 2
+  });
+
+  test("pct mode does NOT floor a wager already above minBetSizeCents", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B46";
+    seedMarket(ticker, { yesBid: 86, yesAsk: 88, lastYesPrice: 87 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+    mockBotConfig.minBetSizeCents = 500;
+
+    const service = new ExecutionService(stubKalshi);
+    // conf 0.90 → 5.5% of $100 = 550¢ > 500¢ floor → unaffected → floor(550/88)=6.
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "confirm_yes",
+        marketPrice: 0.87,
+        estimatedProb: 0.55,
+        confidence: 0.90,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    expect(readOrder(ticker)!.quantity).toBe(6);
+  });
+
+  test("minBetSizeCents=0 disables the floor (pct value stands)", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B47";
+    seedMarket(ticker, { yesBid: 48, yesAsk: 50, lastYesPrice: 49 });
+    mockBotConfig.confidenceSizePctEnabled = true;
+    mockBotConfig.maxExposurePctOfBalance = 0.12;
+    mockBotConfig.minBetSizeCents = 0; // floor disabled
+
+    const service = new ExecutionService(stubKalshi);
+    // conf 0.80 → 1% of $100 = 100¢, no floor → floor(100/50)=2 contracts.
+    const { orderId } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        side: "yes",
+        recommendation: "buy_yes",
+        marketPrice: 0.50,
+        estimatedProb: 0.70,
+        confidence: 0.80,
+        edge: 0.20,
+      }),
+      10000
+    );
+
     expect(orderId).toBeString();
     expect(readOrder(ticker)!.quantity).toBe(2);
   });

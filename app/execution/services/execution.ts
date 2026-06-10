@@ -356,6 +356,7 @@ export class ExecutionService {
     const pctMode = config.bot.confidenceSizePctEnabled;
     let betAmount: number;
     let sizingPct = 0;
+    let sizingFloored = false;
     if (pctMode) {
       sizingPct = confidenceSizedPct(
         signal.confidence,
@@ -363,7 +364,14 @@ export class ExecutionService {
         config.bot.confidenceSizeMinPct,
         config.bot.confidenceSizeMaxPct
       );
-      betAmount = Math.floor(balance * sizingPct);
+      const rawBet = Math.floor(balance * sizingPct);
+      // Floor the wager to minBetSizeCents ($5): a low-confidence / small-balance
+      // bet (1% of a sub-$500 bankroll is < $5) earns too little to clear Kalshi
+      // fees. minBetSizeCents=0 disables the floor. The minBetSizeCents *skip*
+      // guard below stays bypassed in pct mode — integer division at 80-93¢ makes
+      // exact ≥floor spend impossible, so we floor the budget and still place.
+      betAmount = Math.max(rawBet, config.bot.minBetSizeCents);
+      sizingFloored = betAmount > rawBet;
     } else {
       const flatSize = isConfirmation
         ? config.bot.confirmationBetSizeCents
@@ -399,7 +407,8 @@ export class ExecutionService {
     if (pctMode) {
       log.info(
         `${signal.ticker}: pct-size conf ${signal.confidence.toFixed(2)} → ` +
-        `${(sizingPct * 100).toFixed(1)}% of ${balance}¢ = ${betAmount}¢ → ` +
+        `${(sizingPct * 100).toFixed(1)}% of ${balance}¢ = ${betAmount}¢` +
+        `${sizingFloored ? ` (floored to ${config.bot.minBetSizeCents}¢ min)` : ""} → ` +
         `${contracts} @ ${price}¢ (exposure cap ${effectiveMaxExposure}¢)`
       );
     }
@@ -466,10 +475,11 @@ export class ExecutionService {
     // caught live 2026-06-05, first tick after the pathway shipped. The guard's
     // intent is to kill Kelly dust-bets, not deliberately-flat market-follow
     // entries whose size is already pinned by config.
-    // pct mode is also exempt: a low-confidence entry is *meant* to be a small
-    // fraction of balance (1% of a small bankroll can fall under the floor), so
-    // the dust guard — which exists to kill Kelly micro-bets — would wrongly
-    // reject deliberately-small confidence-scaled entries.
+    // pct mode is also exempt from the *skip*: the wager budget is already
+    // floored to minBetSizeCents above, but integer division at 80-93¢ leaves
+    // actualSpend a few cents under it (5 × 87¢ = 435 < 500) — the same rounding
+    // quirk confirmation entries hit. Skipping here would drop a legitimately
+    // floored wager; the floor on betAmount is what enforces the $5 minimum.
     const actualSpend = contracts * price;
     if (
       !isConfirmation &&
