@@ -242,11 +242,25 @@ export class ExecutionService {
       return skip(reason);
     }
 
+    // Confirmation-mode entry (win-rate-80-plan-2026-06-05.md #2): the model
+    // intentionally disagrees with paying a confident market 80–93¢; we trust
+    // the market here. These signals BYPASS the Kelly EV-sign gate and the
+    // minContractPrice floor, size flat, and are capped by confirmationMaxEntryPrice.
+    const isConfirmation =
+      signal.recommendation === "confirm_yes" || signal.recommendation === "confirm_no";
+
     // Loss-based re-entry guard: require 1.5x normal edge after a recent loss exit.
     // This prevents the buy-exit-rebuy churn loop where the bot keeps re-entering
     // a position that the market is moving against.
+    //
+    // Confirmation entries are exempt: their model edge is ≤ 0 by construction
+    // (entry is at/above market price), so an edge-based bar is unsatisfiable —
+    // one loss exit permanently locked the ticker out for the 2h loss window.
+    // Their re-entry bar is the confirmation gate itself re-firing (market
+    // conviction back ≥ minMarketConviction and price ≤ cap). Post-regime data
+    // 2026-06-10: 12/15 recent-loss-blocked signals would have won.
     const recentLoss = getRecentLoss(signal.ticker);
-    if (recentLoss) {
+    if (recentLoss && !isConfirmation) {
       const requiredEdge = signal.edgeThreshold * 1.5;
       if (signal.edge < requiredEdge) {
         const reason =
@@ -259,13 +273,6 @@ export class ExecutionService {
     }
 
     const side = signal.side as "yes" | "no";
-
-    // Confirmation-mode entry (win-rate-80-plan-2026-06-05.md #2): the model
-    // intentionally disagrees with paying a confident market 80–93¢; we trust
-    // the market here. These signals BYPASS the Kelly EV-sign gate and the
-    // minContractPrice floor, size flat, and are capped by confirmationMaxEntryPrice.
-    const isConfirmation =
-      signal.recommendation === "confirm_yes" || signal.recommendation === "confirm_no";
 
     // Market-book lookup (addendum N4): price the entry against what we'd
     // actually pay — the ask for YES, 100−bid for NO — instead of the stale
@@ -462,6 +469,49 @@ export class ExecutionService {
       const reason = `price ${price}¢ exceeds remaining exposure room ${remainingRoom}¢`;
       log.info(`Skipping ${signal.ticker}: ${reason}`);
       return skip(reason);
+    }
+
+    // Per-EVENT exposure cap: the per-ticker cap above can't see that several
+    // tickers in one event are a single correlated thesis (NO on adjacent
+    // brackets + YES on the center bracket all lose together on a 1-bracket
+    // forecast miss). Cap the summed cost basis across every open position in
+    // the signal's event at a fraction of available balance. 0 = disabled.
+    if (config.bot.maxEventExposurePctOfBalance > 0) {
+      const [marketRow] = await db
+        .select({ eventTicker: markets.eventTicker })
+        .from(markets)
+        .where(eq(markets.ticker, signal.ticker))
+        .limit(1);
+      const eventTicker = marketRow?.eventTicker ?? null;
+      if (eventTicker) {
+        const [expRow] = await db
+          .select({ s: sql<number>`COALESCE(SUM(${positions.costBasis}), 0)` })
+          .from(positions)
+          .innerJoin(markets, eq(positions.ticker, markets.ticker))
+          .where(eq(markets.eventTicker, eventTicker));
+        const eventExposure = Number(expRow?.s ?? 0);
+        const eventCap = Math.round(balance * config.bot.maxEventExposurePctOfBalance);
+        const eventRoom = eventCap - eventExposure;
+        if (eventRoom <= 0) {
+          const reason = `event exposure ${eventExposure}¢/${eventCap}¢ (${eventTicker})`;
+          log.info(`Skipping ${signal.ticker}: ${reason}`);
+          return skip(reason);
+        }
+        const fitted = Math.min(contracts, Math.floor(eventRoom / price));
+        if (fitted <= 0) {
+          const reason =
+            `price ${price}¢ exceeds remaining event exposure room ${eventRoom}¢ (${eventTicker})`;
+          log.info(`Skipping ${signal.ticker}: ${reason}`);
+          return skip(reason);
+        }
+        if (fitted < contracts) {
+          log.info(
+            `${signal.ticker}: sized down ${contracts} → ${fitted} contracts by event cap ` +
+            `(${eventExposure}¢ held of ${eventCap}¢ across ${eventTicker})`
+          );
+          contracts = fitted;
+        }
+      }
     }
 
     // Minimum bet size filter. When the Kelly- and cap-sized spend falls below

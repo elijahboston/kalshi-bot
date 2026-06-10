@@ -7,6 +7,7 @@ import {
   fToC,
   uuid,
   now,
+  takerFeeCents,
 } from "./index";
 
 describe("seriesCategory", () => {
@@ -167,6 +168,32 @@ describe("uuid", () => {
     const b = uuid();
     // UUIDv7 embeds timestamp — later IDs sort after earlier ones
     expect(a < b).toBe(true);
+  });
+});
+
+// Kalshi taker fee: ceil_to_cent(0.07 × C × P × (1−P)), P in dollars.
+describe("takerFeeCents", () => {
+  test("confirmation-price fill: 5 @ 87¢ → ceil(3.96) = 4¢", () => {
+    expect(takerFeeCents(87, 5)).toBe(4);
+  });
+
+  test("mid-price fill is the most expensive: 10 @ 50¢ → ceil(17.5) = 18¢", () => {
+    expect(takerFeeCents(50, 10)).toBe(18);
+  });
+
+  test("symmetric in price vs 100−price (YES and NO fills fee identically)", () => {
+    expect(takerFeeCents(90, 7)).toBe(takerFeeCents(10, 7));
+  });
+
+  test("always rounds up to the next cent", () => {
+    // 0.07 × 1 × 40 × 60 / 100 = 1.68 → 2
+    expect(takerFeeCents(40, 1)).toBe(2);
+  });
+
+  test("zero contracts or degenerate prices cost nothing", () => {
+    expect(takerFeeCents(87, 0)).toBe(0);
+    expect(takerFeeCents(0, 5)).toBe(0);
+    expect(takerFeeCents(100, 5)).toBe(0);
   });
 });
 

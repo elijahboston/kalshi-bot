@@ -19,7 +19,7 @@ import { KalshiClient, parseOrderFields, parsePositionFields } from "@kcb/kalshi
 import { persistAdaptiveThresholds, updateStationHealthGate } from "@kcb/signals";
 import { EnsembleService, NwsService } from "@kcb/data";
 import { bus, createLogger } from "../events";
-import { uuid, now } from "@kcb/shared";
+import { uuid, now, takerFeeCents } from "@kcb/shared";
 
 const log = createLogger("reconciliation");
 
@@ -1908,7 +1908,12 @@ export class ReconciliationService {
  * For each side:
  *   netQty = buyQty - sellQty  (positive = long, negative = short)
  *   settlement = netQty × 100  if that side won, else 0
- *   sidePnl = settlement + sellProceeds - buyCost
+ *   sidePnl = settlement + sellProceeds - buyCost - takerFees
+ *
+ * Every fill pays the Kalshi taker fee (the bot enters and exits at crossing
+ * prices). Settlement itself is fee-free. This is what flows into
+ * `calibration.realized_pnl` and therefore the paper balance — without it,
+ * paper PnL overstates by ~0.8¢/contract at confirmation prices.
  */
 export function computePerSidePnl(
   orderRows: Array<{ action: string; side: string; limitPrice: number; filledQuantity: number }>,
@@ -1916,9 +1921,11 @@ export function computePerSidePnl(
 ): number {
   let yesBuyCost = 0, yesBuyQty = 0, yesSellProceeds = 0, yesSellQty = 0;
   let noBuyCost = 0, noBuyQty = 0, noSellProceeds = 0, noSellQty = 0;
+  let fees = 0;
 
   for (const o of orderRows) {
     const cost = o.limitPrice * o.filledQuantity;
+    fees += takerFeeCents(o.limitPrice, o.filledQuantity);
     if (o.side === "yes") {
       if (o.action === "buy") { yesBuyCost += cost; yesBuyQty += o.filledQuantity; }
       else { yesSellProceeds += cost; yesSellQty += o.filledQuantity; }
@@ -1937,5 +1944,6 @@ export function computePerSidePnl(
   const noSettlement = !yesWon ? noNetQty * 100 : 0;
 
   return (yesSettlement + yesSellProceeds - yesBuyCost) +
-         (noSettlement + noSellProceeds - noBuyCost);
+         (noSettlement + noSellProceeds - noBuyCost) -
+         fees;
 }

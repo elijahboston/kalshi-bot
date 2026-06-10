@@ -119,14 +119,15 @@ function computeTradesPnl(
   );
 }
 
+// PnL is net of the per-order Kalshi taker fee: ceil(0.07·qty·p·(100−p)/100)¢.
 describe("trade-based PnL computation", () => {
   test("winning YES trade", () => {
     const pnl = computeTradesPnl(
       [{ action: "buy", side: "yes", price: 40, quantity: 5 }],
       1, // YES outcome
     );
-    // (100 - 40) * 5 = 300
-    expect(pnl).toBe(300);
+    // (100 - 40) * 5 = 300, fee ceil(8.4) = 9
+    expect(pnl).toBe(291);
   });
 
   test("losing YES trade", () => {
@@ -134,8 +135,8 @@ describe("trade-based PnL computation", () => {
       [{ action: "buy", side: "yes", price: 60, quantity: 3 }],
       0, // NO outcome
     );
-    // -60 * 3 = -180
-    expect(pnl).toBe(-180);
+    // -60 * 3 = -180, fee ceil(5.04) = 6
+    expect(pnl).toBe(-186);
   });
 
   test("winning NO trade", () => {
@@ -143,8 +144,8 @@ describe("trade-based PnL computation", () => {
       [{ action: "buy", side: "no", price: 30, quantity: 10 }],
       0, // NO outcome → NO wins
     );
-    // (100 - 30) * 10 = 700
-    expect(pnl).toBe(700);
+    // (100 - 30) * 10 = 700, fee ceil(14.7) = 15
+    expect(pnl).toBe(685);
   });
 
   test("losing NO trade", () => {
@@ -152,8 +153,8 @@ describe("trade-based PnL computation", () => {
       [{ action: "buy", side: "no", price: 50, quantity: 4 }],
       1, // YES outcome → NO loses
     );
-    // -50 * 4 = -200
-    expect(pnl).toBe(-200);
+    // -50 * 4 = -200, fee ceil(7.0) = 7
+    expect(pnl).toBe(-207);
   });
 
   test("multiple trades mixed", () => {
@@ -164,13 +165,14 @@ describe("trade-based PnL computation", () => {
       ],
       1,
     );
-    expect(pnl).toBe(450);
+    // 450, fees 9 + ceil(5.25)=6
+    expect(pnl).toBe(435);
   });
 
   test("sell reduces remaining position and counts proceeds", () => {
     // Buy YES@40 x5, sell YES@60 x3, outcome YES
     // yesNetQty=2, yesWon=true, payout=200
-    // PnL = 200 + 180 - 200 = 180
+    // PnL = 200 + 180 - 200 = 180, fees 9 + ceil(5.04)=6
     const pnl = computeTradesPnl(
       [
         { action: "buy", side: "yes", price: 40, quantity: 5 },
@@ -178,12 +180,12 @@ describe("trade-based PnL computation", () => {
       ],
       1,
     );
-    expect(pnl).toBe(180);
+    expect(pnl).toBe(165);
   });
 
   test("full exit before resolution uses sell proceeds only", () => {
     // Buy YES@60 x5, sell YES@40 x5, outcome NO
-    // PnL = 0 + 200 - 300 = -100
+    // PnL = 0 + 200 - 300 = -100, fees ceil(8.4)=9 ×2
     const pnl = computeTradesPnl(
       [
         { action: "buy", side: "yes", price: 60, quantity: 5 },
@@ -191,12 +193,12 @@ describe("trade-based PnL computation", () => {
       ],
       0,
     );
-    expect(pnl).toBe(-100);
+    expect(pnl).toBe(-118);
   });
 
   test("buy-exit-rebuy churn computes correctly", () => {
     // Buy YES@60 x5, sell YES@40 x5, buy YES@55 x5, outcome YES
-    // PnL = 500 + 200 - 575 = 125
+    // PnL = 500 + 200 - 575 = 125, fees 9 + 9 + ceil(8.66)=9
     const pnl = computeTradesPnl(
       [
         { action: "buy", side: "yes", price: 60, quantity: 5 },
@@ -205,7 +207,7 @@ describe("trade-based PnL computation", () => {
       ],
       1,
     );
-    expect(pnl).toBe(125);
+    expect(pnl).toBe(98);
   });
 
   test("no trades returns 0", () => {
@@ -235,8 +237,8 @@ describe("trade-based PnL computation", () => {
       0, // NO won
     );
     // noNetQty=4, noWon=true → settlement=400, buyCost=59*2+62*2=242
-    // PnL = 400 + 0 - 242 = 158
-    expect(pnl).toBe(158);
+    // PnL = 400 + 0 - 242 = 158, fees ceil(3.39)=4 + ceil(3.30)=4
+    expect(pnl).toBe(150);
   });
 
   test("cross-side sells: NO sells don't inflate YES PnL", () => {
@@ -245,7 +247,7 @@ describe("trade-based PnL computation", () => {
     //   yesPnl = 0 + 0 - 192 = -192
     // NO side: sellProceeds=940, netQty=-10 (short), noWon=true → settlement=-1000
     //   noPnl = -1000 + 940 - 0 = -60
-    // Total: -192 + (-60) = -252
+    // Total: -192 + (-60) = -252, fees ceil(11.29)=12 + ceil(3.95)=4
     const pnl = computeTradesPnl(
       [
         { action: "buy", side: "yes", price: 16, quantity: 12 },
@@ -253,18 +255,18 @@ describe("trade-based PnL computation", () => {
       ],
       0,
     );
-    expect(pnl).toBe(-252);
+    expect(pnl).toBe(-268);
   });
 
   test("cross-side sells: NO shorts profit when YES wins", () => {
     // Sell NO@94 x10, outcome YES → NO lost, short keeps premium
     // NO side: sellProceeds=940, netQty=-10, noWon=false → settlement=0
-    //   noPnl = 0 + 940 - 0 = 940
+    //   noPnl = 0 + 940 - 0 = 940, fee ceil(3.95)=4
     const pnl = computeTradesPnl(
       [{ action: "sell", side: "no", price: 94, quantity: 10 }],
       1,
     );
-    expect(pnl).toBe(940);
+    expect(pnl).toBe(936);
   });
 
   test("mixed YES buys and NO sells, market resolves NO", () => {
@@ -272,7 +274,7 @@ describe("trade-based PnL computation", () => {
     // Buy YES@5 x15, sell NO@94 x15, outcome NO
     // YES: buyCost=75, netQty=15, yesWon=false → 0+0-75 = -75
     // NO: sellProceeds=1410, netQty=-15, noWon=true → -1500+1410-0 = -90
-    // Total: -75 + (-90) = -165
+    // Total: -75 + (-90) = -165, fees ceil(4.99)=5 + ceil(5.92)=6
     const pnl = computeTradesPnl(
       [
         { action: "buy", side: "yes", price: 5, quantity: 15 },
@@ -280,7 +282,7 @@ describe("trade-based PnL computation", () => {
       ],
       0,
     );
-    expect(pnl).toBe(-165);
+    expect(pnl).toBe(-176);
   });
 });
 

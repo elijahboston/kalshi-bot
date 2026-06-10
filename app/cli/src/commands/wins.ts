@@ -1,4 +1,5 @@
 import { getDb, signals, markets, orders, eq, and, sql } from "@kcb/db";
+import { takerFeeCents } from "@kcb/shared";
 import type { CommandDef, CommandResult } from "./index";
 
 /**
@@ -119,8 +120,12 @@ async function actedRows(all: boolean): Promise<ActedRow[]> {
   return rows as ActedRow[];
 }
 
-function pnlCents(r: ActedRow): number {
-  return r.result === r.side ? r.qty * (100 - r.price) : -r.qty * r.price;
+/** Settle-assumed PnL net of the entry taker fee (paid win or lose). At
+ * confirmation prices the fee is ~6% of the average gross win — the 80%-verdict
+ * review must be judged on fee-true numbers. */
+export function pnlCents(r: ActedRow): number {
+  const fee = takerFeeCents(r.price, r.qty);
+  return (r.result === r.side ? r.qty * (100 - r.price) : -r.qty * r.price) - fee;
 }
 
 interface Bucket {

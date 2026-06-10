@@ -136,6 +136,14 @@ export interface BotConfig {
      * allows — so the scaled bet is never silently clipped by caps tuned for the
      * old $5 flats. 0 = keep the fixed caps. */
     maxExposurePctOfBalance: number;
+    /** When > 0, cap the summed cost basis of all open positions in the SAME
+     * EVENT (event_ticker) at this fraction of available balance. Confirmation
+     * entries routinely stack 2–4 correlated markets per event (NO on adjacent
+     * brackets + YES on the center = one thesis); the per-ticker cap doesn't see
+     * that, so a single 1-bracket forecast miss can lose several ~90¢ positions
+     * at once (2 of the 3 post-regime losses were one such pair, 2026-06-06
+     * KDEN). 0 = disabled. Ships dark; enable via runtime_config. */
+    maxEventExposurePctOfBalance: number;
 
     // ── Sigma floor (win-rate-80-plan #4) ──
     /** Floor on the CDF sigma as a fraction of bracket width (tails use width 1.0). Prevents the (possibly overfit) empirical-sigma blend from collapsing the CDF into overconfidence on tight near-mean brackets. 0 = disabled. Applied before observation adjustments — post-peak obs knowledge (N3) is real information and may deliberately go below it. */
@@ -317,6 +325,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   confidence_size_max_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confidenceSizeMaxPct = n; },
   confidence_size_floor_confidence: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confidenceSizeFloorConfidence = n; },
   max_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePctOfBalance = n; },
+  max_event_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxEventExposurePctOfBalance = n; },
   confirmation_exit_conviction_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationExitConvictionFloor = n; },
   ultra_sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperHorizonHours = n; },
   ultra_sniper_edge_discount: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperEdgeDiscount = n; },
@@ -416,6 +425,7 @@ export function loadConfig(): BotConfig {
       confidenceSizeMaxPct: envNum("CONFIDENCE_SIZE_MAX_PCT", 0.10),
       confidenceSizeFloorConfidence: envNum("CONFIDENCE_SIZE_FLOOR_CONFIDENCE", 0.80),
       maxExposurePctOfBalance: envNum("MAX_EXPOSURE_PCT_OF_BALANCE", 0),
+      maxEventExposurePctOfBalance: envNum("MAX_EVENT_EXPOSURE_PCT_OF_BALANCE", 0),
       // Confirmation exit policy (2026-06-06 churn fix)
       confirmationExitConvictionFloor: envNum("CONFIRMATION_EXIT_CONVICTION_FLOOR", 0.60),
       // Ultra-sniper window (win-rate-80-plan #8) — ships dark; runtime row enables

@@ -97,6 +97,21 @@ export function buildSeriesTickers(
   return tickers;
 }
 
+/**
+ * Kalshi taker fee in cents for a fill of `contracts` at `priceCents`:
+ * fees = ceil_to_cent(0.07 × C × P × (1−P)), P in dollars — i.e.
+ * ceil(0.07 × C × p × (100−p) / 100) in cents. Symmetric in p vs 100−p, so it
+ * applies unchanged to YES and NO fills. The bot enters at crossing prices
+ * (taker); at confirmation prices (~87¢) this is ~0.8¢/contract — ~6% of the
+ * pathway's ~13¢ average gross win, so PnL that ignores it overstates.
+ */
+export function takerFeeCents(priceCents: number, contracts: number): number {
+  if (contracts <= 0 || priceCents <= 0 || priceCents >= 100) return 0;
+  // Integer numerator (0.07/100 = 7/10000) so exact-cent fees don't ceil up
+  // on float error (0.07 × 4 × 50 × 50 / 100 = 7.000000000000001).
+  return Math.ceil((7 * contracts * priceCents * (100 - priceCents)) / 10000);
+}
+
 /** Celsius to Fahrenheit */
 export function cToF(celsius: number): number {
   return celsius * 9 / 5 + 32;

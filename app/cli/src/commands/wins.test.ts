@@ -150,8 +150,9 @@ describe("wins summary", () => {
     const out = (await winsHandler(["summary"])) as string;
 
     expect(out).toContain("75.0% vs 80% target (n=4)");
-    // pnl = (100 + 75 + 108 − 125)¢ = +158¢ = +$1.58
-    expect(out).toContain("+$1.58");
+    // pnl = (100 + 75 + 108 − 125)¢ = +158¢ gross, minus taker fees
+    // (6 + 5 + 7 + 7)¢ = +133¢ = +$1.33
+    expect(out).toContain("+$1.33");
     expect(out).toContain("confirmation");
     expect(out).toContain("contrarian");
     expect(out).toContain("settle-assumed");

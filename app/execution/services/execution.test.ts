@@ -30,6 +30,7 @@ const mockBotConfig = {
   confidenceSizeMaxPct: 0.10,
   confidenceSizeFloorConfidence: 0.80,
   maxExposurePctOfBalance: 0,
+  maxEventExposurePctOfBalance: 0,
 };
 
 mock.module("@kcb/config", () => ({
@@ -53,6 +54,7 @@ beforeEach(async () => {
   resetCooldowns();
   resetLossTracking();
   resetRestoredFlag();
+  mockBotConfig.maxOpenPositions = 6;
   mockBotConfig.minBetSizeCents = 0;
   mockBotConfig.flatBetSizeCents = 0;
   mockBotConfig.highConfidenceThreshold = 0;
@@ -68,6 +70,7 @@ beforeEach(async () => {
   mockBotConfig.confidenceSizeMaxPct = 0.10;
   mockBotConfig.confidenceSizeFloorConfidence = 0.80;
   mockBotConfig.maxExposurePctOfBalance = 0;
+  mockBotConfig.maxEventExposurePctOfBalance = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -1594,5 +1597,174 @@ describe("executeSignal confidence-scaled %-of-balance sizing (2026-06-09)", () 
 
     expect(orderId).toBeString();
     expect(readOrder(ticker)!.quantity).toBe(2);
+  });
+});
+
+// ── Per-event exposure cap (2026-06-10) ────────────────────────
+// Several tickers in one event are a single correlated thesis (NO on adjacent
+// brackets + YES on the center all lose together on a 1-bracket forecast
+// miss). The cap bounds summed cost basis across the event.
+
+function seedMarketInEvent(
+  ticker: string,
+  eventTicker: string,
+  book: { yesBid?: number | null; yesAsk?: number | null; lastYesPrice?: number | null } = {}
+) {
+  const ts = new Date().toISOString();
+  getDb()
+    .insert(markets)
+    .values({
+      ticker,
+      eventTicker,
+      seriesTicker: "KXHIGHNY",
+      title: "test market",
+      category: "high_temp",
+      stationId: "KNYC",
+      targetDate: "2026-03-04",
+      bracketLow: 39,
+      bracketHigh: 40,
+      marketType: "bracket",
+      status: "open",
+      lastYesPrice: book.lastYesPrice ?? null,
+      lastNoPrice: book.lastYesPrice != null ? 100 - book.lastYesPrice : null,
+      yesBid: book.yesBid ?? null,
+      yesAsk: book.yesAsk ?? null,
+      discoveredAt: ts,
+      updatedAt: ts,
+    })
+    .onConflictDoNothing()
+    .run();
+}
+
+function seedPosition(ticker: string, costBasis: number) {
+  getDb().insert(positions).values({
+    ticker,
+    side: "yes",
+    quantity: Math.max(1, Math.floor(costBasis / 50)),
+    avgEntryPrice: 50,
+    costBasis,
+    marketValue: costBasis,
+    unrealizedPnl: 0,
+    openedAt: "2026-03-04T00:00:00Z",
+    updatedAt: "2026-03-04T00:00:00Z",
+  }).run();
+}
+
+describe("executeSignal per-event exposure cap", () => {
+  const EVENT = "KXHIGHNY-26MAR04";
+
+  test("skips when the event's summed cost basis is at the cap", async () => {
+    mockBotConfig.maxEventExposurePctOfBalance = 0.15; // 1500¢ of 10000¢
+    seedMarketInEvent("KXHIGHNY-26MAR04-B38", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedMarketInEvent("KXHIGHNY-26MAR04-B42", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedPosition("KXHIGHNY-26MAR04-B38", 1500);
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker: "KXHIGHNY-26MAR04-B42", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe(`event exposure 1500¢/1500¢ (${EVENT})`);
+  });
+
+  test("sizes down to fit remaining event room", async () => {
+    mockBotConfig.maxEventExposurePctOfBalance = 0.15; // 1500¢ cap
+    seedMarketInEvent("KXHIGHNY-26MAR04-B38", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedMarketInEvent("KXHIGHNY-26MAR04-B42", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedPosition("KXHIGHNY-26MAR04-B38", 1400); // 100¢ room left
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId } = await service.executeSignal(
+      makeSignal({ ticker: "KXHIGHNY-26MAR04-B42", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(orderId).toBeString();
+    // Kelly sizing would buy 5 @ 50¢; event room 100¢ fits only 2.
+    expect(readOrder("KXHIGHNY-26MAR04-B42")!.quantity).toBe(2);
+  });
+
+  test("positions in a different event don't count", async () => {
+    mockBotConfig.maxEventExposurePctOfBalance = 0.15;
+    seedMarketInEvent("KXHIGHNY-26MAR03-B38", "KXHIGHNY-26MAR03", { yesBid: 49, yesAsk: 50 });
+    seedMarketInEvent("KXHIGHNY-26MAR04-B42", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedPosition("KXHIGHNY-26MAR03-B38", 1500); // other event, at cap
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker: "KXHIGHNY-26MAR04-B42", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+  });
+
+  test("cap=0 disables the guard (ships dark)", async () => {
+    mockBotConfig.maxEventExposurePctOfBalance = 0;
+    seedMarketInEvent("KXHIGHNY-26MAR04-B38", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedMarketInEvent("KXHIGHNY-26MAR04-B42", EVENT, { yesBid: 49, yesAsk: 50 });
+    seedPosition("KXHIGHNY-26MAR04-B38", 5000);
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker: "KXHIGHNY-26MAR04-B42", marketPrice: 0.5, estimatedProb: 0.75 }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+  });
+});
+
+// ── Recent-loss guard: confirmation exemption (2026-06-10) ─────
+// Confirmation entries have model edge ≤ 0 by construction, so the 1.5×-edge
+// re-entry bar was unsatisfiable — one loss exit locked the ticker out for the
+// whole 2h loss window. 12/15 blocked re-entries would have won (post-regime).
+
+describe("executeSignal recent-loss guard pathway split", () => {
+  test("confirmation signal re-enters despite a recent loss exit", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 84, yesAsk: 86, lastYesPrice: 85 });
+
+    recordExit(ticker, true, -0.3); // loss exit…
+    resetCooldowns();               // …with the tick cooldown already elapsed
+    expect(getRecentLoss(ticker)).not.toBeNull();
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.85,
+        estimatedProb: 0.6,
+        edge: -0.25, // structurally ≤ 0 for confirmations
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+  });
+
+  test("contrarian signal with a recent loss still needs 1.5× edge", async () => {
+    const ticker = "KXHIGHNY-26MAR04-B40";
+    seedMarket(ticker, { yesBid: 49, yesAsk: 50, lastYesPrice: 50 });
+
+    recordExit(ticker, true, -0.3);
+    resetCooldowns();
+
+    const service = new ExecutionService(stubKalshi);
+    // edge 0.20 < 1.5 × 0.15 = 0.225 → still blocked
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({ ticker, edge: 0.2, edgeThreshold: 0.15 }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toStartWith("recent-loss elevated edge");
   });
 });
