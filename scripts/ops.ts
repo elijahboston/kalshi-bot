@@ -195,7 +195,7 @@ async function cmdSet(args: string[]): Promise<void> {
   }
   await opsSet(key, value, why);
   console.log(`${key} = ${value}${why ? `  (${why})` : ""} — audited.`);
-  console.log("Note: the running bot reads config at startup/reload; hot-reload sessions pick this up on restart or next config read.");
+  console.log("The running bot re-reads runtime_config every tick (refreshRuntimeConfig), so this applies within ~1–2 min — no restart needed.");
 }
 
 async function cmdSweep(): Promise<void> {

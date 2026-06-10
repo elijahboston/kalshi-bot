@@ -28,7 +28,7 @@ bun ops pause | resume               # toggle .sweep-paused sentinel (honored by
 
 ## Key context
 
-- The bot runs paper-mode (`dry_run=true`) under `bun --watch`; runtime config is read at process start — changes apply on the bot's next reload/restart, not instantly.
+- The bot runs paper-mode (`dry_run=true`) under `bun --watch`. As of 2026-06-10 it re-reads `runtime_config` at the top of every orchestrator tick (`refreshRuntimeConfig`), so an `ops set` applies within ~1–2 min with no restart. (Before that fix, `getConfig()` cached config once per process and silently ignored every runtime change until a restart — the 2026-06-09 sizing enable was inert for a day. `bun --watch` soft-reloads on real file *content* edits but NOT on a bare `touch`.)
 - The daily sweep (8:53am local) executes the canonical prompt in `docs/follow-ups.md` with full autonomy inside hard guardrails (never `dry_run=false`, never delete data, never new market categories). Mechanisms: launchd (preferred, machine-level — install block in that doc) or in-session `CronCreate` fallback.
 - Output of sweeps: `logs/follow-ups-sweep.log`. Win-rate scoreboard: the `wins` REPL command (or import `winsCommands` from `app/cli/src/commands/wins.ts` via `bun -e`).
 - Knob reference: `packages/config/src/index.ts` (`RUNTIME_CONFIG_MAP` lists every runtime-settable key and its parser).

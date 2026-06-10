@@ -8,6 +8,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 
 ---
 
+## 2026-06-10
+
+### `execution` — Runtime config re-read every tick (deploy fix: ops changes were inert)
+- **Change:** `refreshRuntimeConfig()` (new `@kcb/config` export) re-applies `runtime_config` overrides onto the live config singleton; the orchestrator calls it at the top of every tick. `applyRuntimeOverrides` is now exported and unit-tested (a row changed after load is picked up on re-apply; a missing DB is a silent no-op).
+- **Why:** `getConfig()` read `runtime_config` exactly once per process and cached forever, so **every `ops set` to the long-running bot was inert until a manual restart**. Caught 2026-06-10: the prior day's confidence-sizing enable sat in the DB while the bot kept flat-$5 sizing (the 7 post-enable buys were all 5–6 contracts). This silently undercut the entire ops/sweep automation — the daily sweep's own `ops set` actions (ultra-sniper enablement, station probation, sizing bumps) would never have taken effect. Compounding subtlety: `bun --watch` soft-reloads on real file *content* edits (which reset the singleton) but ignores a bare `touch`, which is why the manual "touch to reload" step had been a silent no-op the day before. Now config changes apply within ~1–2 min, no restart, no edit.
+- **Doc:** [`follow-ups.md`](follow-ups.md) (Log, 2026-06-10)
+
 ## 2026-06-09
 
 ### `sizing` — Confidence-scaled %-of-balance wagers (replaces flat sizing when enabled)
