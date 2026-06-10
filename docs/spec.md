@@ -152,6 +152,7 @@ Strategy and market research in [`docs/research/`](research/). These are analyse
 | [`research/multi-bot-plan.md`](research/multi-bot-plan.md) | Architecture for running multiple strategies (climate + oil + future) in one process. `Strategy` interface, `BotManager`, per-bot capital isolation via `bot_allocations`, `botId` field on all events, TUI bot selector, viz/API filtering. |
 | [`research/oilbot-plan.md`](research/oilbot-plan.md) | WTI intervention-thesis bot. Regime detection (floor/ceiling/corridor) using EIA SPR data, CFTC COT, futures curve anomalies, news sentiment via Claude API. Phased rollout plan. |
 | [`research/no-bet-strategy-analysis.md`](research/no-bet-strategy-analysis.md) | Back-of-the-envelope: betting blind NO returns +201% over 46 days (82% structural NO rate). Skipping the market's top-1 YES pick reaches 99.5% win rate but thin 1.2% ROI. **Conclusion: the real edge is contrarian YES bets on the correct bracket when the market is wrong (6.3% of events)** — which is what the forecast-sharpening work enables. |
+| [`research/polymarket-integration-scoping.md`](research/polymarket-integration-scoping.md) | 2026-06-10 effort assessment for a **paper-only** Polymarket integration. Conclusion: ~2–3 weeks for a read-only data adapter + confirmation-pathway paper trading; the weather edge does NOT transfer (Polymarket has no recurring temp-bracket markets), so ~80% of the system is Kalshi/weather-specific. Binding constraint is strategy fit, not plumbing. Phased, decision-gated path starting with a no-code market survey. |
 
 ---
 
