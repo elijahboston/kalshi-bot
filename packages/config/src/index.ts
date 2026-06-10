@@ -464,8 +464,9 @@ export function loadConfig(): BotConfig {
   return config;
 }
 
-/** Load persisted overrides from the runtime_config table */
-function applyRuntimeOverrides(config: BotConfig): void {
+/** Load persisted overrides from the runtime_config table. Exported for tests —
+ * re-applying onto an existing config is what refreshRuntimeConfig does live. */
+export function applyRuntimeOverrides(config: BotConfig): void {
   try {
     const dbPath = resolve(config.db.path);
     if (!existsSync(dbPath)) return;
@@ -494,6 +495,25 @@ export function getConfig(): BotConfig {
     _config = loadConfig();
   }
   return _config;
+}
+
+/**
+ * Re-apply persisted `runtime_config` overrides onto the live config singleton,
+ * in place. `getConfig()` reads `runtime_config` only ONCE per process (on first
+ * call); without this, an `ops set` — or any runtime_config write — never takes
+ * effect in the long-running bot until a full restart. That silently swallowed
+ * every config change made to the running process: e.g. the 2026-06-09
+ * confidence-sizing enable sat in the DB while the bot kept flat-sizing (caught
+ * 2026-06-10). The bot calls this at the top of each orchestrator tick so
+ * runtime changes apply within a tick or two — making the ops/sweep automation's
+ * "change a knob and it takes effect" promise actually true.
+ *
+ * Mutates the existing object so references held by other modules stay valid.
+ * Caveat: appliers only SET keys that have a row, so DELETING a runtime_config
+ * row does not revert the key to its env/default until the next process start.
+ */
+export function refreshRuntimeConfig(): void {
+  if (_config) applyRuntimeOverrides(_config);
 }
 
 /** Override config values (useful for tests and the `config set` command) */

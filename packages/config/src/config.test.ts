@@ -1,5 +1,8 @@
 import { test, expect, beforeEach, describe } from "bun:test";
-import { loadConfig, parseStationSurcharge } from "./index";
+import { loadConfig, parseStationSurcharge, applyRuntimeOverrides } from "./index";
+import { Database } from "bun:sqlite";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Clear any env overrides so we test pure defaults
 beforeEach(() => {
@@ -137,6 +140,54 @@ describe("parseStationSurcharge", () => {
   test("non-finite values are dropped", () => {
     // JSON.stringify drops NaN/Infinity, but we still guard against runtime parsers
     expect(parseStationSurcharge('{"KORD":1e9999}')).toEqual({});
+  });
+});
+
+describe("applyRuntimeOverrides (refreshRuntimeConfig's re-apply behavior)", () => {
+  // A unique temp DB per run so we don't touch the real ./data DB. We test the
+  // pure re-apply path directly rather than via getConfig()/the singleton —
+  // other test files mock.module("@kcb/config") globally, which would replace
+  // getConfig in the full-suite process and make singleton assertions flaky.
+  const dbPath = join(tmpdir(), `kcb-cfg-refresh-${process.pid}.db`);
+
+  function seedRow(key: string, value: string) {
+    const db = new Database(dbPath);
+    db.run(
+      "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    db.run(
+      "INSERT INTO runtime_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [key, value]
+    );
+    db.close();
+  }
+
+  test("re-applying picks up a row changed after the config was loaded", () => {
+    // A complete config pointed at our temp DB (loadConfig is the real export
+    // and reads env defaults for every key).
+    process.env.DB_PATH = dbPath;
+    seedRow("max_contracts_per_order", "10");
+    const config = loadConfig();
+    config.db.path = dbPath;
+    expect(config.bot.maxContractsPerOrder).toBe(10); // baked in at load
+
+    // Change the row AFTER load — this is the exact bug: getConfig caches once
+    // per process, so without re-applying the value stays stale.
+    seedRow("max_contracts_per_order", "20");
+    expect(config.bot.maxContractsPerOrder).toBe(10); // still stale
+    applyRuntimeOverrides(config); // what refreshRuntimeConfig calls each tick
+    expect(config.bot.maxContractsPerOrder).toBe(20); // applied in place
+
+    // A boolean knob (the 2026-06-09 sizing-enable class) flips the same way.
+    seedRow("confidence_size_pct_enabled", "true");
+    applyRuntimeOverrides(config);
+    expect(config.bot.confidenceSizePctEnabled).toBe(true);
+  });
+
+  test("a missing DB is a silent no-op (does not throw)", () => {
+    const config = loadConfig();
+    config.db.path = join(tmpdir(), `kcb-cfg-absent-${process.pid}.db`);
+    expect(() => applyRuntimeOverrides(config)).not.toThrow();
   });
 });
 

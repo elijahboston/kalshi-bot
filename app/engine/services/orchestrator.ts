@@ -1,6 +1,6 @@
 import { getDb, markets, signals, positions, orders, balanceHistory, eq, and, sql, desc } from "@kcb/db";
 import type { Market } from "@kcb/db";
-import { getConfig } from "@kcb/config";
+import { getConfig, refreshRuntimeConfig } from "@kcb/config";
 import { KalshiClient, KalshiFeed } from "@kcb/kalshi-client";
 import { bus, createLogger } from "../events";
 import { registerTick, startLoop, stopLoop, getLoopState } from "./loop";
@@ -133,6 +133,12 @@ export async function initOrchestrator(): Promise<void> {
   startFeed(feed);
 
   registerTick(async () => {
+    // Re-read runtime_config so `ops set` / sweep config changes take effect
+    // without a process restart (getConfig caches once per process). See
+    // refreshRuntimeConfig — the 2026-06-09 confidence-sizing enable was inert
+    // in the running bot until this was added.
+    refreshRuntimeConfig();
+
     // Restore anti-churn state from DB on first tick after restart
     await restoreAntiChurnState();
 
