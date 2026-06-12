@@ -1,5 +1,8 @@
 # Algorithm Changelog
 
+**Type:** Chronological decision log
+**Last updated:** 2026-06-12
+
 Chronological record of changes to the climate bot's decision-making — the **estimator** (probability), **sizing** (Kelly / flat / tier), **execution gates** (guards on order placement), and the **calibration feedback loop**. Newest first.
 
 Each entry is intentionally terse — one line per change, with `Why:` and a link to the improvement doc for full mechanics, math, and verification. UI, infra, and Bun-migration changes are out of scope; see [`spec.md`](spec.md) for the broader feature index.
@@ -7,6 +10,18 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 **Areas:** `estimator` · `sizing` · `execution` · `calibration` · `discovery`
 
 ---
+
+## 2026-06-11
+
+### `execution` — Ultra-sniper enabled (`ultra_sniper_horizon_hours=4`)
+- **Change:** `ultra_sniper_horizon_hours` set to 4 via audited `ops set`. In the 4-hour sniper window the edge threshold is discounted by 10¢ (floored at 5¢) — but only when HRRR is in the pool and the obs running-max anchor is active. Signals in the window now annotate the discount in `skip_reason` when the bar is still not cleared.
+- **Why:** All three readiness conditions met after 5 clean days post-HRRR-fix: HRRR present in every sniper-window sourceMix (107/267 members), `postPeakCollapse=true` confirmed firing at 21:35Z for KAUS/KMIA, zero `hrrr-unavailable`/`obs-stale` quality skips since 2026-06-06. Ships with a 3-day watch (follow-up #3 → 2026-06-14): check whether new sniper-window entries appear and whether 21Z win rate improves (21Z was 66.7% pre-ultra-sniper on pre-peak entries).
+- **Doc:** [`follow-ups.md`](follow-ups.md) (#3 closed, watch item → 2026-06-14)
+
+### `ops` — Daily performance review + DB snapshot launchd agents
+- **Change:** Two new launchd agents added alongside the existing 8:53am follow-ups sweep: `scripts/db-snapshot.sh` (9:55am) uses `sqlite3 .backup` for a crash-consistent daily snapshot of `data/kalshi-bot.db` → `data/snapshots/kalshi-bot-YYYY-MM-DD.db`, rotating files older than 7 days. `scripts/daily-perf-review.sh` (10:00am) runs Claude Code headless with a structured performance review: `wins` scoreboard (summary/by_gate/by_station/by_confidence/by_hour), CLI-actuals and confirmation-churn health checks, ⚠ threshold surfacing (win rate < 85%, 21Z < 70%, KDEN PnL negative, gate families crossing n≥10 COSTING), and acts on any due follow-up items within the same hard guardrails as the 8:53am sweep. All three agents honour the `.sweep-paused` sentinel.
+- **Why:** Performance review was ad hoc before this; the daily snapshot gives a clean restore point if a future migration or incident corrupts the live DB. The 10am review is scheduled after the 9:55am snapshot so the review has a stable reference state.
+- **Doc:** [`follow-ups.md`](follow-ups.md) (§ "Scheduled automation" updated with three-agent table + unified install block)
 
 ## 2026-06-10
 

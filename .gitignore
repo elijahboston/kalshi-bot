@@ -5,6 +5,7 @@ node_modules/
 *.db-shm
 data/*.db
 data/cache/
+data/snapshots/
 logs/*.log
 logs/bot.log.*
 data/performance-cache.json

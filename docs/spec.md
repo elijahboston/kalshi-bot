@@ -1,5 +1,7 @@
 # SPEC.md — Kalshi Climate Bot
 
+**Last updated:** 2026-06-10
+
 A trading agent for Kalshi's climate prediction markets. This document is the top-level map of the project — use it to navigate to the topic you need. Deep dives live in [`docs/features/`](features/), [`docs/improvements/`](improvements/), and [`docs/research/`](research/).
 
 **Stack:** Bun, TypeScript, Ink (React), Drizzle ORM, SQLite, Elysia (web API), Vite + React 19 + TanStack Router + shadcn/ui (web UI).
@@ -177,13 +179,14 @@ Strategy and market research in [`docs/research/`](research/). These are analyse
 | REST + WebSocket API | Elysia in-process, 12 REST endpoints, full bus forwarding |
 | Web SPA | React 19, TanStack Router, shadcn/ui, dark-mode dense dashboard |
 | Log writer | JSONL append + rotation at 10MB |
+| Daily automation | Three launchd agents: 8:53am follow-ups sweep, 9:55am DB snapshot (`data/snapshots/`), 10:00am performance review — all honour `.sweep-paused`; see [`follow-ups.md`](follow-ups.md) §"Scheduled automation" for install block |
 
 ### Remaining work
 
 | Task | Location | Notes |
 |------|----------|-------|
-| **Measure the new regime** | — | All win-rate-80 build items shipped 2026-06-05/06; accumulate ~30 settled trades, then judge vs the 80% target (`wins` REPL command) |
-| Ultra-sniper enablement | runtime_config | Shipped dark; set `ultra_sniper_horizon_hours=4` after a few clean live days |
+| **Measure the new regime** | — | n=49 settled trades at 89.8% / +$80.75 as of 2026-06-12; 80% verdict due 2026-06-19 (follow-up #4) |
+| ~~Ultra-sniper enablement~~ | ✅ done 2026-06-11 | `ultra_sniper_horizon_hours=4` — 5 clean days of HRRR + obs anchor confirmed; watch 2026-06-14 |
 | Entry-hour re-cut (N12) | analysis | After ~2 weeks of new-regime data, decide if an hour gate is still needed post-obs-anchor |
 | Rate-limit backoff | `packages/kalshi-client/src/client.ts` | Exponential backoff on 429 |
 | Hit-rate bracket matching (plan #5) | `app/signals/services/estimator.ts` | Deprioritized — geometry fix addressed the worst of it |
