@@ -4,7 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { fmtMoney, fmtPct } from "@/src/lib/format"
 import { API_BASE } from "@/src/lib/config"
 
@@ -101,7 +101,7 @@ function SettingSection({
 }
 
 export function SettingsView() {
-  const { config } = useApiContext()
+  const config = useApiStore((s) => s.config)
 
   if (!config) {
     return (

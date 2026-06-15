@@ -1,7 +1,7 @@
 import { StatCard } from "@/components/dashboard/stat-card"
 import { ControlBar } from "@/components/dashboard/control-bar"
 import { LayoutDashboard } from "lucide-react"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat("en-US", {
@@ -18,7 +18,7 @@ function formatPnl(value: number): string {
 }
 
 export function DashboardHeader() {
-  const { performance } = useApiContext()
+  const performance = useApiStore((s) => s.performance)
 
   return (
     <header className="flex flex-col gap-5">

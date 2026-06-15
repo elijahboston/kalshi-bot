@@ -1,7 +1,7 @@
 import { Clock, FlaskConical } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 
 function formatUptime(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -14,7 +14,7 @@ function formatUptime(ms: number): string {
 }
 
 export function ControlBar() {
-  const { status: botStatus } = useApiContext()
+  const botStatus = useApiStore((s) => s.status)
 
   const isRunning = botStatus?.running ?? false
   const isDryRun = botStatus?.dryRun ?? false

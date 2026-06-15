@@ -11,7 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { fmtMoney, fmtPnl, fmtRelTime } from "@/src/lib/format"
 
 type SortKey = "ticker" | "quantity" | "avgEntry" | "costBasis" | "marketValue" | "unrealizedPnl" | "openedAt"
@@ -58,7 +58,7 @@ function SortableHead({
 }
 
 export function PositionsTable() {
-  const { positions } = useApiContext()
+  const positions = useApiStore((s) => s.positions)
 
   const [sortKey, setSortKey] = useState<SortKey>("unrealizedPnl")
   const [sortDir, setSortDir] = useState<SortDir>("desc")

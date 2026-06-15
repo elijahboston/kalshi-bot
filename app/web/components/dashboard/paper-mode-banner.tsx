@@ -1,5 +1,5 @@
 import { FlaskConical } from "lucide-react"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 
 /**
  * Persistent top-of-page banner shown whenever the bot is in dry-run mode.
@@ -7,7 +7,7 @@ import { useApiContext } from "@/src/lib/api-context"
  * and PnL figures reflect simulated trades, not real Kalshi activity.
  */
 export function PaperModeBanner() {
-  const { status } = useApiContext()
+  const status = useApiStore((s) => s.status)
   if (!status?.dryRun) return null
 
   return (

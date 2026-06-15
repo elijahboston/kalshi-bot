@@ -13,7 +13,7 @@ import {
 } from "recharts"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { fmtEdge } from "@/src/lib/format"
 import { RecentResolutions } from "@/components/dashboard/recent-resolutions"
 
@@ -58,7 +58,9 @@ function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
 }
 
 export function CalibrationView() {
-  const { calibration, resolutions, performance } = useApiContext()
+  const calibration = useApiStore((s) => s.calibration)
+  const resolutions = useApiStore((s) => s.resolutions)
+  const performance = useApiStore((s) => s.performance)
 
   const chartData = useMemo(
     () =>
@@ -194,12 +196,14 @@ export function CalibrationView() {
                   fill="hsl(200, 70%, 50%)"
                   radius={[3, 3, 0, 0]}
                   maxBarSize={32}
+                  isAnimationActive={false}
                 />
                 <Bar
                   dataKey="actual"
                   fill="hsl(142, 70%, 45%)"
                   radius={[3, 3, 0, 0]}
                   maxBarSize={32}
+                  isAnimationActive={false}
                 />
               </BarChart>
             </ResponsiveContainer>

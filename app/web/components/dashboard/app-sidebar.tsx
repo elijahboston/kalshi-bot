@@ -1,4 +1,4 @@
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { Link, useLocation } from "@tanstack/react-router"
 import {
   LayoutDashboard,
@@ -47,16 +47,17 @@ export function AppSidebar({
   onNavigate,
 }: AppSidebarProps) {
   const { pathname } = useLocation()
-  const api = useApiContext()
-  const connected = api.connected
+  const connected = useApiStore((s) => s.connected)
+  const status = useApiStore((s) => s.status)
+  const config = useApiStore((s) => s.config)
   const botStatus: "Running" | "Stopped" | "Dry Run" =
-    api.status?.running
-      ? api.status.dryRun
+    status?.running
+      ? status.dryRun
         ? "Dry Run"
         : "Running"
       : "Stopped"
   const environment: "Production" | "Demo" =
-    api.config?.bot.dryRun ? "Demo" : "Production"
+    config?.bot.dryRun ? "Demo" : "Production"
 
   return (
     <TooltipProvider delayDuration={0}>

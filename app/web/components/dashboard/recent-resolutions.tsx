@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { fmtPrice, fmtPnl, fmtPct, fmtEdge, fmtRelTime } from "@/src/lib/format"
 import type { Resolution } from "@/src/lib/types"
 
@@ -42,7 +42,7 @@ interface RecentResolutionsProps {
 }
 
 export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps) {
-  const { resolutions } = useApiContext()
+  const resolutions = useApiStore((s) => s.resolutions)
   const displayed = limit != null ? resolutions.slice(0, limit) : resolutions
   const summary = resolutionSummary(resolutions)
 
