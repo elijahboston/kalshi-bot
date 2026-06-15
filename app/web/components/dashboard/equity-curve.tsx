@@ -9,8 +9,8 @@ import {
   CartesianGrid,
 } from "recharts"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { useApiContext } from "@/src/lib/api-context"
-import type { EquitySpan } from "@/src/lib/use-api"
+import { useApiStore } from "@/src/lib/store"
+import type { EquitySpan } from "@/src/lib/store"
 import { cn } from "@/lib/utils"
 
 const SPANS: { value: EquitySpan; label: string }[] = [
@@ -116,7 +116,9 @@ function ChartTooltip({ active, payload, label }: CustomTooltipProps) {
 }
 
 export function EquityCurve() {
-  const { equityHistory, equitySpan, setEquitySpan } = useApiContext()
+  const equityHistory = useApiStore((s) => s.equityHistory)
+  const equitySpan = useApiStore((s) => s.equitySpan)
+  const setEquitySpan = useApiStore((s) => s.setEquitySpan)
 
   const data: DataPoint[] = useMemo(() => {
     return equityHistory.map((p) => {
@@ -182,8 +184,8 @@ export function EquityCurve() {
             <XAxis dataKey="time" tick={{ fontSize: 11, fill: "hsl(220, 10%, 55%)" }} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={40} />
             <YAxis domain={yDomain} tick={{ fontSize: 11, fill: "hsl(220, 10%, 55%)" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => formatUsd(v)} width={64} />
             <Tooltip content={<ChartTooltip />} cursor={{ stroke: "hsl(220, 10%, 35%)", strokeDasharray: "4 4" }} />
-            <Area type="monotone" dataKey="cash" stackId="1" stroke="hsl(200, 70%, 50%)" strokeWidth={1.5} fill="url(#gradCash)" animationDuration={600} />
-            <Area type="monotone" dataKey="position" stackId="1" stroke="hsl(200, 70%, 70%)" strokeWidth={1.5} fill="url(#gradPosition)" animationDuration={600} />
+            <Area type="monotone" dataKey="cash" stackId="1" stroke="hsl(200, 70%, 50%)" strokeWidth={1.5} fill="url(#gradCash)" isAnimationActive={false} />
+            <Area type="monotone" dataKey="position" stackId="1" stroke="hsl(200, 70%, 70%)" strokeWidth={1.5} fill="url(#gradPosition)" isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
         <div className="flex items-center justify-between gap-4 px-3 pt-2">

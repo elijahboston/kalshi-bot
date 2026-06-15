@@ -10,7 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { LayoutList } from "lucide-react"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 
 const MAX_ROWS = 10
 
@@ -45,7 +45,7 @@ function EmptyState() {
 }
 
 export function ActivePositions() {
-  const { positions: rawPositions } = useApiContext()
+  const rawPositions = useApiStore((s) => s.positions)
   const positions = rawPositions.map((p) => ({
     id: p.ticker,
     ticker: p.ticker,

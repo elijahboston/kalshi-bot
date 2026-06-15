@@ -6,7 +6,7 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import type { DailyWinRate } from "@/src/lib/types"
 
 const WEEKS = 12
@@ -86,7 +86,7 @@ function tooltipText(cell: Cell): string {
 }
 
 export function WeeklyWinRateHeatmap() {
-  const { dailyWinRates } = useApiContext()
+  const dailyWinRates = useApiStore((s) => s.dailyWinRates)
 
   const weeks = useMemo(() => buildGrid(dailyWinRates), [dailyWinRates])
 

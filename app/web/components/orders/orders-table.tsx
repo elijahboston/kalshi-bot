@@ -32,7 +32,7 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 import { fmtMoney, fmtPct, fmtRelTime } from "@/src/lib/format"
 
 type SortKey = "createdAt" | "ticker" | "limitPrice" | "status"
@@ -102,7 +102,7 @@ function SortableHead({
 
 export function OrdersTable() {
   const id = useId()
-  const { orders } = useApiContext()
+  const orders = useApiStore((s) => s.orders)
 
   const [statusFilter, setStatusFilter] = useState<string>("all")
   const [hideDryRun, setHideDryRun] = useState(false)

@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/select"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { useApiContext } from "@/src/lib/api-context"
+import { useApiStore } from "@/src/lib/store"
 
 const LEVELS = ["all", "debug", "info", "warn", "error"] as const
 
@@ -50,7 +50,7 @@ function formatTimestamp(iso: string): string {
 }
 
 export function LogsViewer() {
-  const { logs } = useApiContext()
+  const logs = useApiStore((s) => s.logs)
 
   const [levelFilter, setLevelFilter] = useState<string>("all")
   const [moduleFilter, setModuleFilter] = useState<string>("all")

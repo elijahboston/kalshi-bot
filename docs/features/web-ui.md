@@ -138,14 +138,16 @@ Money values are **cents** (integers). Divide by 100 for display. Probabilities 
 - **TanStack Router** — file-based or code-based router. Even though the UI is a single page today, set up the router scaffolding so future views (per-market drill-in, historical backtest viewer) slot in cleanly.
 - **Tailwind CSS 4** — utility styling
 - **shadcn/ui** — component library. Use `Card`, `Table`, `Badge`, `Input`, `Select`, `Button`, `ScrollArea`, `Separator`, `Tooltip`. Install via `npx shadcn@latest init` and add components as needed.
-- **Recharts** — line chart (equity), bar chart (daily P&L), horizontal bar chart (calibration)
+- **Recharts** — line chart (equity), bar chart (daily P&L), horizontal bar chart (calibration). Animations are disabled (`isAnimationActive={false}`) on the live-updating charts to avoid detached-SVG-node accumulation on frequent re-renders.
+- **Zustand** — global state store (`src/lib/store.ts`). Replaced the single React-context `useApi`/`ApiProvider`, which re-rendered every consumer on every WS event. Components now subscribe to narrow slices via selectors (`useApiStore((s) => s.logs)`), so a high-frequency event only re-renders the components that read that slice.
 - **lucide-react** — icons
 - Native `WebSocket` API — no library needed
 
-Create a single `ApiClient` hook (`useApi`) that manages:
-- initial REST fetches
-- WebSocket connection + reconnect with backoff
-- typed event routing to setState updates
+The data layer lives in `src/lib/store.ts`:
+- A Zustand store holds all API state. `initApi()` (called once from `__root.tsx`) fires the initial REST fetches and opens the WebSocket; it returns a teardown that stops reconnection and clears timers. The WS/fetch logic is module-scoped (not a hook), so it isn't tied to any component's lifecycle.
+- WebSocket connection + reconnect with exponential backoff (1s → 30s cap).
+- `reduceWsMessage(state, msg)` is a **pure** function returning `{ patch, effects }` — it routes each event to a state patch (with the real-time feeds capped: signals 50, orders 100, logs 500, events 50) and lists follow-up effects (`perf` / `markets`). Unit-tested in `store.test.ts`.
+- Follow-up refetches are debounced (500ms): `refetchPerformance` (batch of 7 mode-scoped endpoints) and `refetchMarkets` (coalesces the per-tick `market:priceUpdate` flood into one request). `refetchHistory` is seq-tracked so stale responses can't overwrite fresh data.
 
 ---
 
@@ -281,5 +283,6 @@ After v0 generates the project:
 
 ## Changelog
 
+- **2026-06-15** — Fixed a memory leak that forced the browser to reload the dashboard after long uptimes. Root cause was render churn + detached-DOM accumulation, not an unbounded array (all real-time feeds were already capped). Four changes: (1) migrated the data layer from a single React context (`useApi`/`ApiProvider`, which re-rendered every consumer on every WS event) to a **Zustand store** (`src/lib/store.ts`) with narrow per-slice selectors at each callsite; (2) disabled Recharts animations (`isAnimationActive={false}`) on the equity and calibration charts to stop detached-SVG-node growth; (3) debounced the `market:priceUpdate`/`market:discovered` markets refetch (was un-debounced, no guard, no catch — flooded requests per tick); (4) fixed the shadcn `useToast` subscribe effect dependency (`[state]` → `[]`) in `hooks/use-toast.ts` and `components/ui/use-toast.ts`. Deleted `src/lib/use-api.ts` and `src/lib/api-context.tsx`. New pure-reducer + selector-isolation tests in `src/lib/store.test.ts`.
 - **2026-06-06** — Recent Resolutions now also shown on the Dashboard tab. The table was extracted into a shared component `app/web/components/dashboard/recent-resolutions.tsx` (used by both the Dashboard route and the Calibration view). Dashboard shows the latest 8 rows with a W/L + net P&L summary in the header and a "View all" link to Calibration; Calibration shows all loaded rows. Pure helper `resolutionSummary()` is unit-tested in `recent-resolutions.test.ts`.
 - **2026-06-06** — Fixed Mkt Price column in Recent Resolutions showing "$0.00" for nearly every row: `calibration.marketPrice` is stored on a 0–1 scale but was formatted with `fmtMoney()` (expects integer cents), so any price under 50¢ rounded to zero. Added `fmtPrice()` (0–1 → "21¢") to `app/web/src/lib/format.ts`, with regression tests in `format.test.ts`. Other `fmtMoney` call sites (orders, positions, settings) verified to use integer cents and are unaffected.
