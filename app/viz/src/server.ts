@@ -1,14 +1,22 @@
 import { handleApiRequest } from "./api";
 import { addClient, removeClient, startBridge } from "./ws-bridge";
+import { initCache, getCachedSnapshot, getCachedPerformance } from "./viz-cache";
 import index from "./frontend/index.html";
 
 export function startVizServer(port: number): { stop: () => void } {
+  initCache();
   const stopBridge = startBridge();
 
   const server = Bun.serve({
     port,
     routes: {
       "/": index,
+      "/api/snapshot": {
+        GET: () => Response.json(getCachedSnapshot()),
+      },
+      "/api/performance": {
+        GET: () => Response.json(getCachedPerformance()),
+      },
       "/api/*": {
         GET: (req) => {
           const res = handleApiRequest(req);

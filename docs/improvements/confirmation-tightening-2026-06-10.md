@@ -1,5 +1,9 @@
 # Confirmation tightening — 2026-06-10
 
+**Status:** Accepted
+**Date:** 2026-06-10
+**Deciders:** Elijah Boston
+
 Full algorithm + data review of the new regime (since `REGIME_BOUNDARY_ISO`,
 2026-06-05T20:00Z), looking for win-rate/accuracy improvements beyond the
 2026-06-05/06 redirection. Canonical scoreboard at review time (filled buys ×

@@ -1,5 +1,9 @@
 # Self-Improvement Loop
 
+**Status:** Implemented
+**Owner:** Elijah Boston
+**Last updated:** 2026-06-10
+
 The core differentiator: the bot gets better over time via automated feedback mechanisms that run during reconciliation. See [reconciliation.md](reconciliation.md) for the pipeline that drives these updates.
 
 ---

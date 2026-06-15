@@ -1,5 +1,9 @@
 # Polymarket Integration — Scoping Assessment
 
+**Author:** Elijah Boston
+**Status:** Draft
+**Last updated:** 2026-06-10
+
 *2026-06-10. Feasibility/effort assessment, not an implementation guide. Scope per request: estimate the effort and recommend a path; **paper-trade only** (simulate against Polymarket's public market data — no wallet, no real orders).*
 
 ## TL;DR

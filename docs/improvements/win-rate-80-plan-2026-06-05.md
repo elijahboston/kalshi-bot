@@ -1,5 +1,9 @@
 # Win-Rate 80% Plan — 2026-06-05
 
+**Status:** Accepted
+**Date:** 2026-06-05
+**Deciders:** Elijah Boston
+
 > Goal: lift paper-mode win rate from **33.5% → ≥80%** by reversing the bot's anti-edge contra-market posture, not by tuning the existing one.
 
 This document is a deep analysis of the bot's current state and a prioritized action plan. It supersedes the incremental tuning in `market-prior-2026-05-29.md`, `tail-gate-2026-05-29.md`, and `per-station-surcharge-2026-05-29.md` — those shipped, but the data shows they're insufficient.

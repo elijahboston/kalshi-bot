@@ -1,5 +1,9 @@
 # Adaptive-threshold persistence (2026-05-29)
 
+**Status:** Accepted
+**Date:** 2026-05-29
+**Deciders:** Elijah Boston
+
 ## Why
 
 The [2026-05-26 audit](./execution-unblock-2026-05-26.md) flagged `adaptive_thresholds` as "empty since launch." After investigating: the **table** is empty but the **logic** has been running all along.

@@ -1,5 +1,8 @@
 # Bun API Improvements
 
+**Status:** In Progress
+**Last updated:** 2026-06-10
+
 Improvements identified from the Bun API docs. Checked items are complete.
 
 ## High Impact

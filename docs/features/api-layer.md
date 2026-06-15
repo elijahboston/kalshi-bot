@@ -1,5 +1,9 @@
 # Bot API Layer — Elysia REST + WebSocket
 
+**Status:** Implemented
+**Owner:** Elijah Boston
+**Last updated:** 2026-06-10
+
 ## Context
 
 The bot currently runs as a single process that couples the engine loop with an Ink-based terminal UI. The TUI subscribes to the singleton `bus` (TypedEmitter in `app/engine/events.ts`) for real-time updates and queries the SQLite DB directly for historical data.

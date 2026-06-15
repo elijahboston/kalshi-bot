@@ -1,5 +1,9 @@
 # Oilbot — WTI Intervention-Thesis Trading Bot
 
+**Author:** Elijah Boston
+**Status:** Draft
+**Last updated:** 2026-06-10
+
 ## Overview
 
 A trading agent for Kalshi's WTI crude oil prediction markets, built on a specific macro thesis: **Iran supply risk creates a structural price floor, while Treasury intervention to suppress prices creates mean-reversion opportunities.** The bot detects when intervention is pushing prices below fair value and bets on reversion, and detects when intervention pauses and prices overshoot.

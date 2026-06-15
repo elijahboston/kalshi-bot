@@ -80,13 +80,31 @@ async function init() {
   // Create the flat map (async — fetches state boundary data)
   await createMap(scene);
 
-  // Load station markers
-  try {
-    const res = await fetch("/api/stations");
-    const stations: StationInfo[] = await res.json();
-    createStations(scene, stations);
-  } catch (e) {
-    console.warn("Failed to load stations:", e);
+  // Parallel: station markers + snapshot for immediate HUD population
+  const [stationsRes, snapshotRes] = await Promise.allSettled([
+    fetch("/api/stations"),
+    fetch("/api/snapshot"),
+  ]);
+
+  if (stationsRes.status === "fulfilled" && stationsRes.value.ok) {
+    try {
+      const stations: StationInfo[] = await stationsRes.value.json();
+      createStations(scene, stations);
+    } catch (e) {
+      console.warn("Failed to parse stations:", e);
+    }
+  } else {
+    console.warn("Failed to load stations");
+  }
+
+  if (snapshotRes.status === "fulfilled" && snapshotRes.value.ok) {
+    try {
+      const snapshot = await snapshotRes.value.json();
+      handleHudMessage({ type: "snapshot", data: snapshot });
+      handleSceneMessage({ type: "snapshot", data: snapshot });
+    } catch (e) {
+      console.warn("Failed to parse snapshot:", e);
+    }
   }
 
   // Load initial weather data (updates both weather overlay and station pillars)

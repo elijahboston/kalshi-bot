@@ -1,5 +1,8 @@
 # Event Bus
 
+**Type:** Reference
+**Last updated:** 2026-06-10
+
 Defined in `app/engine/events.ts`. The singleton `bus` is imported via `import { bus } from "@kcb/engine"`.
 
 - The bus is fire-and-forget — do not await event handlers.

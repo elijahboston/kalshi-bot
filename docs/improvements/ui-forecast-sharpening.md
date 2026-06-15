@@ -1,5 +1,9 @@
 # UI Updates for Forecast Sharpening
 
+**Status:** Implemented
+**Owner:** Elijah Boston
+**Last updated:** 2026-06-10
+
 The forecast sharpening changes (HRRR ingestion, sniper mode, empirical sigma, same-day observations, horizon-weighted blending) added significant new data and behaviors that aren't yet surfaced in the TUI or GUI. These updates make the new capabilities visible and actionable.
 
 ---

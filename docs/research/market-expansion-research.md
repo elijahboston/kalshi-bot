@@ -1,5 +1,9 @@
 # Kalshi Market Expansion Research
 
+**Author:** Elijah Boston
+**Status:** Under Discussion
+**Last updated:** 2026-06-10
+
 Research into which Kalshi prediction markets are most profitable to trade with the least possibility of manipulation.
 
 ## Evaluation Criteria

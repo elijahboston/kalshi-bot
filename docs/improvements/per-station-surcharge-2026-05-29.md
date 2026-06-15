@@ -1,5 +1,9 @@
 # Per-station edge surcharge (2026-05-29)
 
+**Status:** Accepted
+**Date:** 2026-05-29
+**Deciders:** Elijah Boston
+
 ## Why
 
 60-day per-station PnL (buy trades, settled markets only):

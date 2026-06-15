@@ -1,5 +1,9 @@
 # Market price as Bayesian prior (2026-05-29)
 
+**Status:** Accepted
+**Date:** 2026-05-29
+**Deciders:** Elijah Boston
+
 ## Why
 
 After the [sigma cap + historical-prior bump](./sigma-cap-prior-bump-2026-05-27.md) shipped 2026-05-27, two more days of fills confirmed the same failure mode. The estimator's "raw" predictions moved a few percentage points toward truth, but it's still systematically betting NO into markets that resolve YES.

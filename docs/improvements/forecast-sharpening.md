@@ -1,5 +1,9 @@
 # Forecast Sharpening: Closing the Gap with Top Bots
 
+**Status:** Implemented
+**Owner:** Elijah Boston
+**Last updated:** 2026-06-10
+
 Our analysis (2026-04-13) revealed that the market's Brier score improves 14x between 39h and 7h before close (0.156 to 0.011), while ours stays flat at 0.161. Our correct-bracket identification rate is 24.4% vs the market's 93.7%. The root cause: our ensemble spread (avg 2.6F) is wider than the bracket width (2F), and we don't get sharper as events approach.
 
 These five changes address that gap, ordered by impact. They compound — HRRR data makes sniper mode viable, which makes empirical sigma meaningful, etc.

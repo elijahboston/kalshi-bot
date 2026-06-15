@@ -1,5 +1,9 @@
 # Multi-Bot Architecture Plan
 
+**Author:** Elijah Boston
+**Status:** Draft
+**Last updated:** 2026-06-10
+
 ## Overview
 
 Evolve the single-strategy climatebot into a multi-bot system that runs multiple independent trading strategies (climate, oil, and future additions) within a single process. Each bot has its own capital allocation, performance tracking, and tick cadence, while sharing infrastructure (Kalshi client, DB, execution engine, TUI, viz).

@@ -109,76 +109,67 @@ export function useApi(): ApiContextValue {
   useEffect(() => {
     mountedRef.current = true
 
-    // Two-phase load: status first to determine paper/live mode, then the rest
-    // with mode-scoped filters so charts/stats aren't mingled.
-    fetchJson<BotStatus>("/api/status")
-      .then((status) => {
-        if (!mountedRef.current) return
-        const modeParam = status.dryRun ? "true" : "false"
-        patch({ status })
+    // Three-batch progressive load:
+    //   Batch 1 (critical, parallel): status + performance + balance
+    //     → unlocks header cards immediately; sets loading: false
+    //   Batch 2 (secondary, parallel): everything else, each patches on arrival
+    //     → fills positions, markets, signals etc. as they complete
+    //   Batch 3 (re-scope): if status reveals a specific dryRun mode, refetch
+    //     perf+balance with the mode filter to correct any cross-mode data
+    const statusP = fetchJson<BotStatus>("/api/status").catch(() => null)
+    const perfP = fetchJson<Performance>("/api/performance").catch(() => null)
+    const balP = fetchJson<Balance>("/api/balance").catch(() => null)
 
-        return Promise.allSettled([
-          fetchJson<BotConfig>("/api/config"),
-          fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`),
-          fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`),
-          fetchJson<Market[]>("/api/markets?status=open&limit=50"),
-          fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`),
-          fetchJson<Order[]>(`/api/orders?limit=50&dryRun=${modeParam}`),
-          fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`),
-          fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`),
-          fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`),
-          fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`),
-          fetchJson<CalibrationBucket[]>(`/api/performance/calibration?dryRun=${modeParam}`),
-          fetchJson<Resolution[]>(`/api/performance/resolutions?limit=10&dryRun=${modeParam}`),
-          fetchJson<LogEntry[]>("/api/logs?limit=100"),
-        ])
-      })
-      .then((results) => {
-        if (!results || !mountedRef.current) return
-        const [
-          config,
-          balance,
-          positions,
-          markets,
-          signals,
-          orders,
-          performance,
-          winRates,
-          dailyPnl,
-          dailyWinRates,
-          calibration,
-          resolutions,
-          logs,
-        ] = results
+    Promise.all([statusP, perfP, balP]).then(([status, performance, balance]) => {
+      if (!mountedRef.current) return
+      const modeParam = status?.dryRun ? "true" : "false"
+      patch({ loading: false, status, performance, balance })
 
-        patch({
-          loading: false,
-          config: config.status === "fulfilled" ? config.value : null,
-          balance: balance.status === "fulfilled" ? balance.value : null,
-          positions:
-            positions.status === "fulfilled" ? positions.value : [],
-          markets: markets.status === "fulfilled" ? markets.value : [],
-          signals: signals.status === "fulfilled" ? signals.value : [],
-          orders: orders.status === "fulfilled" ? orders.value : [],
-          performance:
-            performance.status === "fulfilled" ? performance.value : null,
-          winRates:
-            winRates.status === "fulfilled" ? winRates.value : [],
-          dailyPnl:
-            dailyPnl.status === "fulfilled" ? dailyPnl.value : [],
-          dailyWinRates:
-            dailyWinRates.status === "fulfilled" ? dailyWinRates.value : [],
-          calibration:
-            calibration.status === "fulfilled" ? calibration.value : [],
-          resolutions:
-            resolutions.status === "fulfilled" ? resolutions.value : [],
-          logs: logs.status === "fulfilled" ? logs.value : [],
-        })
-      })
-      .catch(() => {
-        // Status fetch failed — leave loading true so the UI shows its
-        // disconnected state via the WS onopen/onclose handlers.
-      })
+      // Secondary fetches — each patches state as it arrives
+      fetchJson<BotConfig>("/api/config")
+        .then((config) => { if (mountedRef.current) patch({ config }) })
+        .catch(() => {})
+      fetchJson<Position[]>(`/api/positions?dryRun=${modeParam}`)
+        .then((positions) => { if (mountedRef.current) patch({ positions }) })
+        .catch(() => {})
+      fetchJson<Market[]>("/api/markets?status=open&limit=50")
+        .then((markets) => { if (mountedRef.current) patch({ markets }) })
+        .catch(() => {})
+      fetchJson<Signal[]>(`/api/signals?limit=30&dryRun=${modeParam}`)
+        .then((signals) => { if (mountedRef.current) patch({ signals }) })
+        .catch(() => {})
+      fetchJson<Order[]>(`/api/orders?limit=50&dryRun=${modeParam}`)
+        .then((orders) => { if (mountedRef.current) patch({ orders }) })
+        .catch(() => {})
+      fetchJson<WinRateWindow[]>(`/api/performance/win-rates?dryRun=${modeParam}`)
+        .then((winRates) => { if (mountedRef.current) patch({ winRates }) })
+        .catch(() => {})
+      fetchJson<DailyPnl[]>(`/api/performance/daily-pnl?days=14&dryRun=${modeParam}`)
+        .then((dailyPnl) => { if (mountedRef.current) patch({ dailyPnl }) })
+        .catch(() => {})
+      fetchJson<DailyWinRate[]>(`/api/performance/daily-win-rates?days=84&dryRun=${modeParam}`)
+        .then((dailyWinRates) => { if (mountedRef.current) patch({ dailyWinRates }) })
+        .catch(() => {})
+      fetchJson<CalibrationBucket[]>(`/api/performance/calibration?dryRun=${modeParam}`)
+        .then((calibration) => { if (mountedRef.current) patch({ calibration }) })
+        .catch(() => {})
+      fetchJson<Resolution[]>(`/api/performance/resolutions?limit=10&dryRun=${modeParam}`)
+        .then((resolutions) => { if (mountedRef.current) patch({ resolutions }) })
+        .catch(() => {})
+      fetchJson<LogEntry[]>("/api/logs?limit=100")
+        .then((logs) => { if (mountedRef.current) patch({ logs }) })
+        .catch(() => {})
+
+      // Re-fetch perf+balance with mode scope if the initial fetch was unfiltered
+      if (status != null) {
+        fetchJson<Performance>(`/api/performance?dryRun=${modeParam}`)
+          .then((p) => { if (mountedRef.current) patch({ performance: p }) })
+          .catch(() => {})
+        fetchJson<Balance>(`/api/balance?dryRun=${modeParam}`)
+          .then((b) => { if (mountedRef.current) patch({ balance: b }) })
+          .catch(() => {})
+      }
+    })
 
     return () => {
       mountedRef.current = false

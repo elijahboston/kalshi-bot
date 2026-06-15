@@ -1,5 +1,9 @@
 # Web UI — Single-Page Dashboard
 
+**Status:** Implemented
+**Owner:** Elijah Boston
+**Last updated:** 2026-06-11
+
 ## Context
 
 The bot now exposes its state through a REST + WebSocket API (`docs/features/api-layer.md`). This spec describes the web UI that consumes that API. The goal is to **replace the multi-tab TUI with a single dense page** that shows everything at once — similar to a trading terminal, where the operator can see positions, signals, pipeline status, markets, performance, and logs without navigating.
@@ -108,10 +112,14 @@ All endpoints are on `http://localhost:3100`. WebSocket is `ws://localhost:3100/
 | **Live Event Feed** | — | all events (keep last 50) |
 | **Logs** | `GET /api/logs?limit=100` | `log` (append, keep last 500 client-side) |
 
+### Initial load performance
+
+`GET /api/snapshot` and `GET /api/performance` are served from an in-memory cache (`viz-cache.ts`) that is populated on server startup and refreshed (debounced 500ms) on relevant bus events (`order:placed`, `balance:update`, `position:update`, `market:resolved`). The frontend fetches both in parallel during `init()` so the HUD populates before the WebSocket handshake completes.
+
 ### WebSocket message format
 
 ```jsonc
-// On connect
+// On connect (served from cache — no DB queries at connect time)
 { "type": "snapshot", "data": { "status": {...}, "positions": [...], "balance": {...} } }
 
 // Live events — one of 14 types, see docs/features/api-layer.md

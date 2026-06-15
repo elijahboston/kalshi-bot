@@ -1,5 +1,8 @@
 # External APIs
 
+**Type:** Reference
+**Last updated:** 2026-06-10
+
 The bot integrates with three external data providers plus the Kalshi trading API. All clients live under `packages/kalshi-client/` (Kalshi) or `app/data/services/` (weather).
 
 ---

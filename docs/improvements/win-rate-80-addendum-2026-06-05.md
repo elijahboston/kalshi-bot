@@ -1,5 +1,9 @@
 # Win-Rate 80% Addendum — 2026-06-05 (Second Deep Dive)
 
+**Status:** Accepted
+**Date:** 2026-06-05
+**Deciders:** Elijah Boston
+
 > Companion to [`win-rate-80-plan-2026-06-05.md`](win-rate-80-plan-2026-06-05.md). That plan covers the strategy redirection (concordance gates, confirmation mode, adaptive market prior, sigma floor, hit-rate fix, confidence rewrite, station disable, ultra-sniper, telemetry). **This document contains only NEW findings and NEW action items discovered in a second pass over the trades, data pipeline, and codebase.** Nothing here duplicates the first plan.
 
 ---

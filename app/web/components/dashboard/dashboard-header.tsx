@@ -19,12 +19,6 @@ function formatPnl(value: number): string {
 
 export function DashboardHeader() {
   const { performance } = useApiContext()
-  const stats = {
-    balance: performance ? performance.cash / 100 : 0,
-    totalEquity: performance ? performance.portfolio / 100 : 0,
-    totalPnl: performance ? performance.realizedPnl / 100 : 0,
-    winRate: performance ? performance.winRate * 100 : 0,
-  }
 
   return (
     <header className="flex flex-col gap-5">
@@ -47,26 +41,26 @@ export function DashboardHeader() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
           label="Balance"
-          value={formatCurrency(stats.balance)}
+          value={performance ? formatCurrency(performance.cash / 100) : "—"}
           type="currency"
           icon="balance"
         />
         <StatCard
           label="Total Equity"
-          value={formatCurrency(stats.totalEquity)}
+          value={performance ? formatCurrency(performance.portfolio / 100) : "—"}
           type="currency"
           icon="equity"
         />
         <StatCard
           label="Total P&L"
-          value={formatPnl(stats.totalPnl)}
+          value={performance ? formatPnl(performance.realizedPnl / 100) : "—"}
           type="pnl"
-          isPositive={stats.totalPnl >= 0}
+          isPositive={performance ? performance.realizedPnl >= 0 : undefined}
           icon="pnl"
         />
         <StatCard
           label="Win Rate"
-          value={`${stats.winRate.toFixed(1)}%`}
+          value={performance ? `${(performance.winRate * 100).toFixed(1)}%` : "—"}
           type="percentage"
           icon="winrate"
         />

@@ -1,5 +1,9 @@
 # Calibration deep-dive (2026-05-26): two compounding bugs explain the post-restart NO bleed
 
+**Date of incident:** 2026-05-26
+**Authors:** Elijah Boston
+**Status:** Closed
+
 ## Why this investigation happened
 
 After the May 9 σ-blend shipped, two weeks of post-restart paper data showed the

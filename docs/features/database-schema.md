@@ -1,5 +1,8 @@
 # Database Schema
 
+**Type:** Reference
+**Last updated:** 2026-06-10
+
 SQLite via Drizzle ORM. Schema lives in `packages/db/src/schema/`. Drizzle generates migrations from these files (`bun run db:generate` → `bun run db:migrate`).
 
 Conventions:

@@ -1,5 +1,9 @@
 # Multi-horizon station_bias backfill (2026-05-29)
 
+**Status:** Accepted
+**Date:** 2026-05-29
+**Deciders:** Elijah Boston
+
 ## Why
 
 `station_bias` has only 6 rows — one per station at `forecast_horizon_days = 1`. The bot trades same-day markets in sniper mode (within 12h of close), so only horizon=1 forecasts ever get cached, and `recomputeStationBias` produces only horizon=1 bias entries.

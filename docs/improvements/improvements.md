@@ -1,5 +1,8 @@
 # Suggested Improvements
 
+**Status:** Active
+**Last updated:** 2026-06-10
+
 Ordered by expected edge gain. Items 1-3 are signal quality improvements that compound together.
 
 ---

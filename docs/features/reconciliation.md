@@ -1,5 +1,8 @@
 # Reconciliation Pipeline
 
+**Type:** Architecture
+**Last updated:** 2026-06-10
+
 The reconciliation service (`app/engine/services/reconciliation.ts`) runs every tick as Phase 5 of the orchestrator loop. It keeps local state in sync with Kalshi and drives the self-improvement feedback loop.
 
 ## Steps (each tick, in order)

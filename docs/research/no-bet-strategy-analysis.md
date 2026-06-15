@@ -1,5 +1,9 @@
 # Research: Always Betting NO Strategy Analysis
 
+**Author:** Elijah Boston
+**Status:** Closed
+**Date:** 2026-04-13
+
 Analysis date: 2026-04-13
 Dataset: 958 resolved markets, 2,268 trades, 46 trading days (2026-02-20 to 2026-04-06)
 

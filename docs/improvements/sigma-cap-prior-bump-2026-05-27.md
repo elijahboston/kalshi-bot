@@ -1,5 +1,9 @@
 # Cap empirical sigma weight at 0.7 + raise historical prior to 0.5 (2026-05-27)
 
+**Status:** Accepted
+**Date:** 2026-05-27
+**Deciders:** Elijah Boston
+
 ## Why
 
 Yesterday's overnight validation of the [execution unblock](./execution-unblock-2026-05-26.md) and [calibration deep-dive fixes](./calibration-deep-dive-2026-05.md) showed the bot is **still losing on the same failure mode**: bets NO on tight near-mean brackets, actuals come in YES.

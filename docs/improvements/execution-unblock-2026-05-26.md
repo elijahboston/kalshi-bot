@@ -1,5 +1,9 @@
 # Execution unblock (2026-05-26): high-conf cheap-contract bypass + paper-mode reserve fix + skip-reason propagation
 
+**Status:** Accepted
+**Date:** 2026-05-26
+**Deciders:** Elijah Boston
+
 ## Why this exists
 
 The 2026-05-26 audit (see chat transcript) found that the bot was silently rejecting **6,542 of 6,599 actionable signals (99.1%)** since 2026-05-15. The two biggest offenders, ordered by lost edge:

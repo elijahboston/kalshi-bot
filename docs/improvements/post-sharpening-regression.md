@@ -1,5 +1,9 @@
 # Post-Sharpening Regression Diagnostic (2026-04-22)
 
+**Date of incident:** 2026-04-22
+**Authors:** Elijah Boston
+**Status:** Closed
+
 The user proposed depositing $100 and ramping bet sizes, believing the Apr 14 forecast-sharpening work (5800acf) and the Apr 21 bug fixes (b9fee76) had improved performance. Investigation showed the premise was wrong in one direction and the root cause lies elsewhere than initially suspected.
 
 ## TL;DR
@@ -94,7 +98,7 @@ Result: a single settled market with a cached signal is enough to populate `stat
 
 ### Deferred
 
-- **Root-cause of weather_forecasts wipes.** ~~Still unknown.~~ **Resolved 2026-04-26**: the wipes were the test suite. Tests using `runMigrations()` with no path defaulted to `./data/kalshi-bot.db` (production), then `beforeEach` `db.delete(...)` cleanups silently destroyed live data. See [test-db-wipe-incident.md](test-db-wipe-incident.md) for the full post-mortem. Fixed via `bunfig.toml` test preload that forces `DB_PATH=:memory:`. The Apr 23 retention-resilient backfill above remains useful as defense in depth.
+- **Root-cause of weather_forecasts wipes.** ~~Still unknown.~~ **Resolved 2026-04-26**: the wipes were the test suite. Tests using `runMigrations()` with no path defaulted to `./data/kalshi-bot.db` (production), then `beforeEach` `db.delete(...)` cleanups silently destroyed live data. See [test-db-wipe incident](../lessons/2026-04-26-test-db-wipe.md) for the full post-mortem. Fixed via `bunfig.toml` test preload that forces `DB_PATH=:memory:`. The Apr 23 retention-resilient backfill above remains useful as defense in depth.
 - **Observation-adjustment sigma multiplier.** Already loosened 0.5×→0.7× on Apr 21. Post-loosening data is too thin to tell if further loosening is needed. Revisit after 2 weeks.
 - **Per-category calibration.** All current calibration data is `high_temp`. Before enabling precip/snow trading again, ensure those categories actually produce rows.
 
@@ -124,7 +128,7 @@ Sampled 3 post-wipe acted signals (2026-04-26 17:16–20:04). All show:
 - `blendedProbability`: NULL
 - `biasCorrection`: null
 
-Root cause: the [2026-04-26 production DB wipe](test-db-wipe-incident.md) destroyed 457 of 459 calibration rows. `getHistoricalHitRate` requires ≥5 same-station/category resolutions per bracket. With only 2 surviving calibration rows (both from 2026-04-20 test fixtures), the function returns `null` for every estimate and the blend silently falls back to unblended `rawProbability`. The bot has been running in effectively pre-fix mode since the wipe.
+Root cause: the [2026-04-26 production DB wipe](../lessons/2026-04-26-test-db-wipe.md) destroyed 457 of 459 calibration rows. `getHistoricalHitRate` requires ≥5 same-station/category resolutions per bracket. With only 2 surviving calibration rows (both from 2026-04-20 test fixtures), the function returns `null` for every estimate and the blend silently falls back to unblended `rawProbability`. The bot has been running in effectively pre-fix mode since the wipe.
 
 ### Post-fix calibration data
 

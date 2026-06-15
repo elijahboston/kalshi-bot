@@ -1,5 +1,8 @@
 # REPL Commands
 
+**Type:** Reference
+**Last updated:** 2026-06-10
+
 Commands are defined in `app/cli/src/commands/`. Each file exports an array of `CommandDef` objects. The registry in `commands/index.ts` flattens them into a lookup map by name and aliases.
 
 ```typescript

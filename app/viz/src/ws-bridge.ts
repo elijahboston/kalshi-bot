@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { bus, type BotEvents } from "@kcb/engine";
-import { getSnapshot } from "./api";
+import { getCachedSnapshot } from "./viz-cache";
 
 const clients = new Set<ServerWebSocket<unknown>>();
 const unsubscribers: (() => void)[] = [];
@@ -9,8 +9,8 @@ const unsubscribers: (() => void)[] = [];
 export function addClient(ws: ServerWebSocket<unknown>): void {
   clients.add(ws);
 
-  // Send initial snapshot
-  const snapshot = getSnapshot();
+  // Send initial snapshot from cache (no DB queries at connect time)
+  const snapshot = getCachedSnapshot();
   ws.send(JSON.stringify({ type: "snapshot", data: snapshot }));
 }
 

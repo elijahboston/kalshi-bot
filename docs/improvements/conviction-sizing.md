@@ -2,6 +2,7 @@
 
 **Date:** 2026-04-23
 **Status:** Implemented
+**Deciders:** Elijah Boston
 
 ## Problem
 

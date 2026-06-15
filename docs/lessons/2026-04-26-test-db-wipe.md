@@ -1,5 +1,9 @@
 # Production DB Wipe Incident (2026-04-26)
 
+**Date of incident:** 2026-04-26
+**Authors:** Elijah Boston
+**Status:** Closed
+
 ## TL;DR
 
 The 6:03 AM log-review LaunchAgent ran `bun test` against the production SQLite DB on 2026-04-26 and silently wiped most trading state, including the historical calibration data that the Apr 22 historical-prior blend depended on. Root cause was test files calling `runMigrations()` with no path (defaults to `./data/kalshi-bot.db`) followed by `db.delete(table).run()` cleanup hooks. Fixed by `bunfig.toml` test preload that forces `DB_PATH=:memory:` for all test runs.

@@ -1,5 +1,8 @@
 # Configuration
 
+**Type:** Reference
+**Last updated:** 2026-06-10
+
 All config keys and their defaults live in `packages/config/src/index.ts`. Values merge three sources at startup: hardcoded defaults → environment variables (Bun auto-loads `.env`) → `runtime_config` table overrides.
 
 ## Keys
