@@ -5,34 +5,54 @@
 # wins summary, gate sweep, station/hour/confidence breakdowns, due follow-ups,
 # and any config actions within the hard guardrails. Logs to docs/follow-ups.md.
 #
+# Also appends a markdown section to docs/YYYY-MM-DD-log.md and commits the
+# complete daily log to git (as the last agent to run each day).
+#
 # Manual run:  bash scripts/daily-perf-review.sh
 # Output:      logs/daily-perf-review.log (gitignored)
+#              docs/YYYY-MM-DD-log.md     (tracked, committed here)
 
 set -euo pipefail
 
 REPO="/Users/elijah/projects/kalshi-bot"
 CLAUDE_BIN="/opt/homebrew/bin/claude"
 LOG="$REPO/logs/daily-perf-review.log"
+TODAY="$(date +%Y-%m-%d)"
+DAILY_LOG="$REPO/docs/$TODAY-log.md"
+TMPOUT="$(mktemp /tmp/kalshi-perf-XXXXXX.txt)"
 
 cd "$REPO"
 mkdir -p logs
 
+trap 'rm -f "$TMPOUT"' EXIT
+
 # Honour the same pause sentinel as the follow-ups sweep.
 if [ -f "$REPO/.sweep-paused" ]; then
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) perf-review skipped: .sweep-paused sentinel present" >> "$LOG"
+  MSG="$(date -u +%Y-%m-%dT%H:%M:%SZ) perf-review skipped: .sweep-paused sentinel present"
+  echo "$MSG" >> "$LOG"
+  [ ! -f "$DAILY_LOG" ] && printf "# Daily Log — %s\n\n" "$TODAY" > "$DAILY_LOG"
+  printf "## 10:00 — Performance Review\n\n> Skipped: \`.sweep-paused\` sentinel present.\n\n" >> "$DAILY_LOG"
   exit 0
+fi
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Initialize daily log header if neither prior agent ran today.
+if [ ! -f "$DAILY_LOG" ]; then
+  printf "# Daily Log — %s\n\n" "$TODAY" > "$DAILY_LOG"
 fi
 
 {
   echo ""
   echo "===== daily-perf-review $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+} >> "$LOG"
 
-  export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-
-  "$CLAUDE_BIN" -p \
-    --dangerously-skip-permissions \
-    --max-turns 60 \
-    "You are the scheduled daily performance review for the kalshi-bot (running headless via launchd — no user to ask; skip CronCreate/CronList steps). Working directory: /Users/elijah/projects/kalshi-bot. Regime boundary for all measurements: 2026-06-05T20:00Z.
+# Capture claude output so we can write it to both logs.
+set +e
+"$CLAUDE_BIN" -p \
+  --dangerously-skip-permissions \
+  --max-turns 60 \
+  "You are the scheduled daily performance review for the kalshi-bot (running headless via launchd — no user to ask; skip CronCreate/CronList steps). Working directory: /Users/elijah/projects/kalshi-bot. Regime boundary for all measurements: 2026-06-05T20:00Z.
 
 ## Step 1 — Bot health
 Run: bun ops status
@@ -56,24 +76,46 @@ Run these SQL checks against data/kalshi-bot.db:
 ## Step 4 — Surface ⚠ findings (lead any alarming item)
 Flag if ANY of:
 - Overall win rate < 85% (approaching the 80% target with shrinking cushion)
-- Gate family with n≥10 and would-win% > 50% that wasn't flagged last time
+- Gate family with n>=10 and would-win% > 50% that wasn't flagged last time
 - 21Z hour win rate < 70% or still showing negative PnL (watch item from 2026-06-11)
-- KDEN PnL flipping negative (watch item #12, due 2026-06-17)
 - CLI actuals: zero 'cli' rows in last 2 days (ground-truth regression)
 - Confirmation exit churn > 0 (policy regression)
-- Any confidence bucket with n≥5 and win rate < 75%
+- Any confidence bucket with n>=5 and win rate < 75%
 
 ## Step 5 — Due follow-up items
-Read docs/follow-ups.md. For every item whose Due date is today or earlier (including 'weekly' items last checked ≥7 days ago per the Log), run its exact Check query, then act per its Decide column. Config changes via: bun ops set <key> <value> --why 'follow-up #N: <reason>'
+Read docs/follow-ups.md. For every item whose Due date is today or earlier (including 'weekly' items last checked >=7 days ago per the Log), run its exact Check query, then act per its Decide column. Config changes via: bun ops set <key> <value> --why 'follow-up #N: <reason>'
 GUARDRAILS: never set dry_run=false; never delete data; never add market categories; if anything alarming surfaces, log it loudly before acting on anything else.
 
 ## Step 6 — Log
-Append a new entry to docs/follow-ups.md Log section (newest first), recording: date, items checked, ⚠ findings, actions taken or deferred, current 'wins summary' line. Then run bun test — commit and push only if tests are green. Only create a commit if you made actual changes (config sets or doc updates).
+Append a new entry to docs/follow-ups.md Log section (newest first), recording: date, items checked, findings, actions taken or deferred, current 'wins summary' line. Then run bun test — commit and push only if tests are green. Only create a commit if you made actual changes (config sets or doc updates). Do NOT commit docs/${TODAY}-log.md — the bash wrapper handles that.
 
 ## Step 7 — Summary line
 End your response with exactly one line:
   PERF-REVIEW: <win_rate>% (n=<n>) pnl=<pnl> | actions: <list or 'none'>" \
-    2>&1
+  > "$TMPOUT" 2>&1
+CLAUDE_EXIT=$?
+set -e
 
-  echo "===== perf-review done $(date -u +%Y-%m-%dT%H:%M:%SZ) (exit $?) ====="
+cat "$TMPOUT" >> "$LOG"
+{
+  echo "===== perf-review done $(date -u +%Y-%m-%dT%H:%M:%SZ) (exit $CLAUDE_EXIT) ====="
 } >> "$LOG"
+
+# Append section to daily log.
+{
+  printf "## 10:00 — Performance Review\n\n"
+  cat "$TMPOUT"
+  if [ $CLAUDE_EXIT -ne 0 ]; then
+    printf "\n> ⚠ Review exited with code %d\n" "$CLAUDE_EXIT"
+  fi
+  printf "\n"
+} >> "$DAILY_LOG"
+
+# Commit the complete daily log (last agent to run, so the log is now complete).
+git add "$DAILY_LOG"
+if ! git diff --cached --quiet; then
+  git commit -m "docs: daily log $TODAY" --no-verify 2>&1 | tee -a "$LOG" || true
+  git push 2>&1 | tee -a "$LOG" || true
+fi
+
+exit $CLAUDE_EXIT

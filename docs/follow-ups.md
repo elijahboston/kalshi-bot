@@ -33,9 +33,11 @@ Three daily launchd agents run in sequence. All honour the `.sweep-paused` senti
 | 9:55am | DB snapshot | `scripts/db-snapshot.sh` | `logs/db-snapshot.log` |
 | 10:00am | Performance review | `scripts/daily-perf-review.sh` | `logs/daily-perf-review.log` |
 
+All three agents also append a section to **`docs/YYYY-MM-DD-log.md`** — a single markdown file per calendar day. The sweep writes the `## 08:53` section, the snapshot writes `## 09:55`, and the perf review writes `## 10:00` then commits and pushes the complete file. If the machine was off during a window, the next agent to run initialises the header.
+
 The **snapshot** (9:55am) uses SQLite's `.backup` for a consistent copy of `data/kalshi-bot.db` → `data/snapshots/kalshi-bot-YYYY-MM-DD.db`, rotating files older than 7 days. It always runs before the review so the review has a stable reference point.
 
-The **performance review** (10:00am) runs Claude Code headless: wins scoreboard (`summary`, `by_gate`, `by_station`, `by_confidence`, `by_hour`), weekly health checks (#1 CLI actuals, #2 confirmation churn), due follow-up items, ⚠ threshold checks, and commits any doc/config changes if tests pass.
+The **performance review** (10:00am) runs Claude Code headless: wins scoreboard (`summary`, `by_gate`, `by_station`, `by_confidence`, `by_hour`), weekly health checks (#1 CLI actuals, #2 confirmation churn), due follow-up items, ⚠ threshold checks, and commits any doc/config changes if tests pass. The bash wrapper then commits `docs/YYYY-MM-DD-log.md` separately so the daily log is always a clean one-line commit.
 
 **Operate sweeps with `bun ops`** (`status | due | knobs | history | set --why | sweep | pause | resume`).
 
