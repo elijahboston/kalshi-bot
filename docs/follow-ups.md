@@ -138,6 +138,13 @@ Once launchd is confirmed, delete any in-session cron duplicate (`CronList` → 
 
 Record outcomes here as items close (newest first):
 
+- **2026-06-16 — performance review (10:00; complements the 08:53 follow-ups sweep below):** No new settlements since the morning sweep — `wins summary` unchanged at **84.8% (n=92), pnl +$1.95**. Re-ran the perf-review ⚠ threshold checks; three literal flags, all KDEN-contaminated, already characterized in the morning entry, none newly actionable:
+  - ⚠ **Overall 84.8% < 85% threshold** — dragged by now-disabled KDEN (74.2%, n=31, −$35.76); active KAUS+KMIA portfolio is **90.2% (55/61)**. Expected to recover as KDEN entries age out of the window.
+  - ⚠ **21Z 64.7% (−$48.94)** — 10/17 are KDEN entries; watch at #5 (2026-06-19).
+  - ⚠ **0.85–0.90 conf bucket 74.2% (n=31, <75%)** — 9/31 KDEN; watch at #4 (2026-06-19).
+  - **Green:** #1 CLI actuals `cli|36` (last 2d); #2 confirmation exit churn = 0; gate sweep (#9) shows **no NEW n≥10 COSTING family** — already-hold (83.1%/n=65), recent-loss (85.7%/n=14), other (78.6%/n=14) all previously characterized as event-cap design-correct / red-herring KDEN negative-edge blocks.
+  - **No config changes** — nothing due today (weeklies #1/#2/#9 checked 06-15 → next 06-22; #11 handled this morning → 06-19); numbers identical to the morning sweep, so per the ambiguity guardrail no knobs touched. All eyes on the **#4 80% verdict (2026-06-19).**
+
 - **2026-06-16 — follow-ups sweep (only #11 due; weeklies #1/#2/#9 ran 06-15 → next 06-22):**
   - **⚠ PnL volatility event (not a collapse):** equity dropped **$566.65 → $515.93 (−$51)** on 06-16; cumulative realized PnL $58.51 → $17.93. Cause: a **correlated two-leg KMIA loss on the 26JUN15 event** — `B93.5` confirm_yes (25c@80¢, −$19.82) + `T94` confirm_no (44c@82¢, −$19.68), both settled at the high tail (≈$39.50 combined). Same correlated-stacking failure mode as KDEN Jun 12. The event-exposure cap (`max_event_exposure_pct_of_balance=0.15`) permitted both legs (~$56 cost < ~$71 cap at the time). Under pct sizing these were 25/44 contracts vs ~6 flat — the loss was ~4× what the flat-$5 era would have produced.
   - **Health checks all green:** ground-truth health 96.7% (n=180, >90% line; only disabled KORD at 80%); #1 CLI actuals `cli|36` last 2 days; #2 confirmation exit churn = 0; all 133 regime orders `dry_run=1` (paper, safe).
