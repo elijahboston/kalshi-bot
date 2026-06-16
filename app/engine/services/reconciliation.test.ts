@@ -1919,14 +1919,18 @@ describe("checkGroundTruthHealth — N11 mismatch telemetry", () => {
     return captured;
   }
 
-  // Today is 2026-06-05 per the harness; keep target dates inside the 14d
-  // window. Each seeded (station, target_date) gets a DISTINCT date so the
-  // (station, date) join is 1:1 — mirroring production, where exactly one
-  // bracket market per station per day resolves YES.
+  // Anchor target dates relative to TODAY so they always land inside the
+  // production 14d window (`targetDate >= now-14d`); hardcoded calendar dates
+  // silently age out of the window and break n=2 expectations. Each seeded
+  // (station, target_date) gets a DISTINCT day so the (station, date) join is
+  // 1:1 — mirroring production, where exactly one bracket market per station
+  // per day resolves YES.
+  const daysAgo = (n: number) =>
+    new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10);
 
   test("all actuals inside bracket → 100%", async () => {
-    seedHealthRow({ id: "a", stationId: "KNYC", targetDate: "2026-06-01", bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
-    seedHealthRow({ id: "b", stationId: "KNYC", targetDate: "2026-06-02", bracketLow: 80, bracketHigh: 81, actualValue: 80.1 });
+    seedHealthRow({ id: "a", stationId: "KNYC", targetDate: daysAgo(1), bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
+    seedHealthRow({ id: "b", stationId: "KNYC", targetDate: daysAgo(2), bracketLow: 80, bracketHigh: 81, actualValue: 80.1 });
 
     const svc = new ReconciliationService({} as never);
     const msg = await runAndCaptureHealth(svc);
@@ -1936,9 +1940,9 @@ describe("checkGroundTruthHealth — N11 mismatch telemetry", () => {
   });
 
   test("half inside, half outside → 50%", async () => {
-    seedHealthRow({ id: "in", stationId: "KORD", targetDate: "2026-06-01", bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
+    seedHealthRow({ id: "in", stationId: "KORD", targetDate: daysAgo(1), bracketLow: 72, bracketHigh: 73, actualValue: 72.5 });
     // 71.0 is below the [72,73) bracket → outside (the corrupted-actual case).
-    seedHealthRow({ id: "out", stationId: "KORD", targetDate: "2026-06-02", bracketLow: 72, bracketHigh: 73, actualValue: 71.0 });
+    seedHealthRow({ id: "out", stationId: "KORD", targetDate: daysAgo(2), bracketLow: 72, bracketHigh: 73, actualValue: 71.0 });
 
     const svc = new ReconciliationService({} as never);
     const msg = await runAndCaptureHealth(svc);
@@ -1947,7 +1951,7 @@ describe("checkGroundTruthHealth — N11 mismatch telemetry", () => {
   });
 
   test("upper bound is exclusive: actual == bracketHigh counts as outside", async () => {
-    seedHealthRow({ id: "edge", stationId: "KNYC", targetDate: "2026-06-03", bracketLow: 72, bracketHigh: 73, actualValue: 73.0 });
+    seedHealthRow({ id: "edge", stationId: "KNYC", targetDate: daysAgo(3), bracketLow: 72, bracketHigh: 73, actualValue: 73.0 });
     const svc = new ReconciliationService({} as never);
     const msg = await runAndCaptureHealth(svc);
     expect(msg).toContain("0.0% inside YES bracket");
