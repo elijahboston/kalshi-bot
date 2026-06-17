@@ -140,6 +140,8 @@ Once launchd is confirmed, delete any in-session cron duplicate (`CronList` → 
 
 Record outcomes here as items close (newest first):
 
+- **2026-06-17 — follow-ups sweep (nothing due; guardrail safety checks only):** No item formally due — weeklies #1/#2/#9 ran 06-15 → next 06-22; the dated batch (#4/#5/#6/#7/#8/#11/#13) is all **2026-06-19**; #3/#12 closed. Ran the guardrail health checks regardless, **all green:** 153 regime orders all `dry_run=1` (paper); #1 CLI actuals `cli|36` last 2d; #2 confirmation exit churn = 0; ground-truth health **96.7–96.8%** (n=184–190, only disabled KORD at 81% below 100%, above the 90% line). **`wins summary`: 85.6% (n=104), pnl +$29.96** — up from 84.8% (n=92, +$1.95) on 06-16; 12 new net-positive settlements. Confirmation 89.6% (n=96, +$29.13); **active KAUS+KMIA 90.4% (66/73)** (KAUS 91.1% +$34.46, KMIA 89.3% +$31.26); KDEN [disabled] still the drag at 74.2% (−$35.76) but aging out. **No config changes** (nothing due, all metrics improving → ambiguity guardrail, knobs untouched). All eyes on the **#4 80% verdict 2026-06-19** (and the carried sizing/event-cap question from #11).
+
 - **2026-06-16 — performance review (10:00; complements the 08:53 follow-ups sweep below):** No new settlements since the morning sweep — `wins summary` unchanged at **84.8% (n=92), pnl +$1.95**. Re-ran the perf-review ⚠ threshold checks; three literal flags, all KDEN-contaminated, already characterized in the morning entry, none newly actionable:
   - ⚠ **Overall 84.8% < 85% threshold** — dragged by now-disabled KDEN (74.2%, n=31, −$35.76); active KAUS+KMIA portfolio is **90.2% (55/61)**. Expected to recover as KDEN entries age out of the window.
   - ⚠ **21Z 64.7% (−$48.94)** — 10/17 are KDEN entries; watch at #5 (2026-06-19).
