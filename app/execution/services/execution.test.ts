@@ -31,6 +31,7 @@ const mockBotConfig = {
   confidenceSizeFloorConfidence: 0.80,
   maxExposurePctOfBalance: 0,
   maxEventExposurePctOfBalance: 0,
+  adjacentBracketGuardEnabled: false, // tests opt-in per describe block
 };
 
 mock.module("@kcb/config", () => ({
@@ -71,6 +72,7 @@ beforeEach(async () => {
   mockBotConfig.confidenceSizeFloorConfidence = 0.80;
   mockBotConfig.maxExposurePctOfBalance = 0;
   mockBotConfig.maxEventExposurePctOfBalance = 0;
+  mockBotConfig.adjacentBracketGuardEnabled = false;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -1766,5 +1768,206 @@ describe("executeSignal recent-loss guard pathway split", () => {
 
     expect(orderId).toBeNull();
     expect(skipReason).toStartWith("recent-loss elevated edge");
+  });
+});
+
+// ── Adjacent-bracket mutual exclusivity guard (2026-06-18) ─────
+// Blocks a confirmation entry when an open position already exists on a
+// neighbouring bracket of the same event. Prevents the correlated two-leg
+// stacking that caused KMIA Jun-15 / KDEN Jun-12 combined losses.
+
+function seedMarketWithBracket(
+  ticker: string,
+  eventTicker: string,
+  bracketLow: number,
+  bracketHigh: number | null,
+  book: { yesBid?: number; yesAsk?: number; lastYesPrice?: number } = {}
+) {
+  const ts = new Date().toISOString();
+  getDb().insert(markets).values({
+    ticker,
+    eventTicker,
+    seriesTicker: "KXHIGH",
+    title: "test market",
+    category: "high_temp",
+    stationId: "KNYC",
+    targetDate: "2026-03-04",
+    bracketLow,
+    bracketHigh,
+    marketType: bracketHigh == null ? "upper_tail" : "bracket",
+    status: "open",
+    lastYesPrice: book.lastYesPrice ?? 80,
+    lastNoPrice: book.lastYesPrice != null ? 100 - book.lastYesPrice : 20,
+    yesBid: book.yesBid ?? null,
+    yesAsk: book.yesAsk ?? null,
+    discoveredAt: ts,
+    updatedAt: ts,
+  }).onConflictDoNothing().run();
+}
+
+describe("executeSignal adjacent-bracket guard", () => {
+  const EVENT = "KXHIGH-26MAR04";
+
+  test("blocks confirm when lower adjacent bracket is held", async () => {
+    // Event: B92.5-94.5 (the bracket) and T94.5 (upper tail).
+    // Bot holds the bracket; now tries confirm_no on the tail → blocked.
+    const bracketTicker = `${EVENT}-B93.5`;
+    const tailTicker    = `${EVENT}-T94`;
+    seedMarketWithBracket(bracketTicker, EVENT, 92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(tailTicker,    EVENT, 94.5, null, { yesBid: 16, yesAsk: 20 });
+    seedPosition(bracketTicker, 400); // open position on the bracket
+
+    mockBotConfig.adjacentBracketGuardEnabled = true;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: tailTicker,
+        recommendation: "confirm_no",
+        side: "no",
+        marketPrice: 0.18,
+        estimatedProb: 0.23,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe(`adjacent-bracket hold (${bracketTicker})`);
+  });
+
+  test("blocks confirm when upper adjacent bracket is held", async () => {
+    // Bot holds the tail; now tries confirm_yes on the bracket just below → blocked.
+    const bracketTicker = `${EVENT}-B93.5`;
+    const tailTicker    = `${EVENT}-T94`;
+    seedMarketWithBracket(bracketTicker, EVENT, 92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(tailTicker,    EVENT, 94.5, null, { yesBid: 16, yesAsk: 20 });
+    seedPosition(tailTicker, 400); // open position on the tail
+
+    mockBotConfig.adjacentBracketGuardEnabled = true;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: bracketTicker,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.80,
+        estimatedProb: 0.55,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(orderId).toBeNull();
+    expect(skipReason).toBe(`adjacent-bracket hold (${tailTicker})`);
+  });
+
+  test("allows confirm when held position is not adjacent (different event)", async () => {
+    const sigTicker  = `${EVENT}-B93.5`;
+    const otherEvent = "KXHIGH-26MAR05";
+    const otherTicker = `${otherEvent}-B93.5`;
+    seedMarketWithBracket(sigTicker,   EVENT,      92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(otherTicker, otherEvent, 92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedPosition(otherTicker, 400); // different event — not adjacent
+
+    mockBotConfig.adjacentBracketGuardEnabled = true;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: sigTicker,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.80,
+        estimatedProb: 0.55,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+  });
+
+  test("allows confirm when held position is non-adjacent in same event", async () => {
+    // B91.5 (bracketLow=90.5, bracketHigh=92.5) and T94 (bracketLow=94.5) are
+    // not adjacent — B93.5 sits between them.
+    const lowerBracket = `${EVENT}-B91.5`;
+    const tailTicker   = `${EVENT}-T94`;
+    seedMarketWithBracket(lowerBracket, EVENT, 90.5, 92.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(tailTicker,   EVENT, 94.5, null, { yesBid: 16, yesAsk: 20 });
+    seedPosition(lowerBracket, 400);
+
+    mockBotConfig.adjacentBracketGuardEnabled = true;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: tailTicker,
+        recommendation: "confirm_no",
+        side: "no",
+        marketPrice: 0.18,
+        estimatedProb: 0.23,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).toBeNull();
+    expect(orderId).toBeString();
+  });
+
+  test("non-confirmation (contrarian) is not blocked by adjacent position", async () => {
+    // The guard only fires for confirm_* — contrarian entries aren't stacked the same way.
+    const bracketTicker = `${EVENT}-B93.5`;
+    const tailTicker    = `${EVENT}-T94`;
+    seedMarketWithBracket(bracketTicker, EVENT, 92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(tailTicker,    EVENT, 94.5, null, { yesBid: 16, yesAsk: 20 });
+    seedPosition(bracketTicker, 400);
+
+    mockBotConfig.adjacentBracketGuardEnabled = true;
+
+    const service = new ExecutionService(stubKalshi);
+    const { orderId, skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: tailTicker,
+        recommendation: "buy_no",
+        side: "no",
+        marketPrice: 0.18,
+        estimatedProb: 0.05,
+        edge: 0.13,
+        edgeThreshold: 0.05,
+      }),
+      10000
+    );
+
+    // Guard does not fire — skip reason is from some other check or it places
+    expect(skipReason).not.toStartWith("adjacent-bracket hold");
+  });
+
+  test("guard disabled — adjacent confirm goes through", async () => {
+    const bracketTicker = `${EVENT}-B93.5`;
+    const tailTicker    = `${EVENT}-T94`;
+    seedMarketWithBracket(bracketTicker, EVENT, 92.5, 94.5, { yesBid: 78, yesAsk: 82 });
+    seedMarketWithBracket(tailTicker,    EVENT, 94.5, null, { yesBid: 16, yesAsk: 20 });
+    seedPosition(bracketTicker, 400);
+
+    mockBotConfig.adjacentBracketGuardEnabled = false; // disabled
+
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: tailTicker,
+        recommendation: "confirm_no",
+        side: "no",
+        marketPrice: 0.18,
+        estimatedProb: 0.23,
+        edge: 0,
+      }),
+      10000
+    );
+
+    expect(skipReason).not.toStartWith("adjacent-bracket hold");
   });
 });

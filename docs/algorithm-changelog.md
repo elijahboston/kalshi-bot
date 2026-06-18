@@ -1,7 +1,7 @@
 # Algorithm Changelog
 
 **Type:** Chronological decision log
-**Last updated:** 2026-06-12
+**Last updated:** 2026-06-18
 
 Chronological record of changes to the climate bot's decision-making — the **estimator** (probability), **sizing** (Kelly / flat / tier), **execution gates** (guards on order placement), and the **calibration feedback loop**. Newest first.
 
@@ -10,6 +10,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 **Areas:** `estimator` · `sizing` · `execution` · `calibration` · `discovery`
 
 ---
+
+## 2026-06-18
+
+### `execution` — Adjacent-bracket mutual exclusivity guard (`adjacent_bracket_guard_enabled=true`)
+- **Change:** New guard in `executeSignal`: for `confirm_yes`/`confirm_no` entries, skip if any open position already exists on an adjacent bracket of the same event. "Adjacent" means one market's `bracketHigh` equals the other's `bracketLow` — immediate neighbours on the temperature ladder. Toggled via `adjacent_bracket_guard_enabled` (runtime knob, ships enabled). Non-confirm entries are unaffected.
+- **Why:** Post-mortem of two incidents where the confirm pathway entered both a bracket and its adjacent tail bracket simultaneously (KMIA Jun-15 combined −$56, KDEN Jun-12 combined −$44). Adjacent brackets are anti-correlated: if the actual temperature lands in the higher bracket, both legs lose. The per-event exposure cap (0.15×) allowed both because each leg individually fit within it. This guard breaks the stacking at the source — whichever confirm fires first acts as an anchor that blocks the adjacent entry.
+- **Doc:** [`improvements/correlated-bracket-stacking-2026-06-17.md`](improvements/correlated-bracket-stacking-2026-06-17.md)
 
 ## 2026-06-11
 

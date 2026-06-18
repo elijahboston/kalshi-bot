@@ -1,5 +1,5 @@
 import { getConfig } from "@kcb/config";
-import { getDb, orders, signals as signalsTable, positions, markets, eq, and, sql } from "@kcb/db";
+import { getDb, orders, signals as signalsTable, positions, markets, eq, and, or, sql } from "@kcb/db";
 import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
@@ -510,6 +510,53 @@ export class ExecutionService {
             `(${eventExposure}¢ held of ${eventCap}¢ across ${eventTicker})`
           );
           contracts = fitted;
+        }
+      }
+    }
+
+    // Adjacent-bracket mutual exclusivity (2026-06-18): for confirmation entries,
+    // block if any open position exists on a neighbouring bracket of the same
+    // event. "Adjacent" means one market's bracketHigh equals the other's
+    // bracketLow — they are immediate neighbours on the temperature ladder.
+    // Adjacent brackets are anti-correlated: if the actual lands in the higher
+    // bracket, both legs lose simultaneously (KMIA Jun-15 / KDEN Jun-12).
+    if (isConfirmation && config.bot.adjacentBracketGuardEnabled) {
+      const [sigMkt] = await db
+        .select({
+          eventTicker: markets.eventTicker,
+          bracketLow: markets.bracketLow,
+          bracketHigh: markets.bracketHigh,
+        })
+        .from(markets)
+        .where(eq(markets.ticker, signal.ticker))
+        .limit(1);
+
+      if (sigMkt?.eventTicker && sigMkt.bracketLow != null) {
+        const sigBL = sigMkt.bracketLow;
+        const sigBH = sigMkt.bracketHigh; // null for upper_tail
+
+        // Build adjacency conditions:
+        //   (a) existing.bracketHigh = sigBL  →  existing bracket is just below signal
+        //   (b) existing.bracketLow = sigBH   →  existing bracket is just above signal
+        //       (only when sigBH is non-null — upper_tails have no higher neighbour)
+        const adjacencyConditions = sigBH != null
+          ? or(
+              sql`${markets.bracketHigh} = ${sigBL}`,
+              sql`${markets.bracketLow}  = ${sigBH}`
+            )
+          : sql`${markets.bracketHigh} = ${sigBL}`;
+
+        const [adjacentPos] = await db
+          .select({ ticker: positions.ticker })
+          .from(positions)
+          .innerJoin(markets, eq(positions.ticker, markets.ticker))
+          .where(and(eq(markets.eventTicker, sigMkt.eventTicker), adjacencyConditions))
+          .limit(1);
+
+        if (adjacentPos) {
+          const reason = `adjacent-bracket hold (${adjacentPos.ticker})`;
+          log.info(`Skipping ${signal.ticker}: ${reason}`);
+          return skip(reason);
         }
       }
     }
