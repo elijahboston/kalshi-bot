@@ -90,8 +90,40 @@ GUARDRAILS: never set dry_run=false; never delete data; never add market categor
 Append a new entry to docs/follow-ups.md Log section (newest first), recording: date, items checked, findings, actions taken or deferred, current 'wins summary' line. Then run bun test — commit and push only if tests are green. Only create a commit if you made actual changes (config sets or doc updates). Do NOT commit docs/${TODAY}-log.md — the bash wrapper handles that.
 
 ## Step 7 — Summary line
-End your response with exactly one line:
-  PERF-REVIEW: <win_rate>% (n=<n>) pnl=<pnl> | actions: <list or 'none'>" \
+End your response (stdout) with exactly one line:
+  PERF-REVIEW: <win_rate>% (n=<n>) pnl=<pnl> | actions: <list or 'none'>
+
+## Step 8 — Obsidian daily note
+Write a concise daily summary to the Obsidian vault. The vault is at /Users/elijah/notes/brain/.
+Target path: /Users/elijah/notes/brain/Projects/ClimateBot/Daily Logs/<TODAY>-daily-log.md
+(replace <TODAY> with today's YYYY-MM-DD date)
+
+Check whether that file already exists (use the Read tool or Bash ls):
+- If it does NOT exist: use the Write tool to create it with this structure:
+---
+title: \"ClimateBot Daily Log — <TODAY>\"
+date: <TODAY>
+tags: [climatebot, kalshi, trading, daily-log, complete]
+source: automated-sweep
+---
+
+# ClimateBot Daily Log — <TODAY>
+
+## Morning Sweep
+
+<compact 3–6 bullet summary: win rate, pnl, n, key flags or soft flags, actions taken or none>
+
+## Guardrails
+
+<green/amber/red status for each weekly check>
+
+## Next
+
+<upcoming due items with dates>
+
+- If it ALREADY EXISTS: use the Edit tool to append a '## Morning Sweep' section at the end of the file, with the same compact content. Do NOT overwrite the file or remove existing content.
+
+Use the Write or Edit tools to write the file — do NOT print the note content to stdout. After writing, output a single confirmation line: 'Obsidian note written: <path>'." \
   > "$TMPOUT" 2>&1
 CLAUDE_EXIT=$?
 set -e
