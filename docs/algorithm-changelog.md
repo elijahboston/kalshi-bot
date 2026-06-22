@@ -1,7 +1,7 @@
 # Algorithm Changelog
 
 **Type:** Chronological decision log
-**Last updated:** 2026-06-18
+**Last updated:** 2026-06-22
 
 Chronological record of changes to the climate bot's decision-making — the **estimator** (probability), **sizing** (Kelly / flat / tier), **execution gates** (guards on order placement), and the **calibration feedback loop**. Newest first.
 
@@ -10,6 +10,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 **Areas:** `estimator` · `sizing` · `execution` · `calibration` · `discovery`
 
 ---
+
+## 2026-06-22
+
+### `execution` — Position side-flip creates naked shorts (2026-06-21 post-mortem)
+- **Change (reconciliation):** `updatePositions()` now resets `pos.side` when a position transitions through zero and reopens on the opposite leg. Previously `pos.side` was set from the first trade and never updated — a NO→flat→YES reversal left the position row showing `side='no'`, so `executeExit` generated `sell NO` against the YES holding, creating a naked short.
+- **Change (execution):** `executeExit` netHeld query is now side-aware. Only buys/sells matching the current position's side count toward net-held. Wrong-sided phantom sells can no longer drive netHeld to 0 and cause the real exit to be skipped.
+- **Why:** On 2026-06-21, KXHIGHAUS-26JUN21-B94.5 produced a ~$100 loss from a sequence: buy NO 42 → scout exits NO @ 49¢ → confirm_yes enters YES 19 → scout generates `sell NO 19` (wrong side, phantom short) → repeat for YES 31 → final buy NO 33. Each `sell NO` against a YES holding settled at $0 (NO won), costing the full face value. The adjacent-bracket guard (2026-06-18) addresses the stacking problem; this fix addresses the exit-logic bug that amplified it.
 
 ## 2026-06-18
 
