@@ -1227,6 +1227,109 @@ describe("updatePositions — tags positions by dry_run from orders", () => {
     expect(pos.costBasis).toBe(200);
     expect(pos.avgEntryPrice).toBe(40);
   });
+
+  // ── side tracking across position reversals (2026-06-22 fix) ──────────────
+  // Regression: pos.side was set from the first trade and never updated. When a
+  // position closed and reopened on the opposite side (e.g. NO 42 → flat → YES 19),
+  // the position row still showed side='no'. executeExit then generated a
+  // sell NO order against the YES holding, creating a naked short that cost ~$100
+  // on 2026-06-21 (KXHIGHAUS-26JUN21-B94.5).
+
+  function seedTradeSided(
+    orderId: string,
+    ticker: string,
+    side: "yes" | "no",
+    action: "buy" | "sell",
+    qty: number,
+    price: number,
+    filledAt: string,
+    dryRun = true
+  ) {
+    const db = getDb();
+    db.insert(ordersTable).values({
+      orderId,
+      ticker,
+      action,
+      side,
+      limitPrice: price,
+      quantity: qty,
+      filledQuantity: qty,
+      status: "filled",
+      signalId: `sig-${orderId}`,
+      dryRun,
+      createdAt: filledAt,
+      updatedAt: filledAt,
+    }).run();
+    db.insert(tradesTable).values({
+      id: `trd-${orderId}`,
+      orderId,
+      ticker,
+      side,
+      price,
+      quantity: qty,
+      action,
+      filledAt,
+    }).run();
+  }
+
+  test("position side updates from NO to YES after full close and YES re-entry", async () => {
+    seedActiveMarket("KX-FLIP");
+    // Original NO position — opened and fully closed
+    seedTradeSided("buy-no", "KX-FLIP", "no", "buy", 42, 88, "2026-06-21T18:00:00Z");
+    seedTradeSided("sell-no", "KX-FLIP", "no", "sell", 42, 49, "2026-06-21T21:00:00Z");
+    // Re-entry on the opposite side
+    seedTradeSided("buy-yes", "KX-FLIP", "yes", "buy", 19, 85, "2026-06-21T21:30:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).where(eq(positionsTable.ticker, "KX-FLIP")).all();
+    expect(pos).toBeDefined();
+    expect(pos.side).toBe("yes"); // was 'no' before the fix
+    expect(pos.quantity).toBe(19);
+    expect(pos.costBasis).toBeCloseTo(19 * 85);
+    expect(pos.avgEntryPrice).toBeCloseTo(85);
+  });
+
+  test("position side updates from YES to NO after full close and NO re-entry", async () => {
+    seedActiveMarket("KX-FLIP2");
+    seedTradeSided("buy-yes", "KX-FLIP2", "yes", "buy", 30, 75, "2026-06-21T18:00:00Z");
+    seedTradeSided("sell-yes", "KX-FLIP2", "yes", "sell", 30, 40, "2026-06-21T21:00:00Z");
+    seedTradeSided("buy-no", "KX-FLIP2", "no", "buy", 25, 82, "2026-06-21T21:30:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).where(eq(positionsTable.ticker, "KX-FLIP2")).all();
+    expect(pos).toBeDefined();
+    expect(pos.side).toBe("no");
+    expect(pos.quantity).toBe(25);
+    expect(pos.costBasis).toBeCloseTo(25 * 82);
+  });
+
+  test("position side stays correct across multiple reversals", async () => {
+    // Simulates the full Jun 21 B94.5 sequence:
+    // buy NO 42 → sell NO 42 → buy YES 19 → sell NO 19 (phantom, wrong-sided)
+    // → buy YES 31 → sell NO 31 (phantom) → buy NO 33
+    // Final state should be side='no', qty=33
+    seedActiveMarket("KX-MULTI");
+    seedTradeSided("t1", "KX-MULTI", "no",  "buy",  42, 88, "2026-06-21T18:00:00Z");
+    seedTradeSided("t2", "KX-MULTI", "no",  "sell", 42, 49, "2026-06-21T21:00:00Z");
+    seedTradeSided("t3", "KX-MULTI", "yes", "buy",  19, 85, "2026-06-21T21:30:00Z");
+    // Wrong-sided phantom sells — should not affect the YES holding count
+    seedTradeSided("t4", "KX-MULTI", "no",  "sell", 19, 18, "2026-06-21T21:37:00Z");
+    seedTradeSided("t5", "KX-MULTI", "yes", "buy",  31, 80, "2026-06-21T22:00:00Z");
+    seedTradeSided("t6", "KX-MULTI", "no",  "sell", 31,  3, "2026-06-21T22:13:00Z");
+    seedTradeSided("t7", "KX-MULTI", "no",  "buy",  33, 86, "2026-06-21T22:30:00Z");
+
+    const svc = new ReconciliationService({} as never);
+    await (svc as any).updatePositions();
+
+    const [pos] = getDb().select().from(positionsTable).where(eq(positionsTable.ticker, "KX-MULTI")).all();
+    expect(pos).toBeDefined();
+    expect(pos.side).toBe("no");
+    expect(pos.quantity).toBe(33);
+  });
 });
 
 // ── fetchNwsActualValue uses per-observation temperature field ─

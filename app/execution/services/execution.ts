@@ -723,12 +723,18 @@ export class ExecutionService {
     // combination double-sold every exited confirmation position into a
     // phantom short (buy 6 → sell 6 → sell 6 again). Sell at most what the
     // ledger says we actually hold.
+    //
+    // Side-filtered: only count buys/sells on the same side as the current
+    // position. A wrong-sided sell (e.g. sell NO against a YES holding — the
+    // 2026-06-21 naked-short bug) must not reduce the YES net-held count to 0
+    // and trigger a false "nothing to sell" skip.
     const [netRow] = await db
       .select({
         netHeld: sql<number>`COALESCE(SUM(
           CASE
-            WHEN ${orders.action} = 'buy' THEN ${orders.filledQuantity}
-            ELSE -${orders.filledQuantity}
+            WHEN ${orders.action} = 'buy'  AND ${orders.side} = ${side} THEN  ${orders.filledQuantity}
+            WHEN ${orders.action} = 'sell' AND ${orders.side} = ${side} THEN -${orders.filledQuantity}
+            ELSE 0
           END
         ), 0)`,
       })

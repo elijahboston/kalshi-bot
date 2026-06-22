@@ -278,6 +278,106 @@ describe("ExecutionService.executeExit", () => {
     expect(sells[0]!.filledQuantity).toBe(6);
   });
 
+  test("wrong-sided sell does not reduce netHeld for the opposite side (2026-06-22 fix)", async () => {
+    // Regression: before the fix, the netHeld query summed ALL sells regardless
+    // of side. A phantom 'sell NO' against a YES position reduced netHeld to 0,
+    // causing the real YES exit to be skipped — leaving the YES holding unexited
+    // and still exposed at settlement.
+    const service = new ExecutionService(stubKalshi);
+    const db = getDb();
+    const ticker = "KXTEMP-26JUN21-B94.5";
+
+    // Seed: buy NO 42, sell NO 42 (full exit), buy YES 19 (re-entry)
+    const ts = (offset: number) => new Date(Date.now() - offset).toISOString();
+    db.insert(orders).values({
+      orderId: "buy-no-42",
+      ticker,
+      action: "buy",
+      side: "no",
+      limitPrice: 88,
+      quantity: 42,
+      filledQuantity: 42,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: ts(3000),
+      updatedAt: ts(3000),
+    }).run();
+    db.insert(orders).values({
+      orderId: "sell-no-42",
+      ticker,
+      action: "sell",
+      side: "no",
+      limitPrice: 49,
+      quantity: 42,
+      filledQuantity: 42,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: ts(2000),
+      updatedAt: ts(2000),
+    }).run();
+    db.insert(orders).values({
+      orderId: "buy-yes-19",
+      ticker,
+      action: "buy",
+      side: "yes",
+      limitPrice: 85,
+      quantity: 19,
+      filledQuantity: 19,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: ts(1000),
+      updatedAt: ts(1000),
+    }).run();
+
+    // Position row correctly shows YES 19 (post-fix reconciliation)
+    const position = {
+      ticker,
+      side: "yes",
+      quantity: 19,
+      avgEntryPrice: 85,
+      costBasis: 19 * 85,
+      marketValue: 19 * 85,
+      unrealizedPnl: 0,
+      openedAt: ts(1000),
+      updatedAt: ts(1000),
+    };
+
+    // Should successfully exit the YES 19 position.
+    // Before the fix, netHeld = 42 - 42 + 19 - 0 = 19 (same) — but if there
+    // were also a phantom sell NO 19, netHeld (side-blind) = 42-42+19-19 = 0
+    // and the exit would be skipped. Simulate that by adding the phantom sell:
+    db.insert(orders).values({
+      orderId: "phantom-sell-no-19",
+      ticker,
+      action: "sell",
+      side: "no",
+      limitPrice: 18,
+      quantity: 19,
+      filledQuantity: 19,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: ts(500),
+      updatedAt: ts(500),
+    }).run();
+
+    // Side-blind netHeld = 42-42+19-19-19 = -19 → would skip. Side-aware = 19.
+    const orderId = await service.executeExit(position as any, "edge reversal", 70);
+    expect(orderId).toBeString(); // should NOT be null
+    expect(orderId).toStartWith("dry-exit-");
+
+    const rows = db.select().from(orders).where(eq(orders.orderId, orderId!)).all();
+    expect(rows[0].side).toBe("yes"); // exit is on the correct side
+    expect(rows[0].filledQuantity).toBe(19);
+  });
+
   test("over-sell guard: sell quantity clamps to net held when position row overstates", async () => {
     const service = new ExecutionService(stubKalshi);
     const position = {

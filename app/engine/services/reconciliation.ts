@@ -443,6 +443,13 @@ export class ReconciliationService {
       }
 
       if (t.action === "buy") {
+        // If the position was flat (fully closed), this is a new open that may be
+        // on the opposite side (e.g. NO closed → YES re-entry). Update side so
+        // executeExit sells the correct leg instead of creating a naked short.
+        if (pos.totalQty === 0) {
+          pos.side = t.side;
+          pos.firstAt = t.filledAt;
+        }
         pos.totalQty += t.quantity;
         pos.totalCost += t.quantity * t.price;
       } else {
