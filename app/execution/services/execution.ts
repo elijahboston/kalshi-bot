@@ -231,6 +231,33 @@ export class ExecutionService {
         return skip(reason);
       }
     }
+    // Same-day ticker guard: block any buy on a ticker that already had a buy
+    // today, regardless of whether the position is still open. Prevents chasing
+    // oscillating markets where the bot scouts out then re-enters on the
+    // opposite side (Jun-22 B93.5: NO exit then YES re-entry 36 min later).
+    // Applies to ALL entries including confirmation (which bypass the cooldown).
+    if (config.bot.sameDayTickerEntryOnce) {
+      const [todayBuy] = await db
+        .select({ orderId: orders.orderId })
+        .from(orders)
+        .where(
+          and(
+            eq(orders.ticker, signal.ticker),
+            eq(orders.action, "buy"),
+            eq(orders.dryRun, config.bot.dryRun),
+            sql`date(${orders.createdAt}) = date('now')`,
+            sql`${orders.status} IN ('open', 'partial', 'filled')`
+          )
+        )
+        .limit(1);
+
+      if (todayBuy) {
+        const reason = `same-day re-entry blocked (already entered ${signal.ticker} today)`;
+        log.info(`Skipping ${signal.ticker}: ${reason}`);
+        return skip(reason);
+      }
+    }
+
     const openPositions = await db.select().from(positions);
 
     if (openPositions.length >= config.bot.maxOpenPositions) {

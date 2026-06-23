@@ -9,6 +9,8 @@ export interface ExitEvaluationInput {
   closeTime: string | null;
   /** Current wall-clock epoch millis — injected for testability */
   now: number;
+  /** When the position was opened (ISO string). Used by the minimum hold guard. */
+  entryTime: string | null;
   /**
    * How the position was entered. Confirmation positions ("the market is
    * right, follow it") carry model edge ≤ 0 BY DESIGN, so the edge-reversal
@@ -47,6 +49,12 @@ export interface ExitEvaluationInput {
      * below this, in probability units (0-1). Absent/0 disables. Default 0.60.
      */
     confirmationExitConvictionFloor?: number;
+    /**
+     * Minimum seconds after position open before discretionary exits (edge
+     * reversal, conviction floor, time decay) fire. Stop-loss is always
+     * immediate. 0 = disabled. Default 1200 (20 min).
+     */
+    exitMinHoldSeconds?: number;
   };
 }
 
@@ -78,16 +86,28 @@ export interface ExitEvaluationInput {
 export function evaluateExit(input: ExitEvaluationInput): string | null {
   const { edge, position, currentSidePrice, closeTime, now, config } = input;
 
+  // Minimum hold guard: suppress discretionary exits (conviction floor, edge
+  // reversal, time decay) within the first exitMinHoldSeconds after entry.
+  // Stop-loss is intentionally exempt — a catastrophic drawdown should stop
+  // regardless of hold time. 0 = disabled.
+  const minHoldSeconds = config.exitMinHoldSeconds ?? 0;
+  const withinMinHold =
+    minHoldSeconds > 0 && input.entryTime != null
+      ? now - new Date(input.entryTime).getTime() < minHoldSeconds * 1000
+      : false;
+
   // Confirmation positions: model-edge-based exits never apply (their edge is
   // ≤ 0 by construction). Hold to settlement unless (a) stop-loss, or (b) the
   // market's own conviction — the thesis — collapses below the floor.
   if (input.entryKind === "confirmation") {
-    const convictionFloor = config.confirmationExitConvictionFloor ?? 0;
-    if (convictionFloor > 0 && currentSidePrice < convictionFloor * 100) {
-      return (
-        `confirmation conviction collapsed ` +
-        `(${currentSidePrice}¢ < ${(convictionFloor * 100).toFixed(0)}¢ floor)`
-      );
+    if (!withinMinHold) {
+      const convictionFloor = config.confirmationExitConvictionFloor ?? 0;
+      if (convictionFloor > 0 && currentSidePrice < convictionFloor * 100) {
+        return (
+          `confirmation conviction collapsed ` +
+          `(${currentSidePrice}¢ < ${(convictionFloor * 100).toFixed(0)}¢ floor)`
+        );
+      }
     }
     if (position.costBasis > 0) {
       const liveUnrealized = position.quantity * currentSidePrice - position.costBasis;
@@ -116,7 +136,7 @@ export function evaluateExit(input: ExitEvaluationInput): string | null {
       liveUnrealized > 0; // position is in profit
   }
 
-  if (!holdWinner && edge < config.exitEdgeThreshold) {
+  if (!holdWinner && !withinMinHold && edge < config.exitEdgeThreshold) {
     return `edge reversal (${(edge * 100).toFixed(1)}¢ < ${(config.exitEdgeThreshold * 100).toFixed(1)}¢ threshold)`;
   }
 
@@ -128,7 +148,7 @@ export function evaluateExit(input: ExitEvaluationInput): string | null {
     }
   }
 
-  if (!holdWinner && closeTime) {
+  if (!holdWinner && !withinMinHold && closeTime) {
     const daysUntilClose = (new Date(closeTime).getTime() - now) / (1000 * 60 * 60 * 24);
     if (daysUntilClose <= config.exitTimeDaysBeforeClose && edge < config.exitTimeMinEdge) {
       return `time decay (${(daysUntilClose * 24).toFixed(1)}h to close, edge ${(edge * 100).toFixed(1)}¢ < ${(config.exitTimeMinEdge * 100).toFixed(0)}¢)`;

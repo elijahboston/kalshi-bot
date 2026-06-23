@@ -721,6 +721,7 @@ export async function initOrchestrator(): Promise<void> {
           closeTime: market.closeTime,
           now: Date.now(),
           entryKind,
+          entryTime: position.openedAt,
           config: {
             exitEdgeThreshold: config.bot.exitEdgeThreshold,
             stopLossPct: config.bot.stopLossPct,
@@ -734,6 +735,8 @@ export async function initOrchestrator(): Promise<void> {
             // Confirmation bail-out: exit only when the market's own conviction
             // collapses (2026-06-06 churn fix).
             confirmationExitConvictionFloor: config.bot.confirmationExitConvictionFloor,
+            // Minimum hold before discretionary exits fire (Jun-22 B93.5 fix).
+            exitMinHoldSeconds: config.bot.exitMinHoldSeconds,
           },
         });
 

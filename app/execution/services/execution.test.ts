@@ -33,6 +33,7 @@ const mockBotConfig = {
   maxEventExposurePctOfBalance: 0,
   adjacentBracketGuardEnabled: false, // tests opt-in per describe block
   maxDailyLossPct: 0,               // tests opt-in per describe block
+  sameDayTickerEntryOnce: false,    // tests opt-in per describe block
 };
 
 mock.module("@kcb/config", () => ({
@@ -75,6 +76,7 @@ beforeEach(async () => {
   mockBotConfig.maxEventExposurePctOfBalance = 0;
   mockBotConfig.adjacentBracketGuardEnabled = false;
   mockBotConfig.maxDailyLossPct = 0;
+  mockBotConfig.sameDayTickerEntryOnce = false;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -2222,5 +2224,138 @@ describe("executeSignal adjacent-bracket guard", () => {
     );
 
     expect(skipReason).not.toStartWith("adjacent-bracket hold");
+  });
+});
+
+// ── same-day ticker entry guard ───────────────────────────────────────────────
+
+describe("executeSignal same-day ticker entry guard", () => {
+  const TICKER = "KXHIGHAUS-26JUN22-B93.5";
+  const TODAY = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  beforeEach(() => {
+    mockBotConfig.sameDayTickerEntryOnce = true;
+    mockBotConfig.confirmationBetSizeCents = 500;
+    mockBotConfig.confirmationMaxEntryPrice = 0.93;
+    seedMarketWithBracket(TICKER, "KXHIGHAUS-26JUN22", 92.5, 94.5, { yesBid: 80, yesAsk: 84 });
+  });
+
+  test("blocks re-entry when a filled buy exists today", async () => {
+    // Simulate an earlier NO entry that has since been exited (netHeld = 0)
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "prior-no-buy",
+      ticker: TICKER,
+      action: "buy",
+      side: "no",
+      limitPrice: 82,
+      quantity: 31,
+      filledQuantity: 31,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: `${TODAY}T19:03:20.000Z`,
+      updatedAt: `${TODAY}T19:03:20.000Z`,
+    }).run();
+    db.insert(orders).values({
+      orderId: "prior-no-sell",
+      ticker: TICKER,
+      action: "sell",
+      side: "no",
+      limitPrice: 49,
+      quantity: 31,
+      filledQuantity: 31,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: `${TODAY}T21:25:47.000Z`,
+      updatedAt: `${TODAY}T21:25:47.000Z`,
+    }).run();
+
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: TICKER,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.84,
+        estimatedProb: 0.58,
+        edge: 0,
+      }),
+      50000
+    );
+
+    expect(skipReason).toContain("same-day re-entry blocked");
+  });
+
+  test("allows entry when no prior buy exists today", async () => {
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(
+      makeSignal({
+        ticker: TICKER,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.84,
+        estimatedProb: 0.58,
+        edge: 0,
+      }),
+      50000
+    );
+
+    expect(skipReason).toBeNull();
+  });
+
+  test("guard disabled — re-entry is allowed", async () => {
+    mockBotConfig.sameDayTickerEntryOnce = false;
+    const db = getDb();
+    db.insert(orders).values({
+      orderId: "prior-no-buy-2",
+      ticker: TICKER,
+      action: "buy",
+      side: "no",
+      limitPrice: 82,
+      quantity: 31,
+      filledQuantity: 31,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: `${TODAY}T19:03:20.000Z`,
+      updatedAt: `${TODAY}T19:03:20.000Z`,
+    }).run();
+    db.insert(orders).values({
+      orderId: "prior-no-sell-2",
+      ticker: TICKER,
+      action: "sell",
+      side: "no",
+      limitPrice: 49,
+      quantity: 31,
+      filledQuantity: 31,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: `${TODAY}T21:25:47.000Z`,
+      updatedAt: `${TODAY}T21:25:47.000Z`,
+    }).run();
+
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason, orderId } = await service.executeSignal(
+      makeSignal({
+        ticker: TICKER,
+        recommendation: "confirm_yes",
+        side: "yes",
+        marketPrice: 0.84,
+        estimatedProb: 0.58,
+        edge: 0,
+      }),
+      50000
+    );
+
+    // Guard is off: entry should succeed (orderId set, no same-day block)
+    expect(orderId).not.toBeNull();
+    expect(skipReason).toBeNull();
   });
 });

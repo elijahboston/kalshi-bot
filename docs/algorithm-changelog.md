@@ -1,7 +1,7 @@
 # Algorithm Changelog
 
 **Type:** Chronological decision log
-**Last updated:** 2026-06-23
+**Last updated:** 2026-06-23 (2)
 
 Chronological record of changes to the climate bot's decision-making — the **estimator** (probability), **sizing** (Kelly / flat / tier), **execution gates** (guards on order placement), and the **calibration feedback loop**. Newest first.
 
@@ -10,6 +10,18 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 **Areas:** `estimator` · `sizing` · `execution` · `calibration` · `discovery`
 
 ---
+
+## 2026-06-23 (2)
+
+### `execution` — Same-day ticker entry guard (`same_day_ticker_entry_once=true`)
+- **Change:** `executeSignal` now checks whether any filled/open buy already exists for the signal's ticker on today's calendar date. If one does, the entry is blocked regardless of position status (flat or open) and regardless of entry kind (confirmation or contrarian). Configurable via `same_day_ticker_entry_once` runtime knob (default `true`).
+- **Why:** Post-mortem of Jun-22 B93.5 (and Jun-21 B94.5) revealed a systematic pattern: bot enters NO, scout exits, market reverses, bot re-enters YES on the same ticker — each cycle paying spread. Confirmation entries previously bypassed cooldown entirely, so there was no intraday protection against chasing an oscillating market. 8+ tickers had 2–5 same-day entries since Jun 10. Guard blocks the re-entry, not the first entry.
+- **Knob:** `same_day_ticker_entry_once` (runtime, ships enabled)
+
+### `execution` — Minimum hold before scout exits (`exit_min_hold_seconds=1200`)
+- **Change:** `evaluateExit` now suppresses discretionary exits (edge reversal, conviction collapse, time decay) within the first `exitMinHoldSeconds` seconds after a position opens. Stop-loss is exempt and fires immediately regardless. Default 1200 = 20 minutes.
+- **Why:** On Jun-22 B93.5, a confirmation YES entry at 84¢ was scouted at 59¢ just 4 minutes later — the position settled YES (100¢), costing $9 vs holding. The conviction-floor check that fired was reacting to short-term market microstructure noise, not a genuine direction change. 20 minutes is enough for confirmation-era markets to stabilize while still allowing the scout to catch real reversals later.
+- **Knob:** `exit_min_hold_seconds` (runtime, ships at 1200)
 
 ## 2026-06-23
 

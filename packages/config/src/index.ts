@@ -154,6 +154,17 @@ export interface BotConfig {
      * below this fraction of available balance. 0 = disabled.
      * Example: 0.15 = pause if down >15% today. */
     maxDailyLossPct: number;
+    /** Block any new buy on a ticker if a buy already exists for that ticker
+     * on today's calendar date. Prevents re-entry chasing on volatile markets
+     * where the bot exits then re-enters the same ticker multiple times
+     * (Jun-22 B93.5 pattern). Always applies, including confirmation entries. */
+    sameDayTickerEntryOnce: boolean;
+    /** Minimum seconds after position open before discretionary exits (edge
+     * reversal, conviction floor, time decay) can fire. Stop-loss is exempt.
+     * Prevents scout exits from cutting a just-entered position on noise
+     * (Jun-22 B93.5 YES: exited at 59¢ 4 minutes after 84¢ entry; settled 100¢).
+     * Default: 1200 (20 min). 0 = disabled. */
+    exitMinHoldSeconds: number;
 
     // ── Sigma floor (win-rate-80-plan #4) ──
     /** Floor on the CDF sigma as a fraction of bracket width (tails use width 1.0). Prevents the (possibly overfit) empirical-sigma blend from collapsing the CDF into overconfidence on tight near-mean brackets. 0 = disabled. Applied before observation adjustments — post-peak obs knowledge (N3) is real information and may deliberately go below it. */
@@ -338,6 +349,8 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   max_event_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxEventExposurePctOfBalance = n; },
   adjacent_bracket_guard_enabled: (c, v) => { c.bot.adjacentBracketGuardEnabled = v === "true" || v === "1"; },
   max_daily_loss_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxDailyLossPct = n; },
+  same_day_ticker_entry_once: (c, v) => { c.bot.sameDayTickerEntryOnce = v === "true" || v === "1"; },
+  exit_min_hold_seconds: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.exitMinHoldSeconds = n; },
   confirmation_exit_conviction_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationExitConvictionFloor = n; },
   ultra_sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperHorizonHours = n; },
   ultra_sniper_edge_discount: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperEdgeDiscount = n; },
@@ -440,6 +453,8 @@ export function loadConfig(): BotConfig {
       maxEventExposurePctOfBalance: envNum("MAX_EVENT_EXPOSURE_PCT_OF_BALANCE", 0),
       adjacentBracketGuardEnabled: envBool("ADJACENT_BRACKET_GUARD_ENABLED", true),
       maxDailyLossPct: envNum("MAX_DAILY_LOSS_PCT", 0.15),
+      sameDayTickerEntryOnce: envBool("SAME_DAY_TICKER_ENTRY_ONCE", true),
+      exitMinHoldSeconds: envNum("EXIT_MIN_HOLD_SECONDS", 1200),
       // Confirmation exit policy (2026-06-06 churn fix)
       confirmationExitConvictionFloor: envNum("CONFIRMATION_EXIT_CONVICTION_FLOOR", 0.60),
       // Ultra-sniper window (win-rate-80-plan #8) — ships dark; runtime row enables

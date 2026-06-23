@@ -16,6 +16,7 @@ function input(overrides: Partial<ExitEvaluationInput> = {}): ExitEvaluationInpu
     currentSidePrice: 50,
     closeTime: null,
     now: Date.now(),
+    entryTime: null,
     config: DEFAULT_CONFIG,
     ...overrides,
   };
@@ -380,6 +381,67 @@ describe("evaluateExit — confirmation entry policy (2026-06-06 churn fix)", ()
         currentSidePrice: 50,
         config: CONFIRM_CONFIG,
       })
+    );
+    expect(reason).toContain("edge reversal");
+  });
+});
+
+describe("evaluateExit — minimum hold guard (Jun-22 B93.5 fix)", () => {
+  const RECENT = new Date(Date.now() - 3 * 60 * 1000).toISOString();    // 3 min ago
+  const OLD    = new Date(Date.now() - 25 * 60 * 1000).toISOString();   // 25 min ago
+  const MIN_HOLD_CONFIG = { ...DEFAULT_CONFIG, exitMinHoldSeconds: 1200 };
+
+  test("edge reversal suppressed within min hold", () => {
+    const reason = evaluateExit(
+      input({ edge: 0.01, entryTime: RECENT, config: MIN_HOLD_CONFIG })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("edge reversal fires after min hold elapsed", () => {
+    const reason = evaluateExit(
+      input({ edge: 0.01, entryTime: OLD, config: MIN_HOLD_CONFIG })
+    );
+    expect(reason).toContain("edge reversal");
+  });
+
+  test("time decay suppressed within min hold", () => {
+    const closeTime = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(); // 2h
+    const reason = evaluateExit(
+      input({ edge: 0.05, closeTime, entryTime: RECENT, config: MIN_HOLD_CONFIG })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("confirmation conviction floor suppressed within min hold", () => {
+    const reason = evaluateExit(
+      input({
+        edge: -0.1,
+        currentSidePrice: 50, // below 60¢ conviction floor
+        entryTime: RECENT,
+        entryKind: "confirmation",
+        config: { ...MIN_HOLD_CONFIG, confirmationExitConvictionFloor: 0.60 },
+      })
+    );
+    expect(reason).toBeNull();
+  });
+
+  test("stop-loss fires even within min hold", () => {
+    const reason = evaluateExit(
+      input({
+        edge: 0.01,
+        position: { quantity: 5, costBasis: 425 }, // entered at 85¢
+        currentSidePrice: 55, // −35% drawdown
+        entryTime: RECENT,
+        config: { ...MIN_HOLD_CONFIG, stopLossPct: 0.25, stopLossMinEdge: 0.05 },
+      })
+    );
+    expect(reason).toContain("stop-loss");
+  });
+
+  test("min hold disabled (0): edge reversal fires immediately", () => {
+    const reason = evaluateExit(
+      input({ edge: 0.01, entryTime: RECENT, config: { ...DEFAULT_CONFIG, exitMinHoldSeconds: 0 } })
     );
     expect(reason).toContain("edge reversal");
   });
