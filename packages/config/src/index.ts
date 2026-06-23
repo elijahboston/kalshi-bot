@@ -150,6 +150,10 @@ export interface BotConfig {
      * miss loses both legs simultaneously (KMIA Jun-15 / KDEN Jun-12 incidents).
      * Defaults true; disable via runtime_config for testing. */
     adjacentBracketGuardEnabled: boolean;
+    /** Stop all new buys for the rest of the day once today's settled P&L drops
+     * below this fraction of available balance. 0 = disabled.
+     * Example: 0.15 = pause if down >15% today. */
+    maxDailyLossPct: number;
 
     // ── Sigma floor (win-rate-80-plan #4) ──
     /** Floor on the CDF sigma as a fraction of bracket width (tails use width 1.0). Prevents the (possibly overfit) empirical-sigma blend from collapsing the CDF into overconfidence on tight near-mean brackets. 0 = disabled. Applied before observation adjustments — post-peak obs knowledge (N3) is real information and may deliberately go below it. */
@@ -333,6 +337,7 @@ const RUNTIME_CONFIG_MAP: Record<string, (config: BotConfig, value: string) => v
   max_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxExposurePctOfBalance = n; },
   max_event_exposure_pct_of_balance: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxEventExposurePctOfBalance = n; },
   adjacent_bracket_guard_enabled: (c, v) => { c.bot.adjacentBracketGuardEnabled = v === "true" || v === "1"; },
+  max_daily_loss_pct: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.maxDailyLossPct = n; },
   confirmation_exit_conviction_floor: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.confirmationExitConvictionFloor = n; },
   ultra_sniper_horizon_hours: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperHorizonHours = n; },
   ultra_sniper_edge_discount: (c, v) => { const n = Number(v); if (!Number.isNaN(n)) c.bot.ultraSniperEdgeDiscount = n; },
@@ -434,6 +439,7 @@ export function loadConfig(): BotConfig {
       maxExposurePctOfBalance: envNum("MAX_EXPOSURE_PCT_OF_BALANCE", 0),
       maxEventExposurePctOfBalance: envNum("MAX_EVENT_EXPOSURE_PCT_OF_BALANCE", 0),
       adjacentBracketGuardEnabled: envBool("ADJACENT_BRACKET_GUARD_ENABLED", true),
+      maxDailyLossPct: envNum("MAX_DAILY_LOSS_PCT", 0.15),
       // Confirmation exit policy (2026-06-06 churn fix)
       confirmationExitConvictionFloor: envNum("CONFIRMATION_EXIT_CONVICTION_FLOOR", 0.60),
       // Ultra-sniper window (win-rate-80-plan #8) — ships dark; runtime row enables

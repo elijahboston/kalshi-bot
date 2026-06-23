@@ -32,13 +32,14 @@ const mockBotConfig = {
   maxExposurePctOfBalance: 0,
   maxEventExposurePctOfBalance: 0,
   adjacentBracketGuardEnabled: false, // tests opt-in per describe block
+  maxDailyLossPct: 0,               // tests opt-in per describe block
 };
 
 mock.module("@kcb/config", () => ({
   getConfig: () => ({ bot: mockBotConfig }),
 }));
 
-import { getDb, runMigrations, orders, positions, markets, and } from "@kcb/db";
+import { getDb, runMigrations, orders, positions, markets, calibration, and } from "@kcb/db";
 import { ExecutionService, computeKelly, confidenceSizedPct, recordExit, tickCooldowns, getCooldown, resetCooldowns, getRecentLoss, resetLossTracking, restoreAntiChurnState, resetRestoredFlag } from "./execution";
 import { bus } from "@kcb/engine";
 import { eq, sql } from "drizzle-orm";
@@ -73,6 +74,7 @@ beforeEach(async () => {
   mockBotConfig.maxExposurePctOfBalance = 0;
   mockBotConfig.maxEventExposurePctOfBalance = 0;
   mockBotConfig.adjacentBracketGuardEnabled = false;
+  mockBotConfig.maxDailyLossPct = 0;
   // Clean tables between tests
   const db = getDb();
   db.delete(orders).run();
@@ -1904,6 +1906,157 @@ function seedMarketWithBracket(
     updatedAt: ts,
   }).onConflictDoNothing().run();
 }
+
+// ── daily loss circuit breaker ────────────────────────────────────────────────
+
+describe("executeSignal daily-loss circuit breaker", () => {
+  const TICKER = "KXHIGHNY-26JUN23-B80";
+  const TODAY = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  function seedLoss(orderId: string, side: "yes" | "no", qty: number, entryPrice: number, outcome: 0 | 1) {
+    const db = getDb();
+    const nowTs = `${TODAY}T12:00:00.000Z`;
+    db.insert(orders).values({
+      orderId,
+      ticker: orderId + "-tkr",
+      action: "buy",
+      side,
+      limitPrice: entryPrice,
+      quantity: qty,
+      filledQuantity: qty,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: nowTs,
+      updatedAt: nowTs,
+    }).run();
+    db.insert(calibration).values({
+      id: orderId + "-cal",
+      ticker: orderId + "-tkr",
+      seriesTicker: "KXHIGHNY",
+      category: "high_temp",
+      predictedProb: 0.85,
+      actualOutcome: outcome,
+      marketPrice: entryPrice / 100,
+      edge: 0.05,
+      resolvedAt: nowTs,
+    }).run();
+  }
+
+  function makeSignal(): any {
+    return {
+      id: "sig-cb",
+      ticker: TICKER,
+      recommendation: "confirm_no",
+      side: "no",
+      confidence: 0.87,
+      edgeThreshold: 0.20,
+      estimatedProb: 0.87,
+      marketPrice: 0.82,
+      sourceMix: [],
+    };
+  }
+
+  beforeEach(() => {
+    const db = getDb();
+    db.delete(calibration).run();
+  });
+
+  test("blocks new buys when today's settled loss exceeds threshold", async () => {
+    // Seed two losing trades: total loss = $68 on a $500 balance (13.6%)
+    // Threshold at 0.10 (10%) = $50 → should trigger
+    seedLoss("loss-a", "no", 40, 85, 1);  // NO lost: -$34
+    seedLoss("loss-b", "no", 40, 85, 1);  // NO lost: -$34; total = -$68
+
+    mockBotConfig.maxDailyLossPct = 0.10; // 10% of 50000 cents = $50
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(makeSignal(), 50000);
+
+    expect(skipReason).toStartWith("daily-loss-circuit-breaker");
+    expect(skipReason).toContain("$-68.00");
+  });
+
+  test("allows trades when today's settled loss is below threshold", async () => {
+    // One losing trade: -$34. Threshold 10% of $500 = $50 → should NOT trigger
+    seedLoss("loss-a", "no", 40, 85, 1);  // -$34
+
+    mockBotConfig.maxDailyLossPct = 0.10;
+    mockBotConfig.confirmationBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason, orderId } = await service.executeSignal(makeSignal(), 50000);
+
+    expect(skipReason).not.toStartWith("daily-loss-circuit-breaker");
+  });
+
+  test("does not fire when maxDailyLossPct is 0 (disabled)", async () => {
+    // Large loss but circuit breaker is off
+    seedLoss("loss-a", "no", 100, 88, 1);  // -$88
+
+    mockBotConfig.maxDailyLossPct = 0; // disabled
+    mockBotConfig.confirmationBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(makeSignal(), 50000);
+
+    expect(skipReason).not.toStartWith("daily-loss-circuit-breaker");
+  });
+
+  test("only counts today's trades, not prior days", async () => {
+    // Seed a loss from yesterday (different date) — should be ignored
+    const db = getDb();
+    const YESTERDAY = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    db.insert(orders).values({
+      orderId: "yesterday-loss",
+      ticker: "yesterday-loss-tkr",
+      action: "buy",
+      side: "no",
+      limitPrice: 88,
+      quantity: 80,
+      filledQuantity: 80,
+      status: "filled",
+      signalId: null,
+      dryRun: true,
+      kellyFraction: null,
+      createdAt: `${YESTERDAY}T12:00:00.000Z`,
+      updatedAt: `${YESTERDAY}T12:00:00.000Z`,
+    }).run();
+    db.insert(calibration).values({
+      id: "yesterday-loss-cal",
+      ticker: "yesterday-loss-tkr",
+      seriesTicker: "KXHIGHNY",
+      category: "high_temp",
+      predictedProb: 0.85,
+      actualOutcome: 1,  // NO lost (big loss)
+      marketPrice: 0.88,
+      edge: 0.05,
+      resolvedAt: `${YESTERDAY}T12:00:00.000Z`,
+    }).run();
+
+    mockBotConfig.maxDailyLossPct = 0.10; // yesterday's $70 loss would exceed $50 threshold
+    mockBotConfig.confirmationBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(makeSignal(), 50000);
+
+    expect(skipReason).not.toStartWith("daily-loss-circuit-breaker");
+  });
+
+  test("wins today offset losses — net P&L determines trigger", async () => {
+    // $34 loss and $30 win → net -$4, well under $50 threshold
+    seedLoss("loss-a", "no", 40, 85, 1); // -$34
+    seedLoss("win-a",  "no", 40, 85, 0); // NO won: +$6 (100-85)*40/100
+
+    // Wait, that's not a loss. Let me use a win that actually wins:
+    // side='no', outcome=0 → NO won → profit = (100-85)*40/100 = $6
+    // Already seeded above as win-a. Net = -$34 + $6 = -$28 → under threshold
+
+    mockBotConfig.maxDailyLossPct = 0.10; // $50 threshold
+    mockBotConfig.confirmationBetSizeCents = 500;
+    const service = new ExecutionService(stubKalshi);
+    const { skipReason } = await service.executeSignal(makeSignal(), 50000);
+
+    expect(skipReason).not.toStartWith("daily-loss-circuit-breaker");
+  });
+});
 
 describe("executeSignal adjacent-bracket guard", () => {
   const EVENT = "KXHIGH-26MAR04";

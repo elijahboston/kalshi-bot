@@ -1,5 +1,5 @@
 import { getConfig } from "@kcb/config";
-import { getDb, orders, signals as signalsTable, positions, markets, eq, and, or, sql } from "@kcb/db";
+import { getDb, orders, signals as signalsTable, positions, markets, calibration, eq, and, or, sql } from "@kcb/db";
 import type { Position, Signal } from "@kcb/db";
 import { KalshiClient } from "@kcb/kalshi-client";
 import { bus, createLogger } from "@kcb/engine";
@@ -195,6 +195,42 @@ export class ExecutionService {
 
     // Check position limits
     const db = getDb();
+
+    // Daily loss circuit breaker: if today's settled P&L has already exceeded the
+    // configured loss limit, block all new buys for the rest of the day. Prevents
+    // a bad cluster of losses (bug, bad data, adverse conditions) from compounding.
+    // 0 = disabled. Threshold is maxDailyLossPct × balance (balance is in cents).
+    if (config.bot.maxDailyLossPct > 0) {
+      const [lossRow] = await db
+        .select({
+          todayPnl: sql<number>`COALESCE(SUM(
+            CASE
+              WHEN (${orders.side} = 'yes' AND ${calibration.actualOutcome} = 1)
+                OR (${orders.side} = 'no'  AND ${calibration.actualOutcome} = 0)
+              THEN  (100.0 - ${orders.limitPrice}) * ${orders.filledQuantity} / 100.0
+              ELSE -(${orders.limitPrice} * ${orders.filledQuantity} / 100.0)
+            END
+          ), 0)`,
+        })
+        .from(orders)
+        .innerJoin(calibration, eq(calibration.ticker, orders.ticker))
+        .where(
+          and(
+            eq(orders.action, "buy"),
+            eq(orders.dryRun, config.bot.dryRun),
+            sql`date(${orders.createdAt}) = date('now')`,
+            sql`${calibration.actualOutcome} IS NOT NULL`
+          )
+        );
+
+      const todayPnl = Number(lossRow?.todayPnl ?? 0);
+      const lossThresholdDollars = (config.bot.maxDailyLossPct * balance) / 100;
+      if (todayPnl < -lossThresholdDollars) {
+        const reason = `daily-loss-circuit-breaker (today: $${todayPnl.toFixed(2)} / limit: -$${lossThresholdDollars.toFixed(2)})`;
+        log.warn(`${signal.ticker}: ${reason}`);
+        return skip(reason);
+      }
+    }
     const openPositions = await db.select().from(positions);
 
     if (openPositions.length >= config.bot.maxOpenPositions) {
