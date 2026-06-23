@@ -1,7 +1,7 @@
 # Algorithm Changelog
 
 **Type:** Chronological decision log
-**Last updated:** 2026-06-22
+**Last updated:** 2026-06-23
 
 Chronological record of changes to the climate bot's decision-making — the **estimator** (probability), **sizing** (Kelly / flat / tier), **execution gates** (guards on order placement), and the **calibration feedback loop**. Newest first.
 
@@ -10,6 +10,13 @@ Each entry is intentionally terse — one line per change, with `Why:` and a lin
 **Areas:** `estimator` · `sizing` · `execution` · `calibration` · `discovery`
 
 ---
+
+## 2026-06-23
+
+### `execution` — Daily loss circuit breaker (`max_daily_loss_pct=0.15`)
+- **Change:** New portfolio-level guard in `executeSignal`. If today's settled P&L drops below `max_daily_loss_pct × balance`, all new buys are blocked for the rest of the day. Resets automatically at midnight. Enabled via runtime knob (hot-reload, no restart). Default 0.15 = block if down >15% today. 0 = disabled.
+- **Why:** Identified as a missing guardrail in `improvements/return-maximization-2026-06-22.md`. The Jun 21 side-flip bug caused an ~$100 equity drop in one day with no automated stop. While the bug is fixed, the circuit breaker defends against future adverse days (bad data, position bugs, correlated losses). At $500 balance, 15% = $75 threshold — well above normal day volatility (~$15–30) but below the ~$100 worst-case.
+- **Knob:** `max_daily_loss_pct` (runtime, ships enabled at 0.15)
 
 ## 2026-06-22
 
