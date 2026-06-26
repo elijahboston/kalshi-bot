@@ -277,11 +277,14 @@ export const performanceRoutes = new Elysia({ prefix: "/api/performance" })
           traded: calibration.traded,
           resolvedAt: calibration.resolvedAt,
           // Side we actually bet on — YES or NO — from the most recent buy order.
+          // Written as raw SQL to avoid Drizzle stripping table qualifiers inside
+          // subquery sql`` templates (both sides of the WHERE clause collapse to
+          // the bare "ticker" column name, making the predicate always-true).
           tradedSide: sql<string | null>`(
-            SELECT ${orders.side} FROM ${orders}
-            WHERE ${orders.ticker} = ${calibration.ticker}
-              AND ${orders.action} = 'buy'
-            ORDER BY ${orders.createdAt} DESC
+            SELECT o.side FROM orders o
+            WHERE o.ticker = calibration.ticker
+              AND o.action = 'buy'
+            ORDER BY o.created_at DESC
             LIMIT 1
           )`,
         })
