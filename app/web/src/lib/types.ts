@@ -182,6 +182,8 @@ export interface Resolution {
   realizedPnl: number | null
   traded: boolean
   resolvedAt: string
+  /** Side we bet on: "yes" | "no" | null (if we didn't trade) */
+  tradedSide: string | null
 }
 
 /** Log entry from GET /api/logs and WS "log" event */

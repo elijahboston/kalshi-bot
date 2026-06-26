@@ -276,6 +276,14 @@ export const performanceRoutes = new Elysia({ prefix: "/api/performance" })
           realizedPnl: calibration.realizedPnl,
           traded: calibration.traded,
           resolvedAt: calibration.resolvedAt,
+          // Side we actually bet on — YES or NO — from the most recent buy order.
+          tradedSide: sql<string | null>`(
+            SELECT ${orders.side} FROM ${orders}
+            WHERE ${orders.ticker} = ${calibration.ticker}
+              AND ${orders.action} = 'buy'
+            ORDER BY ${orders.createdAt} DESC
+            LIMIT 1
+          )`,
         })
         .from(calibration)
         .where(where)

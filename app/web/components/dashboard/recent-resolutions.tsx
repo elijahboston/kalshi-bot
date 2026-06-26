@@ -1,3 +1,4 @@
+import React from "react"
 import { Link } from "@tanstack/react-router"
 import { Target, Check, X } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
@@ -10,6 +11,12 @@ import {
   TableCell,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useApiStore } from "@/src/lib/store"
 import { fmtPrice, fmtPnl, fmtPct, fmtEdge, fmtRelTime } from "@/src/lib/format"
@@ -32,6 +39,40 @@ export function resolutionSummary(resolutions: Resolution[]): ResolutionSummary 
     else if (r.realizedPnl < 0) losses++
   }
   return { wins, losses, netPnl }
+}
+
+/** Column header with a hover tooltip. */
+function ColHead({
+  children,
+  tip,
+  align,
+  className,
+}: {
+  children: React.ReactNode
+  tip: string
+  align?: "right"
+  className?: string
+}) {
+  return (
+    <TableHead
+      className={cn(
+        "h-9 text-[11px] font-semibold uppercase tracking-widest",
+        align === "right" && "text-right",
+        className,
+      )}
+    >
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-default underline decoration-dotted decoration-muted-foreground/40 underline-offset-2">
+            {children}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-56 text-xs">
+          {tip}
+        </TooltipContent>
+      </Tooltip>
+    </TableHead>
+  )
 }
 
 interface RecentResolutionsProps {
@@ -86,36 +127,40 @@ export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps
         ) : (
           <>
             <div className="overflow-x-auto">
+              <TooltipProvider delayDuration={200}>
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
-                    <TableHead className="h-9 pl-5 text-[11px] font-semibold uppercase tracking-widest">
+                    <ColHead className="pl-5" tip="Kalshi market ticker for this resolution">
                       Ticker
-                    </TableHead>
-                    <TableHead className="h-9 text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead tip="Forecast type (high temp, low temp, etc.)">
                       Category
-                    </TableHead>
-                    <TableHead className="h-9 text-right text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead tip="Which side the bot bet on (YES or NO)">
                       Predicted
-                    </TableHead>
-                    <TableHead className="h-9 text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead align="right" tip="Model's estimated probability of YES at signal time (0–100%)">
+                      Est. Prob
+                    </ColHead>
+                    <ColHead tip="How the market actually settled">
                       Actual
-                    </TableHead>
-                    <TableHead className="h-9 text-right text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead align="right" tip="Market price of YES at signal time (what the market implied as the probability of YES)">
                       Mkt Price
-                    </TableHead>
-                    <TableHead className="h-9 text-right text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead align="right" tip="Model edge at signal time: Est. Prob minus Mkt Price (positive = model saw value)">
                       Edge
-                    </TableHead>
-                    <TableHead className="h-9 text-right text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead align="right" tip="Realized profit / loss on this trade in dollars">
                       P&L
-                    </TableHead>
-                    <TableHead className="h-9 text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead tip="Whether the bot placed a trade on this market">
                       Traded
-                    </TableHead>
-                    <TableHead className="h-9 pr-5 text-right text-[11px] font-semibold uppercase tracking-widest">
+                    </ColHead>
+                    <ColHead className="pr-5" align="right" tip="When the market resolved">
                       Resolved
-                    </TableHead>
+                    </ColHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -126,6 +171,23 @@ export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps
                       </TableCell>
                       <TableCell className="py-2.5 text-xs capitalize text-muted-foreground">
                         {r.category.replace("_", " ")}
+                      </TableCell>
+                      <TableCell className="py-2.5">
+                        {r.tradedSide ? (
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "h-5 px-1.5 text-[10px] font-bold uppercase tracking-wide",
+                              r.tradedSide === "yes"
+                                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+                                : "border-amber-500/30 bg-amber-500/10 text-amber-500"
+                            )}
+                          >
+                            {r.tradedSide}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground/50">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="py-2.5 text-right font-mono text-xs tabular-nums text-foreground">
                         {fmtPct(r.predictedProb)}
@@ -178,6 +240,7 @@ export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps
                   ))}
                 </TableBody>
               </Table>
+              </TooltipProvider>
             </div>
             {viewAllLink ? (
               <div className="border-t border-border px-5 py-2.5">
