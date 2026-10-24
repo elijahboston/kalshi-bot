@@ -47,9 +47,9 @@ The **performance review** (10:00am) runs Claude Code headless: wins scoreboard 
 
 ```sh
 # Make scripts executable
-chmod +x /Users/elijah/projects/kalshi-bot/scripts/follow-ups-sweep.sh
-chmod +x /Users/elijah/projects/kalshi-bot/scripts/db-snapshot.sh
-chmod +x /Users/elijah/projects/kalshi-bot/scripts/daily-perf-review.sh
+chmod +x /path/to/kalshi-bot/scripts/follow-ups-sweep.sh
+chmod +x /path/to/kalshi-bot/scripts/db-snapshot.sh
+chmod +x /path/to/kalshi-bot/scripts/daily-perf-review.sh
 
 mkdir -p ~/Library/LaunchAgents
 
@@ -61,12 +61,12 @@ cat > ~/Library/LaunchAgents/com.elijah.kalshi-bot.follow-ups.plist <<'EOF'
 <dict>
     <key>Label</key><string>com.elijah.kalshi-bot.follow-ups</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/bash</string><string>/Users/elijah/projects/kalshi-bot/scripts/follow-ups-sweep.sh</string></array>
-    <key>WorkingDirectory</key><string>/Users/elijah/projects/kalshi-bot</string>
+    <array><string>/bin/bash</string><string>/path/to/kalshi-bot/scripts/follow-ups-sweep.sh</string></array>
+    <key>WorkingDirectory</key><string>/path/to/kalshi-bot</string>
     <key>StartCalendarInterval</key>
     <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>53</integer></dict>
-    <key>StandardOutPath</key><string>/Users/elijah/projects/kalshi-bot/logs/follow-ups-launchd.log</string>
-    <key>StandardErrorPath</key><string>/Users/elijah/projects/kalshi-bot/logs/follow-ups-launchd.log</string>
+    <key>StandardOutPath</key><string>/path/to/kalshi-bot/logs/follow-ups-launchd.log</string>
+    <key>StandardErrorPath</key><string>/path/to/kalshi-bot/logs/follow-ups-launchd.log</string>
     <key>ProcessType</key><string>Background</string>
 </dict>
 </plist>
@@ -80,12 +80,12 @@ cat > ~/Library/LaunchAgents/com.elijah.kalshi-bot.db-snapshot.plist <<'EOF'
 <dict>
     <key>Label</key><string>com.elijah.kalshi-bot.db-snapshot</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/bash</string><string>/Users/elijah/projects/kalshi-bot/scripts/db-snapshot.sh</string></array>
-    <key>WorkingDirectory</key><string>/Users/elijah/projects/kalshi-bot</string>
+    <array><string>/bin/bash</string><string>/path/to/kalshi-bot/scripts/db-snapshot.sh</string></array>
+    <key>WorkingDirectory</key><string>/path/to/kalshi-bot</string>
     <key>StartCalendarInterval</key>
     <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>55</integer></dict>
-    <key>StandardOutPath</key><string>/Users/elijah/projects/kalshi-bot/logs/db-snapshot-launchd.log</string>
-    <key>StandardErrorPath</key><string>/Users/elijah/projects/kalshi-bot/logs/db-snapshot-launchd.log</string>
+    <key>StandardOutPath</key><string>/path/to/kalshi-bot/logs/db-snapshot-launchd.log</string>
+    <key>StandardErrorPath</key><string>/path/to/kalshi-bot/logs/db-snapshot-launchd.log</string>
     <key>ProcessType</key><string>Background</string>
 </dict>
 </plist>
@@ -99,12 +99,12 @@ cat > ~/Library/LaunchAgents/com.elijah.kalshi-bot.daily-perf-review.plist <<'EO
 <dict>
     <key>Label</key><string>com.elijah.kalshi-bot.daily-perf-review</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/bash</string><string>/Users/elijah/projects/kalshi-bot/scripts/daily-perf-review.sh</string></array>
-    <key>WorkingDirectory</key><string>/Users/elijah/projects/kalshi-bot</string>
+    <array><string>/bin/bash</string><string>/path/to/kalshi-bot/scripts/daily-perf-review.sh</string></array>
+    <key>WorkingDirectory</key><string>/path/to/kalshi-bot</string>
     <key>StartCalendarInterval</key>
     <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
-    <key>StandardOutPath</key><string>/Users/elijah/projects/kalshi-bot/logs/daily-perf-review-launchd.log</string>
-    <key>StandardErrorPath</key><string>/Users/elijah/projects/kalshi-bot/logs/daily-perf-review-launchd.log</string>
+    <key>StandardOutPath</key><string>/path/to/kalshi-bot/logs/daily-perf-review-launchd.log</string>
+    <key>StandardErrorPath</key><string>/path/to/kalshi-bot/logs/daily-perf-review-launchd.log</string>
     <key>ProcessType</key><string>Background</string>
 </dict>
 </plist>
@@ -128,7 +128,7 @@ Once launchd is confirmed, delete any in-session cron duplicate (`CronList` → 
 
 > [Scheduled daily follow-ups check — kalshi-bot]
 >
-> You are running the scheduled morning follow-ups sweep for the Kalshi climate bot. Work from /Users/elijah/projects/kalshi-bot. You have FULL AUTONOMY within the guardrails below — the user (Elijah) pre-authorized acting on due items without asking.
+> You are running the scheduled morning follow-ups sweep for the Kalshi climate bot. Work from /path/to/kalshi-bot. You have FULL AUTONOMY within the guardrails below — the user (Elijah) pre-authorized acting on due items without asking.
 >
 > 1. Read docs/follow-ups.md. Compare each row's Due column to today's date (also handle "weekly" rows by checking the Log for the last sweep ≥7 days ago).
 > 2. For every due/overdue item, run its exact Check (sqlite3 against ./data/kalshi-bot.db, log greps, or the `wins` command logic — you can run the REPL handlers via `bun -e` imports as needed). The live DB is at ./data/kalshi-bot.db; bot logs at logs/bot.log; the regime boundary for all measurement is 2026-06-05T20:00Z.

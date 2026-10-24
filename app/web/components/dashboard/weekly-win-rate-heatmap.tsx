@@ -63,10 +63,12 @@ export function buildGrid(
 export function intensityClass(stat: DailyWinRate | null): string {
   if (!stat || stat.total === 0) return "bg-muted"
   const r = stat.winRate
-  if (r < 0.25) return "bg-[hsl(152_60%_42%/0.15)]"
-  if (r < 0.5) return "bg-[hsl(152_60%_42%/0.35)]"
-  if (r < 0.75) return "bg-[hsl(152_60%_42%/0.6)]"
-  if (r < 1) return "bg-[hsl(152_60%_42%/0.85)]"
+  // Below 50% → red gradient (deeper red = worse)
+  if (r < 0.25) return "bg-[hsl(4_70%_45%)]"
+  if (r < 0.5)  return "bg-[hsl(4_70%_45%/0.45)]"
+  // 50% and above → green gradient (deeper green = better)
+  if (r < 0.75) return "bg-[hsl(152_60%_42%/0.45)]"
+  if (r < 1)    return "bg-[hsl(152_60%_42%/0.85)]"
   return "bg-[hsl(152_60%_42%)]"
 }
 
@@ -117,12 +119,11 @@ export function WeeklyWinRateHeatmap() {
   }
 
   const intensitySwatches: Array<DailyWinRate | null> = [
+    { date: "", total: 1, wins: 0, winRate: 0.1 },
+    { date: "", total: 1, wins: 0, winRate: 0.35 },
     null,
-    { date: "", total: 1, wins: 0, winRate: 0.2 },
-    { date: "", total: 1, wins: 0, winRate: 0.4 },
-    { date: "", total: 1, wins: 0, winRate: 0.6 },
-    { date: "", total: 1, wins: 0, winRate: 0.9 },
-    { date: "", total: 1, wins: 1, winRate: 1 },
+    { date: "", total: 1, wins: 1, winRate: 0.65 },
+    { date: "", total: 1, wins: 1, winRate: 0.9 },
   ]
 
   return (
@@ -192,14 +193,14 @@ export function WeeklyWinRateHeatmap() {
 
             {/* Legend */}
             <div className="mt-2 flex items-center justify-end gap-1.5 text-[10px] text-muted-foreground">
-              <span>Less</span>
+              <span>Loss</span>
               {intensitySwatches.map((s, i) => (
                 <span
                   key={i}
                   className={`inline-block h-[10px] w-[10px] rounded-sm ${intensityClass(s)}`}
                 />
               ))}
-              <span>More</span>
+              <span>Win</span>
             </div>
           </div>
         </CardContent>

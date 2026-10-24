@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-REPO="/Users/elijah/projects/kalshi-bot"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_BIN="/opt/homebrew/bin/claude"
 LOG="$REPO/logs/follow-ups-sweep.log"
 TODAY="$(date +%Y-%m-%d)"

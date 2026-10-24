@@ -22,3 +22,6 @@ drizzle/meta/
 
 # ops tooling
 /.sweep-paused
+
+# Claude Code local session lock
+.claude/*.lock

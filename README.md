@@ -1,5 +1,7 @@
 # Kalshi Climate Bot
 
+> **Archived (October 2026).** This project is no longer maintained. Paper-trading only; it never ran with a validated edge. Published as a reference implementation of a Kalshi trading engine with calibration tracking, audited runtime config, and headless ops tooling. Use at your own risk — nothing here is financial advice.
+
 A terminal-based trading agent for Kalshi climate prediction markets. Think `claude-code` meets a trading terminal — a persistent, interactive session you talk to.
 
 ## Architecture

@@ -180,7 +180,7 @@ export function RecentResolutions({ limit, viewAllLink }: RecentResolutionsProps
                               "h-5 px-1.5 text-[10px] font-bold uppercase tracking-wide",
                               r.tradedSide === "yes"
                                 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
-                                : "border-amber-500/30 bg-amber-500/10 text-amber-500"
+                                : "border-red-500/30 bg-red-500/10 text-red-500"
                             )}
                           >
                             {r.tradedSide}

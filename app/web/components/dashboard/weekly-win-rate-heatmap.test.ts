@@ -60,13 +60,20 @@ describe("intensityClass", () => {
     expect(intensityClass({ date: "x", total: 0, wins: 0, winRate: 0 })).toBe("bg-muted")
   })
 
-  test("win rate maps to five buckets", () => {
+  test("below 50% maps to red buckets, 50%+ maps to green buckets", () => {
     const stat = (r: number): DailyWinRate => ({ date: "x", total: 1, wins: 0, winRate: r })
-    expect(intensityClass(stat(0))).toBe("bg-[hsl(152_60%_42%/0.15)]")
-    expect(intensityClass(stat(0.2))).toBe("bg-[hsl(152_60%_42%/0.15)]")
-    expect(intensityClass(stat(0.3))).toBe("bg-[hsl(152_60%_42%/0.35)]")
-    expect(intensityClass(stat(0.6))).toBe("bg-[hsl(152_60%_42%/0.6)]")
+    // red: < 25%
+    expect(intensityClass(stat(0))).toBe("bg-[hsl(4_70%_45%)]")
+    expect(intensityClass(stat(0.2))).toBe("bg-[hsl(4_70%_45%)]")
+    // red: 25–49%
+    expect(intensityClass(stat(0.3))).toBe("bg-[hsl(4_70%_45%/0.45)]")
+    expect(intensityClass(stat(0.49))).toBe("bg-[hsl(4_70%_45%/0.45)]")
+    // green: 50–74%
+    expect(intensityClass(stat(0.5))).toBe("bg-[hsl(152_60%_42%/0.45)]")
+    expect(intensityClass(stat(0.6))).toBe("bg-[hsl(152_60%_42%/0.45)]")
+    // green: 75–99%
     expect(intensityClass(stat(0.85))).toBe("bg-[hsl(152_60%_42%/0.85)]")
+    // green: 100%
     expect(intensityClass(stat(1))).toBe("bg-[hsl(152_60%_42%)]")
   })
 })

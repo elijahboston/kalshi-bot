@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-REPO="/Users/elijah/projects/kalshi-bot"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_BIN="/opt/homebrew/bin/claude"
 LOG="$REPO/logs/daily-perf-review.log"
 TODAY="$(date +%Y-%m-%d)"
@@ -52,7 +52,7 @@ set +e
 "$CLAUDE_BIN" -p \
   --dangerously-skip-permissions \
   --max-turns 60 \
-  "You are the scheduled daily performance review for the kalshi-bot (running headless via launchd — no user to ask; skip CronCreate/CronList steps). Working directory: /Users/elijah/projects/kalshi-bot. Regime boundary for all measurements: 2026-06-05T20:00Z.
+  "You are the scheduled daily performance review for the kalshi-bot (running headless via launchd — no user to ask; skip CronCreate/CronList steps). Working directory: $REPO. Regime boundary for all measurements: 2026-06-05T20:00Z.
 
 ## Step 1 — Bot health
 Run: bun ops status
@@ -94,8 +94,8 @@ End your response (stdout) with exactly one line:
   PERF-REVIEW: <win_rate>% (n=<n>) pnl=<pnl> | actions: <list or 'none'>
 
 ## Step 8 — Obsidian daily note
-Write a concise daily summary to the Obsidian vault. The vault is at /Users/elijah/notes/brain/.
-Target path: /Users/elijah/notes/brain/Projects/ClimateBot/Daily Logs/<TODAY>-daily-log.md
+Write a concise daily summary to the Obsidian vault. The vault is at $OBSIDIAN_VAULT (set OBSIDIAN_VAULT in the environment; skip this step if unset).
+Target path: $OBSIDIAN_VAULT/Projects/ClimateBot/Daily Logs/<TODAY>-daily-log.md
 (replace <TODAY> with today's YYYY-MM-DD date)
 
 Check whether that file already exists (use the Read tool or Bash ls):

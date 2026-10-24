@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-REPO="/Users/elijah/projects/kalshi-bot"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB="$REPO/data/kalshi-bot.db"
 SNAP_DIR="$REPO/data/snapshots"
 LOG="$REPO/logs/db-snapshot.log"
